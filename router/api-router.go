@@ -43,6 +43,8 @@ func SetApiRouter(router *gin.Engine) {
 			perfMetricsRoute.GET("", controller.GetPerfMetrics)
 		}
 		apiRouter.GET("/rankings", middleware.HeaderNavModuleAuth("rankings"), controller.GetRankings)
+		apiRouter.GET("/rankings/users", middleware.DisableCache(), middleware.HeaderNavModuleAuth("rankings"), controller.GetUserRankings)
+		apiRouter.GET("/channel/probes/status", middleware.DisableCache(), middleware.HeaderNavModuleAuth("channelStatus"), controller.GetPublicChannelProbeStatus)
 		apiRouter.GET("/verification", middleware.EmailVerificationRateLimit(), middleware.TurnstileCheck(), controller.SendEmailVerification)
 		apiRouter.GET("/reset_password", middleware.CriticalRateLimit(), middleware.TurnstileCheck(), controller.SendPasswordResetEmail)
 		apiRouter.POST("/user/reset", middleware.CriticalRateLimit(), anonymousRequestBodyLimit, controller.ResetPassword)
@@ -98,6 +100,8 @@ func SetApiRouter(router *gin.Engine) {
 				selfRoute.POST("/sessions/revoke-others", middleware.DisableCache(), controller.RevokeOtherLoginSessions)
 				selfRoute.GET("/self/groups", controller.GetUserGroups)
 				selfRoute.GET("/self", controller.GetSelf)
+				selfRoute.GET("/self/ranking", controller.GetRankingParticipation)
+				selfRoute.PUT("/self/ranking", middleware.CriticalRateLimit(), controller.UpdateRankingParticipation)
 				selfRoute.GET("/models", controller.GetUserModels)
 				selfRoute.PUT("/self", middleware.CriticalRateLimit(), middleware.DisableCache(), controller.UpdateSelf)
 				selfRoute.DELETE("/self", middleware.DisableCache(), controller.DeleteSelf)

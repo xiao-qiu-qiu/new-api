@@ -87,6 +87,7 @@ func TestHardDeleteUserPublishesTombstoneAndPurgesAuthenticationData(t *testing.
 		TelegramId: "hard-delete-success-telegram",
 	}
 	require.NoError(t, DB.Create(&user).Error)
+	require.NoError(t, SetUserRankingPreference(t.Context(), user.Id, true))
 	require.NoError(t, DB.Transaction(func(tx *gorm.DB) error {
 		return ClaimExternalIdentityWithTx(tx, ExternalIdentityProviderTelegram, user.TelegramId, user.Id)
 	}))
@@ -136,6 +137,10 @@ func TestHardDeleteUserPublishesTombstoneAndPurgesAuthenticationData(t *testing.
 	require.NoError(t, err)
 	assert.Equal(t, "2", committed)
 	assert.False(t, server.Exists(getUserCacheKey(user.Id)))
+	preference, err := GetUserRankingPreference(t.Context(), user.Id)
+	require.NoError(t, err)
+	assert.False(t, preference.Participating, "deleted user IDs must not retain consent")
+	assert.False(t, preference.Prompted)
 }
 
 func TestIncrementFailedAttemptsCountsConcurrentFailures(t *testing.T) {

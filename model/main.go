@@ -341,6 +341,10 @@ func migrateDB() error {
 
 	err := DB.AutoMigrate(
 		&Channel{},
+		&ChannelProbe{},
+		&ChannelProbeResult{},
+		&ChannelProbeMinute{},
+		&UserRankingPreference{},
 		&Token{},
 		&User{},
 		&UserSession{},
@@ -378,6 +382,9 @@ func migrateDB() error {
 		&UserAccessToken{},
 	)
 	if err != nil {
+		return err
+	}
+	if err := MigrateChannelProbes(DB); err != nil {
 		return err
 	}
 	if err := InitializeUserAuthVersions(); err != nil {

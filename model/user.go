@@ -1018,6 +1018,9 @@ func (user *User) HardDelete() (int64, error) {
 		if err := deleteUserAuthenticationData(tx, user.Id); err != nil {
 			return err
 		}
+		if err := tx.Where("user_id = ?", user.Id).Delete(&UserRankingPreference{}).Error; err != nil {
+			return err
+		}
 		return tx.Unscoped().Delete(user).Error
 	})
 	if err != nil {

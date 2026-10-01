@@ -116,6 +116,25 @@ func TestHeaderNavModuleAuthRequiresLoginForRankings(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, recorder.Code)
 }
 
+func TestHeaderNavRankingsConsentIsIndependentOfViewingAccess(t *testing.T) {
+	for _, test := range []struct {
+		name, config string
+		loggedIn     bool
+		want         int
+	}{
+		{"anonymous defaults to login", "", false, http.StatusUnauthorized},
+		{"logged in without consent can view", "", true, http.StatusOK},
+		{"explicit public access", `{"rankings":{"enabled":true,"requireAuth":false}}`, false, http.StatusOK},
+		{"disabled rejects logged in", `{"rankings":false}`, true, http.StatusForbidden},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			withHeaderNavModules(t, test.config)
+			response := performHeaderNavRequest(t, HeaderNavModuleAuth("rankings"), test.loggedIn)
+			require.Equal(t, test.want, response.Code)
+		})
+	}
+}
+
 func TestHeaderNavModuleAuthRejectsLegacyDisabledModule(t *testing.T) {
 	raw := `{"rankings":false}`
 	withHeaderNavModules(t, raw)

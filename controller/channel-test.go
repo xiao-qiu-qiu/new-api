@@ -36,9 +36,11 @@ import (
 )
 
 type testResult struct {
-	context     *gin.Context
-	localErr    error
-	newAPIError *types.NewAPIError
+	context       *gin.Context
+	localErr      error
+	newAPIError   *types.NewAPIError
+	probeObserver *service.ChannelProbeObserver
+	relayInfo     *relaycommon.RelayInfo
 }
 
 func normalizeChannelTestEndpoint(channel *model.Channel, endpointType string) string {
@@ -69,7 +71,7 @@ func resolveChannelTestUserID(c *gin.Context) (int, error) {
 	return rootUser.Id, nil
 }
 
-func testChannel(ctx context.Context, channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool) testResult {
+func testChannel(ctx context.Context, channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool) (testOutcome testResult) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -92,6 +94,15 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	}
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
+	probeMode, _ := ctx.Value(channelProbeContextKey{}).(bool)
+	if probeMode {
+		// The scheduled probe observes streaming writes without retaining the
+		// response body, user context, or consume-log payload.
+		w.Body = nil
+		observer := service.NewChannelProbeObserver(c.Writer)
+		c.Writer = observer
+		defer func() { testOutcome.probeObserver = observer }()
+	}
 
 	testModel = strings.TrimSpace(testModel)
 	if testModel == "" {
@@ -151,22 +162,26 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	}
 	c.Request = httptest.NewRequestWithContext(ctx, http.MethodPost, requestPath, nil)
 
-	cache, err := model.GetUserCache(testUserID)
-	if err != nil {
-		return testResult{
-			localErr:    err,
-			newAPIError: nil,
+	if !probeMode {
+		cache, err := model.GetUserCache(testUserID)
+		if err != nil {
+			return testResult{
+				localErr:    err,
+				newAPIError: nil,
+			}
 		}
+		cache.WriteContext(c)
+		c.Set("id", testUserID)
 	}
-	cache.WriteContext(c)
-	c.Set("id", testUserID)
 
 	//c.Request.Header.Set("Authorization", "Bearer "+channel.Key)
 	c.Request.Header.Set("Content-Type", "application/json")
 	c.Set("channel", channel.Type)
 	c.Set("base_url", channel.GetBaseURL())
-	group, _ := model.GetUserGroup(testUserID, false)
-	c.Set("group", group)
+	if !probeMode {
+		group, _ := model.GetUserGroup(testUserID, false)
+		c.Set("group", group)
+	}
 
 	newAPIError := middleware.SetupContextForSelectedChannel(c, channel, testModel)
 	if newAPIError != nil {
@@ -241,6 +256,17 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 
 	info.IsChannelTest = true
 	info.InitChannelMeta(c)
+	defer func() { testOutcome.relayInfo = info }()
+	if probeMode {
+		info.DisablePing = true
+		// Active monitoring generates short text streams only. Other actual
+		// request formats remain observable through the passive attempt hook.
+		switch info.RelayMode {
+		case relayconstant.RelayModeChatCompletions, relayconstant.RelayModeResponses:
+		default:
+			return testResult{context: c, localErr: errors.New("active probe requires a streaming text model")}
+		}
+	}
 
 	err = attachTestBillingRequestInput(info, request)
 	if err != nil {
@@ -294,12 +320,15 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	//logInfo.ApiKey = ""
 	common.SysLog(fmt.Sprintf("testing channel %d with model %s , info %+v ", channel.Id, testModel, info.ToString()))
 
-	priceData, err := helper.ModelPriceHelper(c, info, 0, request.GetTokenCountMeta())
-	if err != nil {
-		return testResult{
-			context:     c,
-			localErr:    err,
-			newAPIError: types.NewError(err, types.ErrorCodeModelPriceError, types.ErrOptionWithStatusCode(http.StatusBadRequest)),
+	var priceData hosttypes.PriceData
+	if !probeMode {
+		priceData, err = helper.ModelPriceHelper(c, info, 0, request.GetTokenCountMeta())
+		if err != nil {
+			return testResult{
+				context:     c,
+				localErr:    err,
+				newAPIError: types.NewError(err, types.ErrorCodeModelPriceError, types.ErrOptionWithStatusCode(http.StatusBadRequest)),
+			}
 		}
 	}
 
@@ -470,6 +499,9 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 			localErr:    respErr,
 			newAPIError: respErr,
 		}
+	}
+	if probeMode {
+		return testResult{context: c}
 	}
 	usage, usageErr := coerceTestUsage(usageA, isStream, info.GetEstimatePromptTokens())
 	if usageErr != nil {

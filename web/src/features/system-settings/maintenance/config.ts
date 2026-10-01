@@ -25,6 +25,7 @@ export type HeaderNavModulesConfig = {
   home: boolean
   console: boolean
   pricing: HeaderNavAccessConfig
+  channelStatus: HeaderNavAccessConfig
   rankings: HeaderNavAccessConfig
   docs: boolean
   about: boolean
@@ -46,6 +47,10 @@ export const HEADER_NAV_DEFAULT: HeaderNavModulesConfig = {
     requireAuth: false,
   },
   rankings: {
+    enabled: true,
+    requireAuth: true,
+  },
+  channelStatus: {
     enabled: true,
     requireAuth: false,
   },
@@ -77,6 +82,7 @@ export const SIDEBAR_MODULES_DEFAULT: SidebarModulesAdminConfig = {
   admin: {
     enabled: true,
     channel: true,
+    channelProbes: true,
     models: true,
     redemption: true,
     user: true,
@@ -100,6 +106,7 @@ const cloneHeaderNavDefault = (): HeaderNavModulesConfig => ({
   ...HEADER_NAV_DEFAULT,
   pricing: { ...HEADER_NAV_DEFAULT.pricing },
   rankings: { ...HEADER_NAV_DEFAULT.rankings },
+  channelStatus: { ...HEADER_NAV_DEFAULT.channelStatus },
 })
 
 const parseAccessModule = (
@@ -148,11 +155,16 @@ export function parseHeaderNavModules(
       ...base,
       pricing: { ...base.pricing },
       rankings: { ...base.rankings },
+      channelStatus: { ...base.channelStatus },
     }
 
     Object.entries(parsed).forEach(([key, raw]) => {
       if (key === 'pricing') {
         result.pricing = parseAccessModule(raw, base.pricing)
+        return
+      }
+      if (key === 'channelStatus') {
+        result.channelStatus = parseAccessModule(raw, base.channelStatus)
         return
       }
       if (key === 'rankings') {
