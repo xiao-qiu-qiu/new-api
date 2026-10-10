@@ -145,6 +145,15 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		newAPIError = relay.RefundFailedRequestBilling(c, relayInfo, newAPIError)
 	}()
 
+	finishGroupProbe := service.BeginPassiveGroupProbe(c, relayInfo)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			finishGroupProbe(types.NewError(errors.New("relay panic"), types.ErrorCodeBadResponse))
+			panic(recovered)
+		}
+		finishGroupProbe(newAPIError)
+	}()
+
 	retryParam := &service.RetryParam{
 		Ctx:         c,
 		TokenGroup:  relayInfo.TokenGroup,
@@ -184,16 +193,18 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 		c.Request.Body = io.NopCloser(bodyStorage)
 
-		switch relayFormat {
-		case types.RelayFormatOpenAIRealtime:
-			newAPIError = relay.WssHelper(c, relayInfo)
-		case types.RelayFormatClaude:
-			newAPIError = relay.ClaudeHelper(c, relayInfo)
-		case types.RelayFormatGemini:
-			newAPIError = geminiRelayHandler(c, relayInfo)
-		default:
-			newAPIError = relayHandler(c, relayInfo)
-		}
+		newAPIError = service.RunWithPassiveChannelProbe(c, relayInfo, channel.Id, func() *types.NewAPIError {
+			switch relayFormat {
+			case types.RelayFormatOpenAIRealtime:
+				return relay.WssHelper(c, relayInfo)
+			case types.RelayFormatClaude:
+				return relay.ClaudeHelper(c, relayInfo)
+			case types.RelayFormatGemini:
+				return geminiRelayHandler(c, relayInfo)
+			default:
+				return relayHandler(c, relayInfo)
+			}
+		})
 
 		if newAPIError == nil {
 			service.MarkRequestPolicySuccess(c, relayInfo.StreamStatus)
@@ -463,7 +474,19 @@ func RelayTask(c *gin.Context) {
 // presenters share the same durable task barrier. Its cancellation semantics
 // come from c.Request.Context: native task endpoints use the client context,
 // while the Responses bridge supplies an independently bounded context.
-func executeTaskSubmission(c *gin.Context, relayInfo *relaycommon.RelayInfo) (*taskSubmissionOutcome, *taskdto.TaskError) {
+func executeTaskSubmission(c *gin.Context, relayInfo *relaycommon.RelayInfo) (outcome *taskSubmissionOutcome, taskErr *taskdto.TaskError) {
+	finishGroupProbe := service.BeginPassiveGroupProbe(c, relayInfo)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			finishGroupProbe(types.NewError(errors.New("task submission panic"), types.ErrorCodeBadResponse))
+			panic(recovered)
+		}
+		if taskErr != nil {
+			finishGroupProbe(taskSubmissionAPIError(taskErr))
+		} else {
+			finishGroupProbe(nil)
+		}
+	}()
 	return executeTaskSubmissionWith(c, relayInfo, relay.RelayTaskSubmit)
 }
 
@@ -544,7 +567,16 @@ func executeTaskSubmissionWith(
 		c.Request.Body = io.NopCloser(bodyStorage)
 
 		stage = "submit"
-		result, taskErr = submit(c, relayInfo)
+		service.RunWithPassiveChannelProbe(c, relayInfo, channel.Id, func() *types.NewAPIError {
+			result, taskErr = submit(c, relayInfo)
+			if taskErr != nil {
+				return taskSubmissionAPIError(taskErr)
+			}
+			if result == nil || (result.Immediate != nil && result.Immediate.Status == model.TaskStatusFailure) {
+				return types.NewError(errors.New("task submission failed"), types.ErrorCodeBadResponse)
+			}
+			return nil
+		})
 		if requestErr := c.Request.Context().Err(); requestErr != nil {
 			diagnostics.cancelled("after_submit", retryParam.GetRetry()+1)
 			taskErr = service.TaskErrorWrapperLocal(requestErr, "request_cancelled", http.StatusRequestTimeout)

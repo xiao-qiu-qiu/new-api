@@ -23,10 +23,11 @@ import { requireServerSuccess } from '@/lib/server-error-message'
 import { getRankings } from '../api'
 import type { RankingPeriod } from '../types'
 
-export function useRankings(period: RankingPeriod) {
+export function useRankings(period: RankingPeriod, enabled = true) {
   return useQuery({
     queryKey: ['rankings', period],
     queryFn: async () => requireServerSuccess(await getRankings(period)),
     staleTime: 5 * 60 * 1000,
+    enabled,
   })
 }

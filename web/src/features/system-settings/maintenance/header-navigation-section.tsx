@@ -53,6 +53,8 @@ const headerNavSchema = z.object({
   console: z.boolean(),
   pricingEnabled: z.boolean(),
   pricingRequireAuth: z.boolean(),
+  channelStatusEnabled: z.boolean(),
+  channelStatusRequireAuth: z.boolean(),
   rankingsEnabled: z.boolean(),
   rankingsRequireAuth: z.boolean(),
   docs: z.boolean(),
@@ -81,6 +83,11 @@ const toFormValues = (config: HeaderNavModulesConfig): HeaderNavFormValues => ({
     config.pricing?.requireAuth === undefined
       ? HEADER_NAV_DEFAULT.pricing.requireAuth
       : Boolean(config.pricing.requireAuth),
+  channelStatusEnabled:
+    config.channelStatus?.enabled ?? HEADER_NAV_DEFAULT.channelStatus.enabled,
+  channelStatusRequireAuth:
+    config.channelStatus?.requireAuth ??
+    HEADER_NAV_DEFAULT.channelStatus.requireAuth,
   rankingsEnabled:
     config.rankings?.enabled === undefined
       ? HEADER_NAV_DEFAULT.rankings.enabled
@@ -125,6 +132,11 @@ export function HeaderNavigationSection({
         ...(config.pricing ?? HEADER_NAV_DEFAULT.pricing),
         enabled: values.pricingEnabled,
         requireAuth: values.pricingRequireAuth,
+      },
+      channelStatus: {
+        ...(config.channelStatus ?? HEADER_NAV_DEFAULT.channelStatus),
+        enabled: values.channelStatusEnabled,
+        requireAuth: values.channelStatusRequireAuth,
       },
       rankings: {
         ...(config.rankings ?? HEADER_NAV_DEFAULT.rankings),
@@ -178,7 +190,10 @@ export function HeaderNavigationSection({
   const accessModules: Array<{
     enabledKey: keyof HeaderNavFormValues
     requireAuthKey: keyof HeaderNavFormValues
-    requireAuthDependsOn: 'pricingEnabled' | 'rankingsEnabled'
+    requireAuthDependsOn:
+      | 'pricingEnabled'
+      | 'rankingsEnabled'
+      | 'channelStatusEnabled'
     title: string
     description: string
     requireAuthTitle: string
@@ -193,6 +208,17 @@ export function HeaderNavigationSection({
       requireAuthTitle: t('Require login to view models'),
       requireAuthDescription: t(
         'Visitors must authenticate before accessing the pricing directory.'
+      ),
+    },
+    {
+      enabledKey: 'channelStatusEnabled',
+      requireAuthKey: 'channelStatusRequireAuth',
+      requireAuthDependsOn: 'channelStatusEnabled',
+      title: t('Model Status'),
+      description: t('Model availability and first-token latency.'),
+      requireAuthTitle: t('Require login to view model status'),
+      requireAuthDescription: t(
+        'Visitors must authenticate before accessing model status.'
       ),
     },
     {

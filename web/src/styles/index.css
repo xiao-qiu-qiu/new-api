@@ -745,3 +745,191 @@ For commercial licensing, please contact support@quantumnous.com
     display: none;
   }
 }
+
+.model-status-glow {
+  background:
+    radial-gradient(
+      ellipse 65% 50% at 12% 14%,
+      oklch(0.78 0.13 200 / 18%),
+      transparent 75%
+    ),
+    radial-gradient(
+      ellipse 50% 45% at 88% 20%,
+      oklch(0.75 0.14 260 / 15%),
+      transparent 72%
+    ),
+    radial-gradient(
+      ellipse 45% 35% at 45% 55%,
+      oklch(0.84 0.09 165 / 10%),
+      transparent 75%
+    );
+  mask-image: linear-gradient(to bottom, black 45%, transparent 100%);
+}
+
+.dark .model-status-glow {
+  opacity: 0.65;
+}
+
+.model-status-row::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    110deg,
+    oklch(0.65 0.01 250 / 4%),
+    transparent 45%
+  );
+}
+
+.model-status-row[data-status='green']::before {
+  background: linear-gradient(
+    110deg,
+    oklch(0.72 0.13 175 / 5%),
+    transparent 45%
+  );
+}
+
+.model-status-row[data-status='yellow']::before {
+  background: linear-gradient(
+    110deg,
+    oklch(0.78 0.16 75 / 10%),
+    transparent 50%
+  );
+}
+
+.model-status-row[data-status='red']::before {
+  background: linear-gradient(
+    110deg,
+    oklch(0.62 0.18 25 / 6%),
+    transparent 45%
+  );
+}
+
+.model-status-row[data-status='timeout']::before {
+  background: linear-gradient(
+    110deg,
+    oklch(0.38 0.14 25 / 11%),
+    transparent 50%
+  );
+}
+
+.dark .model-status-row[data-status='timeout']::before {
+  background: linear-gradient(
+    110deg,
+    oklch(0.44 0.16 25 / 20%),
+    transparent 50%
+  );
+}
+
+/* Medal accents stay local to the podium; the surrounding card uses the theme. */
+.user-podium {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: end;
+  gap: 0.5rem;
+  max-width: 48rem;
+  margin: 0 auto;
+  padding: 1.75rem 1rem 0;
+  list-style: none;
+}
+
+.user-podium-place {
+  --medal: #ad7a16;
+  --medal-ink: #886010;
+  --step-height: 7rem;
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+  text-align: center;
+}
+
+.user-podium-place[data-rank='2'] {
+  --medal: #8c9aaa;
+  --medal-ink: #566678;
+  --step-height: 5.75rem;
+  grid-column: 1;
+}
+
+.user-podium-place[data-rank='3'] {
+  --medal: #b77d57;
+  --medal-ink: #955c37;
+  --step-height: 4.5rem;
+  grid-column: 3;
+}
+
+.dark .user-podium-place {
+  --medal-ink: #e8bd60;
+}
+.dark .user-podium-place[data-rank='2'] {
+  --medal-ink: #becad7;
+}
+.dark .user-podium-place[data-rank='3'] {
+  --medal-ink: #dda47f;
+}
+
+.user-podium-person {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.375rem;
+  min-width: 0;
+  padding: 0 0.125rem 0.875rem;
+}
+
+.user-podium-medal {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  margin-bottom: 0.25rem;
+  border: 1px solid color-mix(in srgb, var(--medal) 32%, transparent);
+  border-radius: 1rem;
+  color: var(--medal-ink);
+  background: color-mix(in srgb, var(--medal) 12%, var(--card));
+  box-shadow: 0 3px 10px color-mix(in srgb, var(--medal) 8%, transparent);
+}
+
+.user-podium-place[data-rank='1'] .user-podium-medal {
+  width: 3.25rem;
+  height: 3.25rem;
+}
+
+.user-podium-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  height: var(--step-height);
+  padding-top: 0.75rem;
+  border: 1px solid color-mix(in srgb, var(--medal) 28%, transparent);
+  border-bottom: 0;
+  border-radius: 0.875rem 0.875rem 0 0;
+  color: var(--medal-ink);
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--medal) 17%, var(--card)),
+    color-mix(in srgb, var(--medal) 4%, var(--card))
+  );
+  box-shadow: inset 0 2px 0 color-mix(in srgb, var(--medal) 15%, transparent);
+}
+
+@media (min-width: 640px) {
+  .user-podium {
+    gap: 0.875rem;
+    padding: 2rem 2rem 0;
+  }
+  .user-podium-place {
+    --step-height: 8rem;
+  }
+  .user-podium-place[data-rank='2'] {
+    --step-height: 6.5rem;
+  }
+  .user-podium-place[data-rank='3'] {
+    --step-height: 5.5rem;
+  }
+  .user-podium-step {
+    padding-top: 1rem;
+  }
+}
