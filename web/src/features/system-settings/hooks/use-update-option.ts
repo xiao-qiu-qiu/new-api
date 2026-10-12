@@ -33,6 +33,8 @@ const STATUS_RELATED_KEYS = new Set([
   'console_setting.recharge_store_url',
   'Notice',
   'LogConsumeEnabled',
+  'log_setting.user_export_enabled',
+  'log_setting.max_range_days',
   'QuotaPerUnit',
   'USDExchangeRate',
   'DisplayInCurrencyEnabled',
