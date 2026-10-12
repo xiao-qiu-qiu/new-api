@@ -337,6 +337,8 @@ func TestChannelProbeClientCancellationIsNotAvailabilityFailure(t *testing.T) {
 		apiErr            *types.NewAPIError
 		end               relaycommon.StreamEndReason
 		completed, failed bool
+		streamError       bool
+		endError          error
 		code              string
 	}{
 		{name: "request cancelled", ctx: ctx, code: "cancelled"},
@@ -345,13 +347,21 @@ func TestChannelProbeClientCancellationIsNotAvailabilityFailure(t *testing.T) {
 		{name: "ping failed", end: relaycommon.StreamEndReasonPingFail, code: "cancelled"},
 		{name: "completed before cancellation", ctx: ctx, end: relaycommon.StreamEndReasonDone, completed: true},
 		{name: "real upstream failure", ctx: ctx, failed: true, code: "stream_error"},
+		{name: "upstream HTTP error before disconnect", ctx: ctx, apiErr: types.NewError(errors.New("upstream HTTP 503"), types.ErrorCodeBadResponse), code: "request_failed"},
+		{name: "stream error before disconnect", ctx: ctx, streamError: true, code: "stream_error"},
+		{name: "scanner error before disconnect", ctx: ctx, end: relaycommon.StreamEndReasonScannerErr, endError: errors.New("upstream read failed"), code: "stream_error"},
+		{name: "scanner stopped by cancellation", ctx: ctx, end: relaycommon.StreamEndReasonScannerErr, endError: context.Canceled, code: "cancelled"},
+		{name: "panic before disconnect", ctx: ctx, end: relaycommon.StreamEndReasonPanic, code: "stream_error"},
 		{name: "upstream timeout", ctx: ctx, end: relaycommon.StreamEndReasonTimeout, code: "timeout"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
 			observer := service.NewChannelProbeObserver(c.Writer)
 			stream := relaycommon.NewStreamStatus()
-			stream.SetEndReason(tc.end, nil)
+			stream.SetEndReason(tc.end, tc.endError)
+			if tc.streamError {
+				stream.RecordError("upstream stream error")
+			}
 			if tc.completed {
 				stream.MarkCompleted()
 			}
@@ -360,6 +370,7 @@ func TestChannelProbeClientCancellationIsNotAvailabilityFailure(t *testing.T) {
 			}
 			result := observer.Result(tc.ctx, &relaycommon.RelayInfo{IsStream: true, StreamStatus: stream}, tc.apiErr)
 			assert.Equal(t, tc.code, result.ErrorCode)
+			assert.Equal(t, tc.code == "", result.Success)
 			before, err := service.BuildPublicChannelProbeModel(probe, probe.Model, time.Now(), 1)
 			require.NoError(t, err)
 			service.RecordPassiveChannelProbeResult([]model.ChannelProbe{probe}, result)

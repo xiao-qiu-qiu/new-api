@@ -165,14 +165,20 @@ func (w *ChannelProbeObserver) Result(ctx context.Context, info *relaycommon.Rel
 		result.ErrorCode = "timeout"
 	case w.failed || outcome.Response == relaycommon.ResponseOutcomeFailed:
 		result.ErrorCode = "stream_error"
+	case apiErr != nil && !errors.Is(apiErr, context.Canceled):
+		result.ErrorCode = "request_failed"
+	case outcome.EndReason == relaycommon.StreamEndReasonPanic:
+		result.ErrorCode = "stream_error"
+	case (outcome.HasErrors || outcome.EndReason == relaycommon.StreamEndReasonScannerErr) &&
+		outcome.EndReason != relaycommon.StreamEndReasonClientGone && outcome.EndReason != relaycommon.StreamEndReasonPingFail &&
+		!errors.Is(info.StreamStatus.EndError, context.Canceled):
+		result.ErrorCode = "stream_error"
 	case ctx != nil && errors.Is(ctx.Err(), context.Canceled) && !completedNormally:
 		result.ErrorCode = "cancelled"
 	case apiErr != nil && errors.Is(apiErr, context.Canceled):
 		result.ErrorCode = "cancelled"
 	case outcome.Response == relaycommon.ResponseOutcomeCancelled || outcome.EndReason == relaycommon.StreamEndReasonClientGone || outcome.EndReason == relaycommon.StreamEndReasonPingFail:
 		result.ErrorCode = "cancelled"
-	case apiErr != nil:
-		result.ErrorCode = "request_failed"
 	}
 	if info != nil && info.StreamStatus != nil && result.ErrorCode == "" {
 		outcome := info.StreamStatus.OutcomeSnapshot()
