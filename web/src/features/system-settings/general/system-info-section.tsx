@@ -44,12 +44,16 @@ import { SettingsPageFormActions } from '../components/settings-page-context'
 import { SettingsSection } from '../components/settings-section'
 import { useSettingsForm } from '../hooks/use-settings-form'
 import { useUpdateOption } from '../hooks/use-update-option'
+import { isValidRechargeStoreURL } from '../site/recharge-store-url'
 import { isValidTaskPublicAddress } from './task-public-address'
 
 const _systemInfoSchema = z.object({
   SystemName: z.string().min(1),
   ServerAddress: z.string().optional(),
   TaskPublicAddress: z.string().refine(isValidTaskPublicAddress),
+  console_setting: z.object({
+    recharge_store_url: z.string().trim().refine(isValidRechargeStoreURL),
+  }),
   Logo: z.string().url().optional().or(z.literal('')),
   Footer: z.string().optional(),
   About: z.string().optional(),
@@ -82,6 +86,11 @@ export function SystemInfoSection({ defaultValues }: SystemInfoSectionProps) {
     SystemName: normalizeValue(defaultValues.SystemName),
     ServerAddress: normalizeValue(defaultValues.ServerAddress),
     TaskPublicAddress: normalizeValue(defaultValues.TaskPublicAddress),
+    console_setting: {
+      recharge_store_url: normalizeValue(
+        defaultValues.console_setting?.recharge_store_url
+      ),
+    },
     Logo: normalizeValue(defaultValues.Logo),
     Footer: normalizeValue(defaultValues.Footer),
     About: normalizeValue(defaultValues.About),
@@ -105,6 +114,15 @@ export function SystemInfoSection({ defaultValues }: SystemInfoSectionProps) {
         t(
           'Enter an absolute HTTP(S) URL without credentials, query parameters, or fragments'
         ),
+    }),
+    console_setting: z.object({
+      recharge_store_url: z
+        .string()
+        .trim()
+        .refine(isValidRechargeStoreURL, {
+          error: () =>
+            t('Enter a valid HTTP(S) recharge store URL without credentials'),
+        }),
     }),
     Logo: z.string().url().optional().or(z.literal('')),
     Footer: z.string().optional(),
@@ -228,6 +246,29 @@ export function SystemInfoSection({ defaultValues }: SystemInfoSectionProps) {
                     </FormControl>
                     <FormDescription>
                       {t('URL to your logo image (optional)')}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+
+              <FormField
+                control={form.control}
+                name='console_setting.recharge_store_url'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>{t('Recharge Store URL')}</FormLabel>
+                    <FormControl>
+                      <Input
+                        type='url'
+                        placeholder='https://catfk.com/shop/40PFAHE3'
+                        {...field}
+                      />
+                    </FormControl>
+                    <FormDescription>
+                      {t(
+                        'Store shown on the Recharge page. Use HTTPS for embedding on an HTTPS site.'
+                      )}
                     </FormDescription>
                     <FormMessage />
                   </FormItem>

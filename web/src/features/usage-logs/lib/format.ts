@@ -223,14 +223,43 @@ export function getThroughputColor(
 }
 
 /**
+ * Exclude measured first-response latency from the token generation duration.
+ * Logs without that measurement retain their total-duration average.
+ */
+export function getTokensPerSecond(
+  seconds: number,
+  completionTokens: number,
+  frtMs?: number
+): number | null {
+  if (
+    !Number.isFinite(seconds) ||
+    seconds <= 0 ||
+    !Number.isFinite(completionTokens) ||
+    completionTokens <= 0
+  ) {
+    return null
+  }
+
+  let generationSeconds = seconds
+  if (frtMs != null && Number.isFinite(frtMs) && frtMs >= 0) {
+    generationSeconds -= frtMs / 1000
+  }
+  if (generationSeconds <= 0) return null
+  return completionTokens / generationSeconds
+}
+
+/**
  * Get response color using throughput only when enough output tokens exist.
  */
 export function getResponseTimeColor(
   seconds: number,
-  completionTokens: number
+  completionTokens: number,
+  frtMs?: number
 ): 'success' | 'warning' | 'danger' {
-  if (completionTokens < 100 || seconds <= 0) return getTimeColor(seconds)
-  return getThroughputColor(completionTokens / seconds)
+  if (completionTokens < 100) return getTimeColor(seconds)
+  const tokensPerSecond = getTokensPerSecond(seconds, completionTokens, frtMs)
+  if (tokensPerSecond == null) return getTimeColor(seconds)
+  return getThroughputColor(tokensPerSecond)
 }
 
 /**

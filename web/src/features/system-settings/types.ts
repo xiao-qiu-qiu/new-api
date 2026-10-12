@@ -149,6 +149,7 @@ export type SiteSettings = {
   HomePageContent: string
   ServerAddress: string
   TaskPublicAddress: string
+  'console_setting.recharge_store_url': string
   'general_setting.docs_link': string
   'legal.user_agreement': string
   'legal.privacy_policy': string

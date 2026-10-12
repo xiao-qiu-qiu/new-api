@@ -43,6 +43,9 @@ const SITE_SECTIONS = [
           HomePageContent: settings.HomePageContent,
           ServerAddress: settings.ServerAddress,
           TaskPublicAddress: settings.TaskPublicAddress,
+          console_setting: {
+            recharge_store_url: settings['console_setting.recharge_store_url'],
+          },
           general_setting: {
             docs_link: settings['general_setting.docs_link'],
           },

@@ -28,16 +28,23 @@ import { StatusBadge, type StatusVariant } from '@/components/status-badge'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
 import { getUserAvatarFallback, getUserAvatarStyle } from '@/lib/avatar'
+import { getLogCacheHitRate } from '@/lib/cache-hit-rate'
 import dayjs from '@/lib/dayjs'
 import { formatLogQuota, formatTimestampToDate } from '@/lib/format'
 
 import type { UsageLog } from '../data/schema'
-import { formatModelName, logTokenName, parseLogOther } from '../lib/format'
+import {
+  formatModelName,
+  getTokensPerSecond,
+  logTokenName,
+  parseLogOther,
+} from '../lib/format'
 import {
   getLogTypeConfig,
   isDisplayableLogType,
   isTimingLogType,
 } from '../lib/utils'
+import { LogCacheHitRate } from './log-cache-hit-rate'
 import { ModelBadge, ResponseModelDetails } from './model-badge'
 import { StreamTpsCell, TimingMetricsCell } from './timing-metrics-cell'
 import { useUsageLogsContext } from './usage-logs-provider'
@@ -128,6 +135,7 @@ export function CommonLogMobileCard<TData>(props: {
   const contentCell = props.cells.get('content')
   const channelCell = props.cells.get('channel')
   const cacheRead = other?.cache_tokens || 0
+  const cacheHitRate = getLogCacheHitRate(log, other)
   const cacheWrite =
     (other?.cache_creation_tokens_5m || 0) +
       (other?.cache_creation_tokens_1h || 0) ||
@@ -139,7 +147,8 @@ export function CommonLogMobileCard<TData>(props: {
     (log.prompt_tokens > 0 ||
       log.completion_tokens > 0 ||
       cacheRead > 0 ||
-      cacheWrite > 0)
+      cacheWrite > 0 ||
+      cacheHitRate !== null)
 
   return (
     <div className='min-w-0 space-y-2.5 text-sm leading-5'>
@@ -195,11 +204,11 @@ export function CommonLogMobileCard<TData>(props: {
                   isStream={log.is_stream}
                   isTask={other?.is_task === true}
                   isSyncTask={other?.task_sync === true}
-                  tokensPerSecond={
-                    log.use_time > 0 && log.completion_tokens > 0
-                      ? log.completion_tokens / log.use_time
-                      : null
-                  }
+                  tokensPerSecond={getTokensPerSecond(
+                    log.use_time,
+                    log.completion_tokens,
+                    log.is_stream ? other?.frt : undefined
+                  )}
                   streamStatus={other?.stream_status}
                 />
               )}
@@ -312,6 +321,7 @@ export function CommonLogMobileCard<TData>(props: {
               {t('Cache')} ↑ {cacheWrite.toLocaleString()}
             </span>
           )}
+          <LogCacheHitRate rate={cacheHitRate} />
         </div>
       )}
       {contentCell && (

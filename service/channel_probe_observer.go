@@ -148,18 +148,31 @@ func (w *ChannelProbeObserver) Result(ctx context.Context, info *relaycommon.Rel
 		value := *w.first
 		result.TTFTMS = &value
 	}
+	var outcome relaycommon.StreamOutcome
+	if info != nil {
+		outcome = info.StreamStatus.OutcomeSnapshot()
+	}
+	completedNormally := info != nil && info.IsStream && info.StreamStatus != nil && apiErr == nil && !w.failed &&
+		outcome.Response == relaycommon.ResponseOutcomeCompleted && !outcome.HasErrors && info.StreamStatus.EndError == nil &&
+		(outcome.EndReason == relaycommon.StreamEndReasonDone || outcome.EndReason == relaycommon.StreamEndReasonEOF)
 	var networkError net.Error
 	switch {
 	case apiErr != nil && (errors.Is(apiErr, context.DeadlineExceeded) || (errors.As(apiErr, &networkError) && networkError.Timeout())):
 		result.ErrorCode = "timeout"
+	case outcome.EndReason == relaycommon.StreamEndReasonTimeout || (info != nil && info.StreamStatus != nil && errors.Is(info.StreamStatus.EndError, context.DeadlineExceeded)):
+		result.ErrorCode = "timeout"
 	case ctx != nil && errors.Is(ctx.Err(), context.DeadlineExceeded):
 		result.ErrorCode = "timeout"
-	case ctx != nil && errors.Is(ctx.Err(), context.Canceled):
+	case w.failed || outcome.Response == relaycommon.ResponseOutcomeFailed:
+		result.ErrorCode = "stream_error"
+	case ctx != nil && errors.Is(ctx.Err(), context.Canceled) && !completedNormally:
+		result.ErrorCode = "cancelled"
+	case apiErr != nil && errors.Is(apiErr, context.Canceled):
+		result.ErrorCode = "cancelled"
+	case outcome.Response == relaycommon.ResponseOutcomeCancelled || outcome.EndReason == relaycommon.StreamEndReasonClientGone || outcome.EndReason == relaycommon.StreamEndReasonPingFail:
 		result.ErrorCode = "cancelled"
 	case apiErr != nil:
 		result.ErrorCode = "request_failed"
-	case w.failed:
-		result.ErrorCode = "stream_error"
 	}
 	if info != nil && info.StreamStatus != nil && result.ErrorCode == "" {
 		outcome := info.StreamStatus.OutcomeSnapshot()
@@ -266,6 +279,9 @@ func MarkChannelProbeRequestStart(c *gin.Context) { c.Set(channelProbeRequestSta
 // A failed initial selection never reaches Relay's final-request observer.
 // Count it once here, after model/group access validation, with no upstream row.
 func RecordGroupProbeSelectionFailure(c *gin.Context, group, modelName string) {
+	if errors.Is(c.Request.Context().Err(), context.Canceled) {
+		return
+	}
 	probes := PassiveGroupProbes(group, modelName)
 	result := model.ChannelProbeResult{CheckedAt: time.Now().Unix(), ErrorCode: "channel_missing"}
 	if started, ok := c.Get(channelProbeRequestStartKey); ok {

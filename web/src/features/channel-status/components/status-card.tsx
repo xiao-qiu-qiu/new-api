@@ -25,8 +25,11 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { toIntlLocale } from '@/i18n/languages'
+import { getCacheHitRateColor } from '@/lib/cache-hit-rate'
+import { formatBillingCurrencyFromUSD } from '@/lib/currency'
 import { formatNumber } from '@/lib/format'
 import { cn } from '@/lib/utils'
+import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import {
   getProbeStatus,
@@ -40,10 +43,22 @@ import { ProbeStatusBadge } from './probe-status-badge'
 export function StatusCard(props: { probe: PublicChannelStatus }) {
   const { t, i18n } = useTranslation()
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
+  useSystemConfigStore((state) => state.config.currency)
   const probe = props.probe
   const status = getProbeStatus(probe)
   const availability = getWindowAvailability(probe)
   const ttft = probe.latest?.ttft_ms
+  const cacheRate = probe.average_cache_hit_rate
+  const estimatedPrice = probe.estimated_price_per_100m_tokens
+  const showCacheRate =
+    cacheRate != null &&
+    Number.isFinite(cacheRate) &&
+    cacheRate >= 0 &&
+    cacheRate <= 100
+  const showEstimatedPrice =
+    estimatedPrice != null &&
+    Number.isFinite(estimatedPrice) &&
+    estimatedPrice >= 0
   const ScopeIcon = probe.scope === 'group' ? Layers3 : Radio
   const time = new Intl.DateTimeFormat(locale, {
     hour: '2-digit',
@@ -183,6 +198,73 @@ export function StatusCard(props: { probe: PublicChannelStatus }) {
             start={probe.window_start}
             end={probe.window_end}
           />
+          {(showCacheRate || showEstimatedPrice) && (
+            <dl className='mt-2 flex flex-wrap items-center gap-x-5 gap-y-1.5 text-xs'>
+              {showCacheRate && (
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <div
+                        tabIndex={0}
+                        className='focus-visible:ring-ring flex flex-wrap items-baseline gap-x-1.5 rounded-sm outline-none focus-visible:ring-2'
+                      />
+                    }
+                  >
+                    <dt className='text-muted-foreground'>
+                      {t('Average cache hit rate')}
+                    </dt>
+                    <dd
+                      className={cn(
+                        'font-semibold tabular-nums',
+                        getCacheHitRateColor(cacheRate)
+                      )}
+                    >
+                      {formatNumber(cacheRate, locale)}%
+                    </dd>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    {t(
+                      'Token-weighted cache hit rate from {{count}} valid requests in this window.',
+                      {
+                        count: formatNumber(probe.cache_sample_count, locale),
+                      }
+                    )}
+                  </TooltipContent>
+                </Tooltip>
+              )}
+              {showEstimatedPrice && (
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <div
+                        tabIndex={0}
+                        className='focus-visible:ring-ring flex flex-wrap items-baseline gap-x-1.5 rounded-sm outline-none focus-visible:ring-2'
+                      />
+                    }
+                  >
+                    <dt className='text-muted-foreground'>
+                      {t('Estimated price / 100M tokens')}
+                    </dt>
+                    <dd className='font-semibold tabular-nums'>
+                      ≈
+                      {formatBillingCurrencyFromUSD(estimatedPrice, {
+                        locale,
+                        abbreviate: false,
+                      })}
+                    </dd>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    {t(
+                      'Estimated from actual charges and total input + output tokens in {{count}} requests in this window, including cache discounts.',
+                      {
+                        count: formatNumber(probe.price_sample_count, locale),
+                      }
+                    )}
+                  </TooltipContent>
+                </Tooltip>
+              )}
+            </dl>
+          )}
         </div>
       </div>
     </article>

@@ -25,6 +25,7 @@ type ChannelProbeView struct {
 // Deliberately separate from the admin DTO: embedding configuration here
 // would publish channel IDs and future internal configuration by accident.
 type PublicChannelProbeView struct {
+	model.ChannelProbeUsageStats
 	PublicName   string                       `json:"public_name"`
 	Scope        string                       `json:"scope"`
 	WindowStart  int64                        `json:"window_start"`
@@ -203,10 +204,23 @@ func BuildPublicChannelProbeModel(probe model.ChannelProbe, name string, now tim
 		if b.Count == 0 {
 			continue
 		}
-		b.Status = ChannelProbeStatus(b.SuccessCount == b.Count, b.TTFTMS, probe)
-		if timeouts[i] > 0 {
-			b.Status = "timeout"
+		// Availability uses the failed-request share, while latency keeps its
+		// own thresholds. A single timeout must not override a healthy bucket.
+		failureRate := float64(b.Count-b.SuccessCount) / float64(b.Count)
+		b.Status = ChannelProbeStatus(true, b.TTFTMS, probe)
+		if failureRate >= 0.5 {
+			b.Status = "red"
+			if float64(timeouts[i])/float64(b.Count) >= 0.5 {
+				b.Status = "timeout"
+			}
+		} else if failureRate >= 0.2 && b.Status != "red" {
+			b.Status = "yellow"
 		}
+	}
+	// Log storage is optional and may be independent from the probe database.
+	// An unavailable log database must not take the existing status page down.
+	if usage, err := model.GetChannelProbeUsageStats(probe, name, start, end); err == nil {
+		view.ChannelProbeUsageStats = usage
 	}
 	return view, nil
 }

@@ -54,4 +54,8 @@ export type PublicChannelStatus = {
   sample_count: number
   success_count: number
   timeline: ProbeTimeBucket[]
+  average_cache_hit_rate?: number | null
+  estimated_price_per_100m_tokens?: number | null
+  cache_sample_count?: number
+  price_sample_count?: number
 }

@@ -67,6 +67,55 @@ const probe: PublicChannelStatus = {
 }
 
 describe('model status measurements', () => {
+  it('hides cache rate and price when the API has insufficient samples', () => {
+    render(
+      <StatusCard
+        probe={{
+          ...probe,
+          average_cache_hit_rate: null,
+          estimated_price_per_100m_tokens: null,
+          cache_sample_count: 9,
+          price_sample_count: 9,
+        }}
+      />
+    )
+    expect(screen.queryByText('Average cache hit rate')).not.toBeInTheDocument()
+    expect(
+      screen.queryByText('Estimated price / 100M tokens')
+    ).not.toBeInTheDocument()
+  })
+  it.each([
+    { rate: 85.01, color: 'text-emerald-700' },
+    { rate: 85, color: 'text-amber-700' },
+    { rate: 75, color: 'text-amber-700' },
+    { rate: 74.99, color: 'text-red-700' },
+  ])('colors a $rate% cache rate by its threshold', ({ rate, color }) => {
+    render(
+      <StatusCard
+        probe={{
+          ...probe,
+          average_cache_hit_rate: rate,
+          cache_sample_count: 10,
+        }}
+      />
+    )
+    expect(screen.getByText(`${rate}%`)).toHaveClass(color)
+  })
+  it('shows a zero estimate and hides invalid cache data independently', () => {
+    render(
+      <StatusCard
+        probe={{
+          ...probe,
+          average_cache_hit_rate: Number.NaN,
+          estimated_price_per_100m_tokens: 0,
+          price_sample_count: 10,
+        }}
+      />
+    )
+    expect(screen.queryByText('Average cache hit rate')).not.toBeInTheDocument()
+    expect(screen.getByText('Estimated price / 100M tokens')).toBeVisible()
+    expect(screen.getByText(/≈.*0/)).toBeVisible()
+  })
   it('keeps unsampled periods gray without inventing latency or availability', () => {
     render(
       <StatusCard

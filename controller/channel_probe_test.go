@@ -282,6 +282,99 @@ func TestChannelProbePersistenceAndAttemptIsolation(t *testing.T) {
 	assert.Empty(t, history, "observations older than seven days are removed")
 }
 
+func TestChannelProbeTimelineFailureThresholds(t *testing.T) {
+	channelProbeTestDB(t)
+	now := time.Now()
+	for _, tc := range []struct {
+		name, status              string
+		count, failures, timeouts int
+		latency                   int64
+	}{
+		{"isolated error", "green", 10, 1, 0, 100},
+		{"one fifth errors", "yellow", 5, 1, 0, 100},
+		{"below half errors", "yellow", 5, 2, 0, 100},
+		{"half errors", "red", 2, 1, 0, 100},
+		{"isolated timeout", "green", 10, 1, 1, 100},
+		{"one fifth timeouts", "yellow", 5, 1, 1, 100},
+		{"half timeouts", "timeout", 2, 1, 1, 100},
+		{"mixed failures", "red", 4, 2, 1, 100},
+		{"latency still elevated", "yellow", 10, 1, 0, 1000},
+		{"latency still slow", "red", 10, 1, 0, 3000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			probe := channelProbeFixture()
+			probe.Model = tc.name
+			require.NoError(t, model.SaveChannelProbe(&probe, true))
+			for i := range tc.count {
+				result := model.ChannelProbeResult{Model: probe.Model, CheckedAt: now.Unix(), Success: i >= tc.failures}
+				if result.Success {
+					result.TTFTMS = &tc.latency
+				} else if i < tc.timeouts {
+					result.ErrorCode = "timeout"
+				} else {
+					result.ErrorCode = "request_failed"
+				}
+				require.NoError(t, model.StoreChannelProbeResult(probe, result))
+			}
+			view, err := service.BuildPublicChannelProbeModel(probe, probe.Model, now, 1)
+			require.NoError(t, err)
+			assert.Equal(t, tc.status, view.Timeline[59].Status)
+			assert.EqualValues(t, tc.count, view.SampleCount)
+			assert.EqualValues(t, tc.count-tc.failures, view.SuccessCount)
+		})
+	}
+}
+
+func TestChannelProbeClientCancellationIsNotAvailabilityFailure(t *testing.T) {
+	channelProbeTestDB(t)
+	probe := channelProbeFixture()
+	require.NoError(t, model.SaveChannelProbe(&probe, true))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tc := range []struct {
+		name              string
+		ctx               context.Context
+		apiErr            *types.NewAPIError
+		end               relaycommon.StreamEndReason
+		completed, failed bool
+		code              string
+	}{
+		{name: "request cancelled", ctx: ctx, code: "cancelled"},
+		{name: "wrapped cancellation", apiErr: types.NewError(context.Canceled, types.ErrorCodeBadResponse), code: "cancelled"},
+		{name: "client gone", end: relaycommon.StreamEndReasonClientGone, code: "cancelled"},
+		{name: "ping failed", end: relaycommon.StreamEndReasonPingFail, code: "cancelled"},
+		{name: "completed before cancellation", ctx: ctx, end: relaycommon.StreamEndReasonDone, completed: true},
+		{name: "real upstream failure", ctx: ctx, failed: true, code: "stream_error"},
+		{name: "upstream timeout", ctx: ctx, end: relaycommon.StreamEndReasonTimeout, code: "timeout"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			observer := service.NewChannelProbeObserver(c.Writer)
+			stream := relaycommon.NewStreamStatus()
+			stream.SetEndReason(tc.end, nil)
+			if tc.completed {
+				stream.MarkCompleted()
+			}
+			if tc.failed {
+				stream.MarkFailed("server_error", "server_error", 500)
+			}
+			result := observer.Result(tc.ctx, &relaycommon.RelayInfo{IsStream: true, StreamStatus: stream}, tc.apiErr)
+			assert.Equal(t, tc.code, result.ErrorCode)
+			before, err := service.BuildPublicChannelProbeModel(probe, probe.Model, time.Now(), 1)
+			require.NoError(t, err)
+			service.RecordPassiveChannelProbeResult([]model.ChannelProbe{probe}, result)
+			after, err := service.BuildPublicChannelProbeModel(probe, probe.Model, time.Now(), 1)
+			require.NoError(t, err)
+			if tc.code == "cancelled" {
+				assert.Equal(t, before.SampleCount, after.SampleCount)
+				assert.Equal(t, before.History, after.History)
+			} else {
+				assert.Equal(t, before.SampleCount+1, after.SampleCount)
+			}
+		})
+	}
+}
+
 func TestChannelProbeNativeAdapterWithoutUserOrBilling(t *testing.T) {
 	db := channelProbeTestDB(t)
 	require.NoError(t, db.AutoMigrate(&model.Channel{}))

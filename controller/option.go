@@ -383,6 +383,13 @@ func UpdateOption(c *gin.Context) {
 			common.ApiError(c, err)
 			return
 		}
+	case "console_setting.recharge_store_url":
+		value, validationErr := console_setting.NormalizeRechargeStoreURL(option.Value.(string))
+		if validationErr != nil {
+			common.ApiError(c, validationErr)
+			return
+		}
+		option.Value = value
 	case "console_setting.announcements":
 		err = console_setting.ValidateConsoleSettings(option.Value.(string), "Announcements")
 		if err != nil {

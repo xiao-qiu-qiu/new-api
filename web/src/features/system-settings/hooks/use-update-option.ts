@@ -30,6 +30,7 @@ import type { UpdateOptionRequest, UpdatePasskeyDomainsRequest } from '../types'
 const STATUS_RELATED_KEYS = new Set([
   'HeaderNavModules',
   'SidebarModulesAdmin',
+  'console_setting.recharge_store_url',
   'Notice',
   'LogConsumeEnabled',
   'QuotaPerUnit',

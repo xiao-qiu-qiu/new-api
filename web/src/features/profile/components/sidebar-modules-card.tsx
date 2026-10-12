@@ -117,6 +117,11 @@ export function SidebarModulesCard() {
       description: t('User personal functions'),
       modules: [
         {
+          key: 'recharge',
+          title: t('Recharge'),
+          description: t('Browse the recharge store.'),
+        },
+        {
           key: 'topup',
           title: t('Wallet Management'),
           description: t('Balance and top-up management'),

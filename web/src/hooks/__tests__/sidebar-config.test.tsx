@@ -83,7 +83,7 @@ describe('security sidebar visibility', () => {
       result.current
         .find((group) => group.id === 'personal')
         ?.items.map((item) => item.title)
-    ).toEqual(['Wallet', 'Profile', 'Security & Access'])
+    ).toEqual(['Recharge', 'Wallet', 'Profile', 'Security & Access'])
     expect(
       result.current
         .flatMap((group) => group.items)
@@ -117,6 +117,34 @@ describe('security sidebar visibility', () => {
         .flatMap((group) => group.items)
         .some((item) => item.title === 'Security & Access')
     ).toBe(true)
+  })
+})
+
+describe('recharge sidebar visibility', () => {
+  it('legacy configurations show Recharge immediately above Wallet', () => {
+    const { result } = sidebarFor(
+      { personal: { enabled: true, topup: true } },
+      { personal: { enabled: true, topup: true } }
+    )
+    const items =
+      result.current.find((group) => group.id === 'personal')?.items ?? []
+    const walletIndex = items.findIndex((item) => item.title === 'Wallet')
+    expect(items[walletIndex - 1]).toMatchObject({
+      title: 'Recharge',
+      url: '/recharge',
+    })
+  })
+
+  it.each([
+    [{ personal: { enabled: true, recharge: false } }, undefined],
+    [undefined, { personal: { enabled: true, recharge: false } }],
+  ])('hiding Recharge retains Wallet (%j, %j)', (admin, user) => {
+    const { result } = sidebarFor(admin, user)
+    const titles = result.current
+      .flatMap((group) => group.items)
+      .map((item) => item.title)
+    expect(titles).not.toContain('Recharge')
+    expect(titles).toContain('Wallet')
   })
 })
 

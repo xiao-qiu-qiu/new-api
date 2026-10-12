@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
+  flexRender,
   getCoreRowModel,
   useReactTable,
   type VisibilityState,
@@ -57,6 +58,7 @@ const log = usageLogSchema.parse({
 
 function Fixture(props: {
   admin?: boolean
+  desktop?: boolean
   visibility?: VisibilityState
   logs?: UsageLog[]
   loading?: boolean
@@ -74,11 +76,33 @@ function Fixture(props: {
       <button type='button' onClick={() => context.setSensitiveVisible(false)}>
         Hide sensitive data
       </button>
-      <UsageLogsMobileList
-        table={table}
-        logCategory='common'
-        isLoading={props.loading}
-      />
+      {props.desktop ? (
+        <table>
+          <tbody>
+            {table.getRowModel().rows.map((row) => (
+              <tr key={row.id}>
+                {row
+                  .getVisibleCells()
+                  .filter((cell) => cell.column.id === 'prompt_tokens')
+                  .map((cell) => (
+                    <td key={cell.id}>
+                      {flexRender(
+                        cell.column.columnDef.cell,
+                        cell.getContext()
+                      )}
+                    </td>
+                  ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <UsageLogsMobileList
+          table={table}
+          logCategory='common'
+          isLoading={props.loading}
+        />
+      )}
     </>
   )
 }
@@ -225,6 +249,179 @@ it('keeps input, output and cache quantities readable without empty metric cells
   expect(screen.getByText(/300/)).toBeVisible()
   expect(screen.getByText('Cache ↑ 200')).toBeVisible()
 })
+
+for (const desktop of [false, true]) {
+  it.each([
+    {
+      name: 'explicit zero cache reads',
+      prompt: 1000,
+      other: { cache_tokens: 0 },
+      rate: '0',
+      color: 'text-red-700',
+    },
+    {
+      name: 'below 75 percent',
+      prompt: 1000,
+      other: { cache_tokens: 749 },
+      rate: '74.9',
+      color: 'text-red-700',
+    },
+    {
+      name: 'exactly 75 percent',
+      prompt: 1000,
+      other: { cache_tokens: 750 },
+      rate: '75',
+      color: 'text-amber-700',
+    },
+    {
+      name: 'exactly 85 percent',
+      prompt: 1000,
+      other: { cache_tokens: 850 },
+      rate: '85',
+      color: 'text-amber-700',
+    },
+    {
+      name: 'above 85 percent',
+      prompt: 1000,
+      other: { cache_tokens: 860 },
+      rate: '86',
+      color: 'text-emerald-700',
+    },
+    {
+      name: 'Claude input excludes aggregate cache creation',
+      prompt: 100,
+      other: {
+        claude: true,
+        cache_tokens: 800,
+        cache_creation_tokens: 100,
+      },
+      rate: '80',
+      color: 'text-amber-700',
+    },
+    {
+      name: 'Claude split cache creation is counted once with expression billing',
+      prompt: 100,
+      other: {
+        usage_semantic: 'anthropic',
+        billing_mode: 'tiered_expr',
+        cache_tokens: 800,
+        cache_creation_tokens: 100,
+        cache_creation_tokens_5m: 60,
+        cache_creation_tokens_1h: 40,
+      },
+      rate: '80',
+      color: 'text-amber-700',
+    },
+    {
+      name: 'normalized total input overrides the Claude marker',
+      prompt: 1000,
+      other: {
+        claude: true,
+        cache_tokens: 800,
+        input_tokens_total: 1000,
+      },
+      rate: '80',
+      color: 'text-amber-700',
+    },
+    {
+      name: 'explicit OpenAI semantics overrides the upstream format marker',
+      prompt: 1000,
+      other: {
+        claude: true,
+        usage_semantic: 'openai',
+        cache_tokens: 800,
+      },
+      rate: '80',
+      color: 'text-amber-700',
+    },
+    {
+      name: 'all Claude input is cached with no output',
+      prompt: 0,
+      completion: 0,
+      other: { claude: true, cache_tokens: 800 },
+      rate: '100',
+      color: 'text-emerald-700',
+    },
+  ])(
+    `shows cache hit rate for $name in ${desktop ? 'desktop' : 'mobile'} tokens`,
+    (fixture) => {
+      renderLogs({
+        desktop,
+        logs: [
+          {
+            ...log,
+            prompt_tokens: fixture.prompt,
+            completion_tokens: fixture.completion ?? log.completion_tokens,
+            other: JSON.stringify(fixture.other),
+          },
+        ],
+      })
+      const rate = screen.getByText(`Cache hit rate ${fixture.rate}%`)
+      expect(rate).toBeVisible()
+      expect(rate.closest('[data-slot="status-badge"]')).toHaveClass(
+        fixture.color
+      )
+    }
+  )
+
+  it.each([
+    { name: 'missing cache data', prompt: 1000, other: {} },
+    { name: 'zero total input', prompt: 0, other: { cache_tokens: 0 } },
+    {
+      name: 'negative cache reads',
+      prompt: 1000,
+      other: { cache_tokens: -1 },
+    },
+    {
+      name: 'cache reads exceed input',
+      prompt: 1000,
+      other: { cache_tokens: 1001 },
+    },
+    {
+      name: 'invalid cache reads',
+      prompt: 1000,
+      other: { cache_tokens: null },
+    },
+    {
+      name: 'invalid Claude creation count',
+      prompt: 100,
+      other: { claude: true, cache_tokens: 800, cache_creation_tokens: -1 },
+    },
+    {
+      name: 'explicit zero input overrides the prompt',
+      prompt: 1000,
+      other: { cache_tokens: 0, input_tokens_total: 0 },
+    },
+  ])(
+    `hides cache hit rate for $name in ${desktop ? 'desktop' : 'mobile'} tokens`,
+    (fixture) => {
+      renderLogs({
+        desktop,
+        logs: [
+          {
+            ...log,
+            prompt_tokens: fixture.prompt,
+            other: JSON.stringify(fixture.other),
+          },
+        ],
+      })
+      expect(screen.queryByText(/Cache hit rate/)).not.toBeInTheDocument()
+    }
+  )
+
+  it.each([0, 1, 3, 4, 5, 6, 7])(
+    `hides cache hit rate for non-consumption type %s in ${desktop ? 'desktop' : 'mobile'} tokens`,
+    (type) => {
+      renderLogs({ desktop, logs: [{ ...log, type }] })
+      expect(screen.queryByText(/Cache hit rate/)).not.toBeInTheDocument()
+    }
+  )
+
+  it(`hides cache hit rate with hidden ${desktop ? 'desktop' : 'mobile'} token columns`, () => {
+    renderLogs({ desktop, visibility: { prompt_tokens: false } })
+    expect(screen.queryByText(/Cache hit rate/)).not.toBeInTheDocument()
+  })
+}
 
 it('shows the established empty state when no logs exist', () => {
   renderLogs({ logs: [] })

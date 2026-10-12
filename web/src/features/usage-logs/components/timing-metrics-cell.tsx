@@ -78,7 +78,8 @@ export function TimingMetricsCell(props: TimingMetricsCellProps) {
       : getFirstResponseTimeColor(firstTokenSeconds)
   const totalTimeVariant = getResponseTimeColor(
     props.useTimeSec,
-    props.completionTokens
+    props.completionTokens,
+    props.isStream ? props.frtMs : undefined
   )
   const firstTokenLabel =
     firstTokenSeconds == null ? t('N/A') : formatUseTime(firstTokenSeconds)

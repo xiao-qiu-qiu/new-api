@@ -32,6 +32,7 @@ import {
   ServerCog,
   Settings,
   ShieldCheck,
+  ShoppingBag,
   Ticket,
   User,
   Users,
@@ -111,6 +112,11 @@ export function useSidebarData(): SidebarData {
         id: 'personal',
         title: t('Personal'),
         items: [
+          {
+            title: t('Recharge'),
+            url: '/recharge',
+            icon: ShoppingBag,
+          },
           {
             title: t('Wallet'),
             url: '/wallet',

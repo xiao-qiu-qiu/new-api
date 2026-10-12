@@ -161,6 +161,11 @@ func RenewChannelProbeLease(probe ChannelProbe) (bool, error) {
 }
 
 func StoreChannelProbeResult(probe ChannelProbe, result ChannelProbeResult) error {
+	// A client abort says nothing about upstream availability. Exclude it
+	// from both history and minute aggregates, including active probe aborts.
+	if result.ErrorCode == "cancelled" {
+		return nil
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	return DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {

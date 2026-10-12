@@ -48,6 +48,7 @@ import { pluginUsageSchema } from '@/features/pricing/lib/plugin-pricing'
 import { taskUsageUnitLabel } from '@/features/pricing/lib/task-price-display'
 import type { BillingUsageSchema } from '@/features/pricing/types'
 import { getUserAvatarFallback, getUserAvatarStyle } from '@/lib/avatar'
+import { getLogCacheHitRate } from '@/lib/cache-hit-rate'
 import { formatBillingCurrencyFromUSD } from '@/lib/currency'
 import { formatLogQuota, formatTimestampToDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -59,6 +60,7 @@ import {
   formatModelName,
   decodeBillingExprB64,
   getTieredBillingSummary,
+  getTokensPerSecond,
   hasAnyCacheTokens,
   parseLogOther,
   isViolationFeeLog,
@@ -74,6 +76,7 @@ import {
 } from '../../lib/utils'
 import type { LogOtherData } from '../../types'
 import { DetailsDialog } from '../dialogs/details-dialog'
+import { LogCacheHitRate } from '../log-cache-hit-rate'
 import { LogCostDisplay } from '../log-cost-display'
 import { ModelBadge } from '../model-badge'
 import { TimingMetricsCell, StreamTpsCell } from '../timing-metrics-cell'
@@ -699,10 +702,11 @@ export function useCommonLogsColumns(
 
           const useTime = row.getValue('use_time') as number
           const other = parseLogOther(log.other)
-          const tokensPerSecond =
-            useTime > 0 && log.completion_tokens > 0
-              ? log.completion_tokens / useTime
-              : null
+          const tokensPerSecond = getTokensPerSecond(
+            useTime,
+            log.completion_tokens,
+            log.is_stream ? other?.frt : undefined
+          )
 
           return (
             <StreamTpsCell
@@ -727,7 +731,12 @@ export function useCommonLogsColumns(
 
           const promptTokens = log.prompt_tokens || 0
           const completionTokens = log.completion_tokens || 0
-          if (promptTokens === 0 && completionTokens === 0) {
+          const cacheHitRate = getLogCacheHitRate(log, other)
+          if (
+            promptTokens === 0 &&
+            completionTokens === 0 &&
+            cacheHitRate === null
+          ) {
             return <span className='text-muted-foreground text-xs'>-</span>
           }
 
@@ -759,6 +768,7 @@ export function useCommonLogsColumns(
                   )}
                 </div>
               )}
+              <LogCacheHitRate rate={cacheHitRate} />
             </div>
           )
         },

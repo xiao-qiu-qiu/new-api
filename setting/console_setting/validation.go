@@ -4,8 +4,10 @@ import (
 	"net/url"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf16"
 
 	"github.com/QuantumNous/new-api/common"
@@ -83,6 +85,29 @@ func getJSONList(jsonStr string) []map[string]any {
 	var list []map[string]any
 	_ = common.UnmarshalJsonStr(jsonStr, &list)
 	return list
+}
+
+// NormalizeRechargeStoreURL validates the public shop address before saving it.
+func NormalizeRechargeStoreURL(rawURL string) (string, error) {
+	value := strings.TrimSpace(rawURL)
+	invalidURL := common.NewMessage("Enter a valid HTTP(S) recharge store URL without credentials")
+	if value == "" || strings.ContainsRune(value, '\\') || strings.IndexFunc(value, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsControl(r)
+	}) >= 0 {
+		return "", invalidURL
+	}
+	parsedURL, err := url.Parse(value)
+	if err != nil || (parsedURL.Scheme != "https" && parsedURL.Scheme != "http") ||
+		parsedURL.Hostname() == "" || parsedURL.User != nil || parsedURL.Opaque != "" {
+		return "", invalidURL
+	}
+	if port := parsedURL.Port(); port != "" {
+		portNumber, err := strconv.Atoi(port)
+		if err != nil || portNumber < 0 || portNumber > 65535 {
+			return "", invalidURL
+		}
+	}
+	return value, nil
 }
 
 func ValidateConsoleSettings(settingsStr string, settingType string) error {

@@ -33,6 +33,7 @@ const defaultSiteSettings: SiteSettings = {
   HomePageContent: '',
   ServerAddress: '',
   TaskPublicAddress: '',
+  'console_setting.recharge_store_url': 'https://catfk.com/shop/40PFAHE3',
   'general_setting.docs_link': '',
   'legal.user_agreement': '',
   'legal.privacy_policy': '',
