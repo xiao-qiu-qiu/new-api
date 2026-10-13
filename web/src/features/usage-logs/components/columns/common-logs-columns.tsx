@@ -719,6 +719,7 @@ export function useCommonLogsColumns(
           )
         },
         meta: { label: t('Stream') },
+        size: 90,
       },
       {
         accessorKey: 'prompt_tokens',
@@ -749,7 +750,7 @@ export function useCommonLogsColumns(
             : other?.cache_creation_tokens || 0
 
           return (
-            <div className='flex flex-col gap-0.5'>
+            <div className='flex flex-col gap-0.5 whitespace-nowrap'>
               <span className='font-mono text-xs font-medium tabular-nums'>
                 {promptTokens.toLocaleString()} /{' '}
                 {completionTokens.toLocaleString()}
@@ -758,20 +759,22 @@ export function useCommonLogsColumns(
                 <div className='flex items-center gap-1 text-[11px]'>
                   {cacheReadTokens > 0 && (
                     <span className='text-muted-foreground/60'>
-                      {t('Cache')}↓ {cacheReadTokens.toLocaleString()}
+                      {t('Cache')}↓ {cacheReadTokens.toLocaleString()}{' '}
+                      <LogCacheHitRate rate={cacheHitRate} />
                     </span>
                   )}
                   {cacheWriteTokens > 0 && (
                     <span className='text-muted-foreground/60'>
-                      ↑ {cacheWriteTokens.toLocaleString()}
+                      ↑ {cacheWriteTokens.toLocaleString()}{' '}
+                      <LogCacheHitRate rate={cacheHitRate} />
                     </span>
                   )}
                 </div>
               )}
-              <LogCacheHitRate rate={cacheHitRate} />
             </div>
           )
         },
+        size: 210,
       },
       {
         accessorKey: 'quota',

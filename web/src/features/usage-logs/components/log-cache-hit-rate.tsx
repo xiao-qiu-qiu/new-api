@@ -18,27 +18,30 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useTranslation } from 'react-i18next'
 
-import { StatusBadge } from '@/components/status-badge'
+import { StatusBadge, type StatusVariant } from '@/components/status-badge'
 import { toIntlLocale } from '@/i18n/languages'
-import { getCacheHitRateColor } from '@/lib/cache-hit-rate'
 import { formatNumber } from '@/lib/format'
-import { cn } from '@/lib/utils'
 
 export function LogCacheHitRate(props: { rate: number | null }) {
   const { t, i18n } = useTranslation()
   if (props.rate === null) return null
 
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
+  let variant: StatusVariant = 'danger'
+  if (props.rate > 85) {
+    variant = 'success'
+  } else if (props.rate >= 75) {
+    variant = 'warning'
+  }
+
   return (
     <StatusBadge
       type='text'
       copyable={false}
-      label={`${t('Cache hit rate')} ${formatNumber(props.rate, locale)}%`}
+      variant={variant}
+      label={`(${formatNumber(props.rate, locale)}%)`}
       title={t('Cache read tokens / total input tokens')}
-      className={cn(
-        'text-[11px] tabular-nums',
-        getCacheHitRateColor(props.rate)
-      )}
+      className='align-baseline text-[11px] tabular-nums'
     />
   )
 }

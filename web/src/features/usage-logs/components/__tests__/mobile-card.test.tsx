@@ -253,39 +253,32 @@ it('keeps input, output and cache quantities readable without empty metric cells
 for (const desktop of [false, true]) {
   it.each([
     {
-      name: 'explicit zero cache reads',
-      prompt: 1000,
-      other: { cache_tokens: 0 },
-      rate: '0',
-      color: 'text-red-700',
-    },
-    {
       name: 'below 75 percent',
       prompt: 1000,
       other: { cache_tokens: 749 },
       rate: '74.9',
-      color: 'text-red-700',
+      color: 'text-destructive',
     },
     {
       name: 'exactly 75 percent',
       prompt: 1000,
       other: { cache_tokens: 750 },
       rate: '75',
-      color: 'text-amber-700',
+      color: 'text-warning',
     },
     {
       name: 'exactly 85 percent',
       prompt: 1000,
       other: { cache_tokens: 850 },
       rate: '85',
-      color: 'text-amber-700',
+      color: 'text-warning',
     },
     {
       name: 'above 85 percent',
       prompt: 1000,
       other: { cache_tokens: 860 },
       rate: '86',
-      color: 'text-emerald-700',
+      color: 'text-success',
     },
     {
       name: 'Claude input excludes aggregate cache creation',
@@ -296,7 +289,7 @@ for (const desktop of [false, true]) {
         cache_creation_tokens: 100,
       },
       rate: '80',
-      color: 'text-amber-700',
+      color: 'text-warning',
     },
     {
       name: 'Claude split cache creation is counted once with expression billing',
@@ -310,7 +303,7 @@ for (const desktop of [false, true]) {
         cache_creation_tokens_1h: 40,
       },
       rate: '80',
-      color: 'text-amber-700',
+      color: 'text-warning',
     },
     {
       name: 'normalized total input overrides the Claude marker',
@@ -321,7 +314,7 @@ for (const desktop of [false, true]) {
         input_tokens_total: 1000,
       },
       rate: '80',
-      color: 'text-amber-700',
+      color: 'text-warning',
     },
     {
       name: 'explicit OpenAI semantics overrides the upstream format marker',
@@ -332,7 +325,7 @@ for (const desktop of [false, true]) {
         cache_tokens: 800,
       },
       rate: '80',
-      color: 'text-amber-700',
+      color: 'text-warning',
     },
     {
       name: 'all Claude input is cached with no output',
@@ -340,7 +333,7 @@ for (const desktop of [false, true]) {
       completion: 0,
       other: { claude: true, cache_tokens: 800 },
       rate: '100',
-      color: 'text-emerald-700',
+      color: 'text-success',
     },
   ])(
     `shows cache hit rate for $name in ${desktop ? 'desktop' : 'mobile'} tokens`,
@@ -356,15 +349,35 @@ for (const desktop of [false, true]) {
           },
         ],
       })
-      const rate = screen.getByText(`Cache hit rate ${fixture.rate}%`)
-      expect(rate).toBeVisible()
-      expect(rate.closest('[data-slot="status-badge"]')).toHaveClass(
-        fixture.color
-      )
+      const rates = screen.getAllByText(`(${fixture.rate}%)`)
+      for (const rate of rates) {
+        expect(rate).toBeVisible()
+        expect(rate.closest('[data-slot="status-badge"]')).toHaveClass(
+          fixture.color
+        )
+        expect(rate.closest('[data-slot="status-badge"]')).toHaveAttribute(
+          'title',
+          'Cache read tokens / total input tokens'
+        )
+      }
+      if (fixture.name === 'Claude input excludes aggregate cache creation') {
+        expect(rates).toHaveLength(2)
+        expect(
+          within(screen.getByText(/Cache\s*↓\s*800/)).getByText('(80%)')
+        ).toBeVisible()
+        expect(
+          within(screen.getByText(/(?:Cache\s*)?↑\s*100/)).getByText('(80%)')
+        ).toBeVisible()
+      }
     }
   )
 
   it.each([
+    {
+      name: 'explicit zero cache reads',
+      prompt: 1000,
+      other: { cache_tokens: 0 },
+    },
     { name: 'missing cache data', prompt: 1000, other: {} },
     { name: 'zero total input', prompt: 0, other: { cache_tokens: 0 } },
     {
@@ -405,7 +418,9 @@ for (const desktop of [false, true]) {
           },
         ],
       })
-      expect(screen.queryByText(/Cache hit rate/)).not.toBeInTheDocument()
+      expect(
+        screen.queryByTitle('Cache read tokens / total input tokens')
+      ).not.toBeInTheDocument()
     }
   )
 
@@ -413,13 +428,17 @@ for (const desktop of [false, true]) {
     `hides cache hit rate for non-consumption type %s in ${desktop ? 'desktop' : 'mobile'} tokens`,
     (type) => {
       renderLogs({ desktop, logs: [{ ...log, type }] })
-      expect(screen.queryByText(/Cache hit rate/)).not.toBeInTheDocument()
+      expect(
+        screen.queryByTitle('Cache read tokens / total input tokens')
+      ).not.toBeInTheDocument()
     }
   )
 
   it(`hides cache hit rate with hidden ${desktop ? 'desktop' : 'mobile'} token columns`, () => {
     renderLogs({ desktop, visibility: { prompt_tokens: false } })
-    expect(screen.queryByText(/Cache hit rate/)).not.toBeInTheDocument()
+    expect(
+      screen.queryByTitle('Cache read tokens / total input tokens')
+    ).not.toBeInTheDocument()
   })
 }
 

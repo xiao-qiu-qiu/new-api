@@ -72,8 +72,18 @@ export function UserLeaderboard(props: { period: RankingPeriod }) {
   let actionText = optedIn ? t('Leave rankings') : t('Join rankings')
   if (preference.isError) actionText = t('Retry')
 
+  const openNicknameDialog = () => {
+    nickname.reset()
+    setNicknameOpen(true)
+  }
+
   const saveChoice = (value: boolean) => {
-    participation.mutate(value, { onSuccess: () => setDialog(null) })
+    participation.mutate(value, {
+      onSuccess: () => {
+        setDialog(null)
+        if (value && needsChoice) openNicknameDialog()
+      },
+    })
   }
 
   return (
@@ -101,13 +111,7 @@ export function UserLeaderboard(props: { period: RankingPeriod }) {
         </div>
         <div className='flex flex-wrap items-center gap-2'>
           {user && preference.data && (
-            <Button
-              variant='outline'
-              onClick={() => {
-                nickname.reset()
-                setNicknameOpen(true)
-              }}
-            >
+            <Button variant='outline' onClick={openNicknameDialog}>
               <Pencil className='size-4' aria-hidden />
               {preference.data.nickname
                 ? t('Edit nickname')
@@ -290,8 +294,15 @@ export function UserLeaderboard(props: { period: RankingPeriod }) {
           else setDialog(null)
         }}
         onConfirm={() => {
-          if (!user || (dialog === 'rules' && optedIn)) setDialog(null)
-          else saveChoice(dialog !== 'leave')
+          if (!user) {
+            setDialog(null)
+            return
+          }
+          if (dialog === 'rules' && optedIn) {
+            setDialog(null)
+            return
+          }
+          saveChoice(dialog !== 'leave')
         }}
       />
       {nicknameOpen && preference.data && (

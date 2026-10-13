@@ -312,16 +312,17 @@ export function CommonLogMobileCard<TData>(props: {
             </span>
           </span>
           {cacheRead > 0 && (
-            <span>
-              {t('Cache')} ↓ {cacheRead.toLocaleString()}
+            <span className='whitespace-nowrap'>
+              {t('Cache')} ↓ {cacheRead.toLocaleString()}{' '}
+              <LogCacheHitRate rate={cacheHitRate} />
             </span>
           )}
           {cacheWrite > 0 && (
-            <span>
-              {t('Cache')} ↑ {cacheWrite.toLocaleString()}
+            <span className='whitespace-nowrap'>
+              {t('Cache')} ↑ {cacheWrite.toLocaleString()}{' '}
+              <LogCacheHitRate rate={cacheHitRate} />
             </span>
           )}
-          <LogCacheHitRate rate={cacheHitRate} />
         </div>
       )}
       {contentCell && (
