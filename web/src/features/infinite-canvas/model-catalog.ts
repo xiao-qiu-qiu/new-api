@@ -24,11 +24,13 @@ export type { GroupOption } from '../playground/types'
 // Canvas audio nodes generate speech through /v1/audio/speech. Recognition
 // endpoints return text but are neither TTS nor chat/Agent generation modes.
 export type CanvasCapability = 'image' | 'video' | 'text' | 'audio'
+export type CanvasChatProtocol = 'chat' | 'responses'
 
 export type CanvasModel = {
   name: string
   capability: CanvasCapability
   capabilities?: CanvasCapability[]
+  chatProtocol: CanvasChatProtocol
 }
 
 export type CanvasChannel = {
@@ -259,12 +261,26 @@ export function buildCanvasChannels(
       )
       const primary = ordered[0]
       if (primary) {
+        const endpoints = metadata.flatMap(
+          (entry) => entry.supported_endpoint_types ?? []
+        )
+        // Prefer chat when any available text endpoint supports it. Responses
+        // is required only when it is the sole advertised text protocol.
+        const chatProtocol =
+          endpoints.includes('openai-response') &&
+          !endpoints.some(
+            (endpoint) =>
+              endpoint !== 'openai-response' && textEndpoints.has(endpoint)
+          )
+            ? 'responses'
+            : 'chat'
         // One entry per name: upstream lookups select the first name match.
         // Consumers filter capabilities for a node's actual generation mode.
         models.push({
           name: option.value,
           capability: primary,
           capabilities: ordered,
+          chatProtocol,
         })
       }
     }

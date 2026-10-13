@@ -291,6 +291,93 @@ const groups: GroupOption[] = [
   { value: 'auto', label: 'Auto', ratio: 'auto' },
 ]
 
+it.each<[string, string[] | undefined, 'chat' | 'responses']>([
+  ['Responses-only', ['openai-response'], 'responses'],
+  ['Chat and Responses', ['openai', 'openai-response'], 'chat'],
+  ['Claude and Responses', ['anthropic', 'openai-response'], 'chat'],
+  ['Gemini and Responses', ['gemini', 'openai-response'], 'chat'],
+  ['unknown endpoints with confirmed text output', undefined, 'chat'],
+])(
+  'keeps %s selectable with the correct chat protocol',
+  (_title, endpoints, protocol) => {
+    const channels = buildCanvasChannels(
+      [groups[0]],
+      new Map([['default', [{ label: 'agent', value: 'agent' }]]]),
+      {
+        data: [
+          model('agent', {
+            supported_endpoint_types: endpoints,
+            output_modalities: ['text'],
+          }),
+        ],
+      },
+      'https://station.example'
+    )
+    expect(channels[0].models).toEqual([
+      {
+        name: 'agent',
+        capability: 'text',
+        capabilities: ['text'],
+        chatProtocol: protocol,
+      },
+    ])
+  }
+)
+
+it('merges chat protocols only from metadata available to the selected group', () => {
+  const channels = buildCanvasChannels(
+    groups,
+    new Map(
+      groups.map((group) => [
+        group.value,
+        [{ label: 'shared', value: 'shared' }],
+      ])
+    ),
+    {
+      auto_groups: ['vip'],
+      data: [
+        model('shared', {
+          enable_groups: ['all'],
+          supported_endpoint_types: ['openai-response'],
+          output_modalities: ['image', 'text'],
+        }),
+        model('shared', {
+          enable_groups: ['vip'],
+          supported_endpoint_types: ['openai'],
+          output_modalities: ['text'],
+        }),
+      ],
+    },
+    'https://station.example'
+  )
+  expect(channels.map((channel) => channel.models)).toEqual([
+    [
+      {
+        name: 'shared',
+        capability: 'image',
+        capabilities: ['image', 'text'],
+        chatProtocol: 'responses',
+      },
+    ],
+    [
+      {
+        name: 'shared',
+        capability: 'image',
+        capabilities: ['image', 'text'],
+        chatProtocol: 'chat',
+      },
+    ],
+    [
+      {
+        name: 'shared',
+        capability: 'image',
+        capabilities: ['image', 'text'],
+        chatProtocol: 'chat',
+      },
+    ],
+  ])
+})
+
 it('keeps each authorized model name once, unions its capabilities and respects group metadata', () => {
   const options = [
     'shared',
@@ -344,6 +431,7 @@ it('keeps each authorized model name once, unions its capabilities and respects 
           name: 'shared',
           capability: 'image',
           capabilities: ['image', 'text'],
+          chatProtocol: 'chat',
         },
       ],
     },
@@ -354,11 +442,17 @@ it('keeps each authorized model name once, unions its capabilities and respects 
       apiKey: '',
       apiFormat: 'openai',
       models: [
-        { name: 'shared', capability: 'video', capabilities: ['video'] },
+        {
+          name: 'shared',
+          capability: 'video',
+          capabilities: ['video'],
+          chatProtocol: 'chat',
+        },
         {
           name: 'grok-imagine-image',
           capability: 'image',
           capabilities: ['image'],
+          chatProtocol: 'chat',
         },
       ],
     },
@@ -369,11 +463,17 @@ it('keeps each authorized model name once, unions its capabilities and respects 
       apiKey: '',
       apiFormat: 'openai',
       models: [
-        { name: 'shared', capability: 'video', capabilities: ['video'] },
+        {
+          name: 'shared',
+          capability: 'video',
+          capabilities: ['video'],
+          chatProtocol: 'chat',
+        },
         {
           name: 'grok-imagine-image',
           capability: 'image',
           capabilities: ['image'],
+          chatProtocol: 'chat',
         },
       ],
     },
@@ -403,6 +503,7 @@ it('retains empty groups and limits missing-metadata fallbacks to exact known mo
       name: 'grok-imagine-image',
       capability: 'image',
       capabilities: ['image'],
+      chatProtocol: 'chat',
     },
   ])
   expect(catalog[1].models).toEqual([])
@@ -484,7 +585,14 @@ it('reuses fresh playground/pricing caches and shares an in-flight playground mo
     baseUrl: window.location.origin,
     apiKey: '',
     apiFormat: 'openai',
-    models: [{ name: 'chat', capability: 'text', capabilities: ['text'] }],
+    models: [
+      {
+        name: 'chat',
+        capability: 'text',
+        capabilities: ['text'],
+        chatProtocol: 'chat',
+      },
+    ],
   })
   expect(result.current.error).toBeNull()
 })
@@ -533,7 +641,12 @@ it('starts groups and pricing together, then fetches all groups without waiting 
   })
   await waitFor(() => expect(result.current.isLoading).toBe(false))
   expect(result.current.channels[0].models).toEqual([
-    { name: 'custom', capability: 'image', capabilities: ['image'] },
+    {
+      name: 'custom',
+      capability: 'image',
+      capabilities: ['image'],
+      chatProtocol: 'chat',
+    },
   ])
   expect(result.current.channels[1].models).toEqual([])
 })
@@ -577,8 +690,22 @@ it('exposes a pricing business failure and refetches models for newly added grou
   await waitFor(() => expect(result.current.error).toBeNull())
   await waitFor(() =>
     expect(result.current.channels.map((channel) => channel.models)).toEqual([
-      [{ name: 'chat', capability: 'text', capabilities: ['text'] }],
-      [{ name: 'chat', capability: 'text', capabilities: ['text'] }],
+      [
+        {
+          name: 'chat',
+          capability: 'text',
+          capabilities: ['text'],
+          chatProtocol: 'chat',
+        },
+      ],
+      [
+        {
+          name: 'chat',
+          capability: 'text',
+          capabilities: ['text'],
+          chatProtocol: 'chat',
+        },
+      ],
     ])
   )
   expect(
