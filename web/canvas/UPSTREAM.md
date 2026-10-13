@@ -52,3 +52,13 @@ SQL or transaction changes were made; no three-database compatibility matrix was
 run. Real provider generation and billing still require acceptance on a deployed
 instance with the site's configured models. Local project and asset storage is
 per user and browser; archives and optional WebDAV provide transfer and backup.
+
+Frontend acceptance (2026-10-14): `bun run typecheck`, `bun run build`,
+`bun run canvas:test`, the host's model-catalog and host-fetch Vitest suites,
+and scoped oxlint checks passed. Browser fixtures verified the sidebar order,
+group/model filtering, Agent tool execution creating a real canvas node,
+project/history restoration, light/dark synchronization and narrow layouts.
+The editor is loaded only on the canvas route; Vite still reports upstream
+large-chunk and mixed static/dynamic import warnings. Provider-specific inputs
+follow the site's existing adaptors; for example its current Veo adaptor
+consumes only the first reference image. No live paid provider request was run.

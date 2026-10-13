@@ -39,4 +39,3 @@ export const userLocalStorage = {
         if (typeof window !== "undefined") window.localStorage.removeItem(getUserStorageKey(name));
     },
 } satisfies StateStorage;
-

@@ -83,4 +83,3 @@ function valueBytes(value: unknown) {
     if (ArrayBuffer.isView(value)) return value.byteLength;
     return new TextEncoder().encode(typeof value === "string" ? value : JSON.stringify(value)).byteLength;
 }
-
