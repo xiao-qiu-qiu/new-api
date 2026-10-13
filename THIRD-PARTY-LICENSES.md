@@ -8,6 +8,14 @@ Transitive dependencies should be audited before a final external release.
 
 ## Dependency Inventory
 
+The embedded Infinite Canvas editor in `web/canvas` is derived from
+[basketikun/infinite-canvas](https://github.com/basketikun/infinite-canvas),
+revision `3a6b64b602ad062b29fac66902ed18a7ef5fd9dc`, copyright (c) 2026 basketikun,
+under the MIT License. Its full license is retained at `web/canvas/LICENSE`
+and distributed with the frontend at `/canvas-app/LICENSE.infinite-canvas.txt`.
+Its direct dependencies and reproducible versions are recorded in
+`web/canvas/package.json` and `web/canvas/bun.lock`.
+
 | Area     | Scope       | Ecosystem | Dependency                                            | Version                              | License                                            |
 |----------|-------------|-----------|-------------------------------------------------------|--------------------------------------|----------------------------------------------------|
 | backend  | production  | Go        | `github.com/Calcium-Ion/go-epay`                      | `v0.0.4`                             | Proprietary/Internal - owned by project maintainer |

@@ -18,6 +18,8 @@
     "dist",
     "build",
     "coverage",
+    "canvas/**",
+    "public/canvas-app/**",
     ".tanstack",
     ".eslintrc.cjs",
     "src/components/ui",

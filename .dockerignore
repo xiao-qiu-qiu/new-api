@@ -8,5 +8,9 @@ docs
 .eslintcache
 .gocache
 /web/node_modules
+/web/canvas/node_modules
+/web/public/canvas-app
+/.local-tests
+/.playwright-cli
 /web/dist
 !THIRD-PARTY-LICENSES.md

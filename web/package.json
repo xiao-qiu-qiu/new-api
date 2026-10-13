@@ -23,7 +23,8 @@
     "i18n:sync": "node scripts/sync-i18n.mjs",
     "knip": "knip",
     "canvas:install": "bun install --cwd canvas --frozen-lockfile",
-    "canvas:build": "bun run canvas:install && bun run --cwd canvas build"
+    "canvas:build": "bun run canvas:install && bun run --cwd canvas build",
+    "canvas:test": "bun test --cwd canvas ./tests && vitest run --config canvas/vitest.config.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
