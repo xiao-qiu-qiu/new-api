@@ -3,6 +3,7 @@ import { initReactI18next } from "react-i18next";
 
 import enUS from "@/i18n/locales/en-US";
 import zhCN from "@/i18n/locales/zh-CN";
+import { getSiteContext } from "@/integration/site-context";
 
 export type AppLocale = "zh-CN" | "en-US";
 
@@ -13,7 +14,7 @@ i18n.use(initReactI18next).init({
         "zh-CN": { translation: zhCN },
         "en-US": { translation: enUS },
     },
-    lng: (localStorage.getItem(LOCALE_STORAGE_KEY) as AppLocale) || "zh-CN",
+    lng: getSiteContext().language.startsWith("zh") ? "zh-CN" : "en-US",
     fallbackLng: "zh-CN",
     supportedLngs: ["zh-CN", "en-US"],
     initAsync: false,

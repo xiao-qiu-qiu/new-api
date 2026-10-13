@@ -13,6 +13,9 @@ build
 logs
 web/dist
 web/node_modules
+web/canvas/node_modules
+web/public/canvas-app
+web/canvas/*.tsbuildinfo
 .env
 one-api
 new-api
