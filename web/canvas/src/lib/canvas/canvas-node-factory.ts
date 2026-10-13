@@ -3,7 +3,7 @@ import { nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
 import type { AiConfig } from "@/stores/use-config-store";
 import type { UploadedImage } from "@/services/image-storage";
 import type { UploadedFile } from "@/services/file-storage";
-import type { ReferenceImage } from "@/types/image";
+import type { ReferenceImage, SavedReferenceImage } from "@/types/image";
 import { CanvasNodeType, type CanvasImageGenerationType, type CanvasNodeData, type CanvasNodeMetadata, type CanvasNodeTypeId, type Position } from "@/types/canvas";
 
 export function createCanvasNode(type: CanvasNodeTypeId, position: Position, metadata?: CanvasNodeMetadata): CanvasNodeData {
@@ -41,6 +41,11 @@ export function referenceUrl(image: ReferenceImage) {
 }
 
 export function buildImageGenerationMetadata(type: CanvasImageGenerationType, config: AiConfig, count: number, references: ReferenceImage[]): CanvasNodeMetadata {
+    const referenceImages = references.flatMap((image): SavedReferenceImage[] => {
+        const url = referenceUrl(image) || image.dataUrl;
+        if (!url) return [];
+        return [{ ...(url.startsWith("image:") ? { storageKey: url } : { url }), ...(image.role ? { role: image.role } : {}) }];
+    });
     return {
         generationType: type,
         model: config.model,
@@ -48,7 +53,8 @@ export function buildImageGenerationMetadata(type: CanvasImageGenerationType, co
         quality: config.quality,
         ...(config.background ? { background: config.background } : {}),
         count,
-        references: references.map(referenceUrl).filter((url): url is string => Boolean(url)),
+        references: referenceImages.map((image) => image.storageKey || image.url || ""),
+        referenceImages,
     };
 }
 

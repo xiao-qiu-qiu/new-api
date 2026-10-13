@@ -6,6 +6,7 @@ import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
 import { CanvasNodeType, type CanvasConnection, type CanvasNodeData } from "@/types/canvas";
 import { getGenerationResourceNodes, getGroupResourceNodes } from "@/lib/canvas/canvas-resource-references";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
+import { sourceNodeReferenceImages } from "@/lib/canvas/canvas-generation-helpers";
 
 export type NodeGenerationContext = {
     prompt: string;
@@ -185,20 +186,13 @@ function textBlock(label: string, text: string) {
 
 function generationLabel(type: NodeGenerationResourceInput["type"], index: number) {
     if (type === "image") return imageReferenceLabel(index);
-    if (type === "video") return i18n.t("canvas.configNode.videoReferences") + ` ${index + 1}`;
-    if (type === "audio") return i18n.t("canvas.configNode.audioReferences") + ` ${index + 1}`;
+    if (type === "video") return `${i18n.t("canvas.configNode.videoReferences")  } ${index + 1}`;
+    if (type === "audio") return `${i18n.t("canvas.configNode.audioReferences")  } ${index + 1}`;
     return i18n.t("canvas.composer.resources.text", { index: index + 1 });
 }
 
 function readReferenceImage(node: CanvasNodeData): ReferenceImage | null {
-    if (node.type !== CanvasNodeType.Image || !node.metadata?.content) return null;
-    return {
-        id: node.id,
-        name: `${node.title || node.id}.png`,
-        type: node.metadata.mimeType || "image/png",
-        dataUrl: node.metadata.content,
-        storageKey: node.metadata.storageKey,
-    };
+    return sourceNodeReferenceImages(node)[0] || null;
 }
 
 function readReferenceVideo(node: CanvasNodeData): ReferenceVideo | null {

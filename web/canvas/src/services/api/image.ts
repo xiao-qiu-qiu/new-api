@@ -1,10 +1,13 @@
 import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
+import { getSiteContext } from "@/integration/site-context";
 import { dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
 import { imageToDataUrl } from "@/services/image-storage";
 import { imageSizePresets } from "@/lib/media-size";
+import { encodeWanxImageEditMask } from "@/lib/canvas/canvas-image-mask";
+import { requestSiteResponsesText } from "./site-agent";
 import type { AiConfig, ModelChannel } from "@/stores/use-config-store";
 import type { ReferenceImage } from "@/types/image";
 import {
@@ -181,7 +184,9 @@ function imageRequestParameters(
     config.model || config.imageModel,
     "image",
   );
-  const size = resolveRequestSize(config.size);
+  const size = selection.model.toLowerCase() === "wanx2.1-imageedit"
+    ? undefined
+    : resolveRequestSize(config.size);
   const background = normalizeBackground(config.background);
   let quality = normalizeQuality(config.quality);
   if (quality === "xhigh" || quality === "max") quality = "high";
@@ -230,16 +235,22 @@ export async function requestEdit(
   references: ReferenceImage[],
   options?: MediaRequestOptions,
 ): Promise<Array<{ id: string; dataUrl: string }>> {
+  const images = references.filter((image) => image.role !== "mask");
+  const masks = references.filter((image) => image.role === "mask");
+  if (!images.length || masks.length > 1) {
+    throw new Error(apiText("referenceImageReadFailed"));
+  }
+  const parameters = imageRequestParameters(config);
   const form = new FormData();
-  for (const [key, value] of Object.entries(imageRequestParameters(config))) {
+  for (const [key, value] of Object.entries(parameters)) {
     form.set(key, String(value));
   }
   form.set(
     "prompt",
-    withSystemPrompt(config, buildImageReferencePromptText(prompt, references)),
+    withSystemPrompt(config, buildImageReferencePromptText(prompt, images)),
   );
   const files = await Promise.all(
-    references.map(async (image) =>
+    images.map(async (image) =>
       dataUrlToFile({
         ...image,
         dataUrl: await imageToDataUrl(image, options),
@@ -248,6 +259,13 @@ export async function requestEdit(
   );
   const field = files.length > 1 ? "image[]" : "image";
   files.forEach((file) => form.append(field, file));
+  if (masks[0]) {
+    let dataUrl = await imageToDataUrl(masks[0], options);
+    if (String(parameters.model).toLowerCase() === "wanx2.1-imageedit") {
+      dataUrl = await encodeWanxImageEditMask(dataUrl, options?.signal);
+    }
+    form.set("mask", dataUrlToFile({ ...masks[0], name: "mask.png", type: "image/png", dataUrl }));
+  }
   const payload = await requestSiteMediaJson<ImageApiResponse>(
     "/pg/images/edits",
     { method: "POST", body: form },
@@ -268,6 +286,20 @@ export async function requestImageQuestion(
     "text",
   );
   const systemPrompt = config.systemPrompt.trim();
+  const model = getSiteContext().channels
+    .find((channel) => channel.id === selection.group)?.models
+    .find((item) => item.name === selection.model);
+  if (model?.chatProtocol === "responses") {
+    return requestSiteResponsesText({
+      ...selection,
+      messages: systemPrompt
+        ? [{ role: "system", content: systemPrompt }, ...messages]
+        : messages,
+      signal: options?.signal,
+      onDelta,
+      reasoningEffort: config.reasoningEffort,
+    });
+  }
   return requestSiteMedia(
     "/pg/chat/completions",
     {

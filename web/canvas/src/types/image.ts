@@ -5,4 +5,7 @@ export type ReferenceImage = {
     dataUrl: string;
     url?: string;
     storageKey?: string;
+    role?: "mask";
 };
+
+export type SavedReferenceImage = Pick<ReferenceImage, "url" | "storageKey" | "role">;

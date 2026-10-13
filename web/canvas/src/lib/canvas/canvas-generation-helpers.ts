@@ -6,7 +6,7 @@ import { imageMetadata, referenceUrl } from "@/lib/canvas/canvas-node-factory";
 import type { NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import type { CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
 import type { CanvasImageAngleParams } from "@/components/canvas/canvas-node-angle-dialog";
-import type { ReferenceImage } from "@/types/image";
+import type { ReferenceImage, SavedReferenceImage } from "@/types/image";
 import { CanvasNodeType, type CanvasAssistantSession, type CanvasConnection, type CanvasNodeData, type CanvasNodeMetadata } from "@/types/canvas";
 
 export function imageExtension(dataUrl: string) {
@@ -32,11 +32,12 @@ export function generationReferenceUrls(context: { referenceImages: ReferenceIma
 
 export async function resolveMetadataReferences(metadata: CanvasNodeMetadata) {
     if (metadata.generationType !== "edit") return [];
-    if (!metadata.references?.length) return null;
+    const savedReferences: SavedReferenceImage[] | undefined = metadata.referenceImages ?? metadata.references?.map((url) => ((url.startsWith("image:") ? { storageKey: url } : { url })));
+    if (!savedReferences?.length) return null;
     const references = await Promise.all(
-        metadata.references.map(async (url, index) => {
-            const dataUrl = url.startsWith("image:") ? await resolveImageUrl(url, "") : url;
-            return dataUrl ? { id: `${index}`, name: `reference-${index}.png`, type: "image/png", dataUrl, storageKey: url.startsWith("image:") ? url : undefined } : null;
+        savedReferences.map(async (image, index) => {
+            const dataUrl = image.storageKey ? await resolveImageUrl(image.storageKey, "") : image.url;
+            return dataUrl ? { id: `${index}`, name: `reference-${index}.png`, type: "image/png", dataUrl, storageKey: image.storageKey, role: image.role } : null;
         }),
     );
     return references.every(Boolean) ? (references as ReferenceImage[]) : null;
@@ -128,22 +129,19 @@ export function hasResumableVideoTask(node: CanvasNodeData) {
 }
 
 export function resetInterruptedGeneration(nodes: CanvasNodeData[]) {
-    return nodes.map((node) =>
-        node.metadata?.status === "loading"
-            ? hasResumableVideoTask(node)
-                ? node
-                : {
-                      ...node,
-                      metadata: {
-                          ...node.metadata,
-                          status: "error" as const,
-                          errorDetails: i18n.t("canvas.generation.interrupted"),
-                          images: node.metadata.images?.map((image) => (image.status === "loading" ? { ...image, status: "error" as const, errorDetails: i18n.t("canvas.generation.interrupted") } : image)),
-                          texts: node.metadata.texts?.map((text) => (text.status === "loading" ? { ...text, status: "error" as const, errorDetails: i18n.t("canvas.generation.interrupted") } : text)),
-                      },
-                  }
-            : node,
-    );
+    return nodes.map((node) => {
+        if (node.metadata?.status !== "loading" || hasResumableVideoTask(node)) return node;
+        return {
+            ...node,
+            metadata: {
+                ...node.metadata,
+                status: "error" as const,
+                errorDetails: i18n.t("canvas.generation.interrupted"),
+                images: node.metadata.images?.map((image) => (image.status === "loading" ? { ...image, status: "error" as const, errorDetails: i18n.t("canvas.generation.interrupted") } : image)),
+                texts: node.metadata.texts?.map((text) => (text.status === "loading" ? { ...text, status: "error" as const, errorDetails: i18n.t("canvas.generation.interrupted") } : text)),
+            },
+        };
+    });
 }
 
 export function isGenerationCanceled(error: unknown) {
@@ -154,7 +152,8 @@ export function findRetrySourceNode(nodeId: string, nodes: CanvasNodeData[], con
     const queue = connections.filter((connection) => connection.toNodeId === nodeId).map((connection) => connection.fromNodeId);
     const visited = new Set<string>();
     while (queue.length) {
-        const id = queue.shift()!;
+        const id = queue.shift();
+        if (id === undefined) break;
         if (visited.has(id)) continue;
         visited.add(id);
         const node = nodes.find((item) => item.id === id);
@@ -166,13 +165,15 @@ export function findRetrySourceNode(nodeId: string, nodes: CanvasNodeData[], con
 
 export function sourceNodeReferenceImages(node: CanvasNodeData | null) {
     if (!node || node.type !== CanvasNodeType.Image || !node.metadata?.content) return [];
+    const mask = node.metadata.maskReference;
     return [
         {
             id: node.id,
             name: `${node.title || node.id}.png`,
             type: node.metadata.mimeType || "image/png",
-            dataUrl: node.metadata.content,
-            storageKey: node.metadata.storageKey,
+            dataUrl: mask ? mask.url || "" : node.metadata.content,
+            storageKey: mask ? mask.storageKey : node.metadata.storageKey,
+            ...(mask ? { role: "mask" as const } : {}),
         },
     ];
 }
@@ -182,8 +183,12 @@ export function isAudioFile(file: File) {
 }
 
 export function buildAngleLabel(params: CanvasImageAngleParams) {
-    const horizontal = params.horizontalAngle === 0 ? i18n.t("canvas.generation.front") : params.horizontalAngle > 0 ? i18n.t("canvas.generation.rotateRight", { angle: params.horizontalAngle }) : i18n.t("canvas.generation.rotateLeft", { angle: Math.abs(params.horizontalAngle) });
-    const pitch = params.pitchAngle === 0 ? i18n.t("canvas.generation.level") : params.pitchAngle > 0 ? i18n.t("canvas.generation.topDown", { angle: params.pitchAngle }) : i18n.t("canvas.generation.lowAngle", { angle: Math.abs(params.pitchAngle) });
+    let horizontal = i18n.t("canvas.generation.front");
+    if (params.horizontalAngle > 0) horizontal = i18n.t("canvas.generation.rotateRight", { angle: params.horizontalAngle });
+    else if (params.horizontalAngle < 0) horizontal = i18n.t("canvas.generation.rotateLeft", { angle: Math.abs(params.horizontalAngle) });
+    let pitch = i18n.t("canvas.generation.level");
+    if (params.pitchAngle > 0) pitch = i18n.t("canvas.generation.topDown", { angle: params.pitchAngle });
+    else if (params.pitchAngle < 0) pitch = i18n.t("canvas.generation.lowAngle", { angle: Math.abs(params.pitchAngle) });
     return i18n.t("canvas.generation.angleLabel", { horizontal, pitch, distance: params.cameraDistance.toFixed(1), lens: i18n.t(params.wideAngle ? "canvas.editors.wide" : "canvas.editors.standard") });
 }
 

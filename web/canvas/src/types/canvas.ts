@@ -1,3 +1,5 @@
+import type { SavedReferenceImage } from "@/types/image";
+
 export type Position = {
     x: number;
     y: number;
@@ -72,6 +74,8 @@ export type CanvasNodeMetadata = {
     audioSpeed?: string;
     audioInstructions?: string;
     references?: string[];
+    referenceImages?: SavedReferenceImage[];
+    maskReference?: SavedReferenceImage;
     naturalWidth?: number;
     naturalHeight?: number;
     freeResize?: boolean;
