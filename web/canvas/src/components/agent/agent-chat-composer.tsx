@@ -4,7 +4,7 @@ import { ArrowUp, Check, ChevronUp, Cpu, Gauge, Hand, ImagePlus, LoaderCircle, R
 import { useTranslation } from "react-i18next";
 
 import { Select, SelectContent, SelectItem, SelectTrigger } from "@/components/ui/select";
-import { canvasThemes } from "@/lib/canvas-theme";
+import type { canvasThemes } from "@/lib/canvas-theme";
 import { useAgentStore, type AgentModel, type AgentPermissionMode, type AgentReasoningEffort } from "@/stores/use-agent-store";
 import type { AgentChatAttachment } from "./agent-chat-message";
 import { AgentChatPromptInput } from "./agent-chat-prompt-input";
@@ -31,6 +31,7 @@ export function AgentChatComposer({
     onModelChange,
     onReasoningEffortChange,
     left,
+    skillsEnabled,
 }: {
     prompt: string;
     attachments?: AgentChatAttachment[];
@@ -53,6 +54,7 @@ export function AgentChatComposer({
     onModelChange?: (model: string) => void;
     onReasoningEffortChange?: (effort: AgentReasoningEffort) => void;
     left?: ReactNode;
+    skillsEnabled?: boolean;
 }) {
     const { t } = useTranslation();
     const fileInputRef = useRef<HTMLInputElement>(null);
@@ -75,7 +77,7 @@ export function AgentChatComposer({
                         ))}
                     </div>
                 ) : null}
-                <AgentChatPromptInput value={prompt} disabled={disabled || sending} placeholder={placeholder} theme={theme} onChange={onPromptChange} onSubmit={() => { if (canSubmit) void onSubmit(); }} onAddFiles={onAddFiles} />
+                <AgentChatPromptInput value={prompt} disabled={disabled || sending} placeholder={placeholder} theme={theme} onChange={onPromptChange} onSubmit={() => { if (canSubmit) void onSubmit(); }} onAddFiles={onAddFiles} skillsEnabled={skillsEnabled} />
                 <div className="@container mt-2 flex items-center justify-between gap-2">
                     <div className="flex min-w-0 items-center gap-1">
                         {onAddFiles ? (

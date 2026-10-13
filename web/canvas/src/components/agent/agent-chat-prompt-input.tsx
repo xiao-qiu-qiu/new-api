@@ -3,7 +3,7 @@ import { Popover } from "antd";
 import { Sparkles } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { canvasThemes } from "@/lib/canvas-theme";
+import type { canvasThemes } from "@/lib/canvas-theme";
 import { buildCanvasResourceReferences, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { isImeComposing, isPlainEnterKey } from "@/lib/keyboard-event";
 import type { AgentSkillSummary } from "@/services/api/canvas-agent";
@@ -16,7 +16,7 @@ type ComposerCommand = { type: "skill" | "resource"; query: string; length: numb
 type ComposerCandidate = { type: "skill"; skill: AgentSkillSummary } | { type: "resource"; reference: CanvasResourceReference };
 type ReferenceHover = { reference: AgentCanvasReference; left: number; top: number; width: number; height: number };
 
-export function AgentChatPromptInput({ value, disabled, placeholder, theme, onChange, onSubmit, onAddFiles }: {
+export function AgentChatPromptInput({ value, disabled, placeholder, theme, onChange, onSubmit, onAddFiles, skillsEnabled = true }: {
     value: string;
     disabled?: boolean;
     placeholder: string;
@@ -24,6 +24,7 @@ export function AgentChatPromptInput({ value, disabled, placeholder, theme, onCh
     onChange: (value: string) => void;
     onSubmit: () => void;
     onAddFiles?: (files: FileList | File[] | null) => void | Promise<void>;
+    skillsEnabled?: boolean;
 }) {
     const containerRef = useRef<HTMLDivElement>(null);
     const editorRef = useRef<HTMLDivElement>(null);
@@ -85,6 +86,7 @@ export function AgentChatPromptInput({ value, disabled, placeholder, theme, onCh
         const match = /(^|\s)([/@])([^\s/@]*)$/.exec(text);
         if (!match) return closeCommand();
         const type = match[2] === "/" ? "skill" : "resource";
+        if (type === "skill" && !skillsEnabled) return closeCommand();
         setCommand({ type, query: match[3] || "", length: (match[3] || "").length + 1 });
         setActiveIndex(0);
         if (type === "skill") {
@@ -188,7 +190,7 @@ export function AgentChatPromptInput({ value, disabled, placeholder, theme, onCh
                     syncFromEditor();
                 }}
                 onPaste={(event) => {
-                    const images = Array.from(event.clipboardData.files).filter((file) => file.type.startsWith("image/"));
+                    const images = [...event.clipboardData.files].filter((file) => file.type.startsWith("image/"));
                     if (images.length && onAddFiles) {
                         event.preventDefault();
                         void onAddFiles(images);
@@ -246,6 +248,8 @@ function AgentCommandMenu({ command, candidates, activeIndex, loading, theme, on
     const activeItemRef = useRef<HTMLButtonElement | null>(null);
     useEffect(() => { activeItemRef.current?.scrollIntoView({ block: "nearest" }); }, [activeIndex]);
     const stopPropagation = (event: PointerEvent | MouseEvent) => event.stopPropagation();
+    let emptyKey = command.type === "skill" ? "agent.composer.mentions.noSkills" : "agent.composer.mentions.noResources";
+    if (loading) emptyKey = "agent.composer.mentions.loadingSkills";
     return (
         <div data-agent-command-menu className="absolute bottom-[calc(100%+8px)] left-0 z-[120] w-full min-w-64 overflow-hidden rounded-xl border shadow-xl" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }} onPointerDown={stopPropagation} onMouseDown={stopPropagation}>
             <div className="border-b px-3 py-2 text-xs" style={{ borderColor: theme.toolbar.border, color: theme.node.muted }}>
@@ -256,14 +260,22 @@ function AgentCommandMenu({ command, candidates, activeIndex, loading, theme, on
                     const skill = candidate.type === "skill" ? candidate.skill : null;
                     const reference = candidate.type === "resource" ? candidate.reference : null;
                     const title = skill ? skill.interface?.displayName || skill.name : reference?.title || "";
-                    const description = skill ? skill.interface?.shortDescription || skill.shortDescription || skill.description : reference ? `${agentReferenceMarker(reference)} · ${canvasReferenceKindLabel(reference.kind)}` : "";
+                    let description = "";
+                    let icon = null;
+                    if (skill) {
+                        description = skill.interface?.shortDescription || skill.shortDescription || skill.description;
+                        icon = <span className="grid size-9 shrink-0 place-items-center"><Sparkles className="size-4" /></span>;
+                    } else if (reference) {
+                        description = `${agentReferenceMarker(reference)} · ${canvasReferenceKindLabel(reference.kind)}`;
+                        icon = <ReferencePreview reference={reference} />;
+                    }
                     return (
                         <button key={skill ? `${skill.name}:${skill.path}` : reference?.nodeId} ref={index === activeIndex ? activeItemRef : undefined} type="button" className="flex w-full min-w-0 items-center gap-2.5 rounded-lg px-2 py-2 text-left transition hover:bg-black/5 dark:hover:bg-white/10" style={{ background: index === activeIndex ? theme.toolbar.activeBg : undefined, color: index === activeIndex ? theme.toolbar.activeText : theme.node.text }} onPointerDown={(event) => { event.preventDefault(); onSelect(candidate); }}>
-                            {skill ? <span className="grid size-9 shrink-0 place-items-center"><Sparkles className="size-4" /></span> : reference ? <ReferencePreview reference={reference} /> : null}
+                            {icon}
                             <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{title}</span><span className="mt-0.5 block truncate text-xs" style={{ color: theme.node.muted }}>{description}</span></span>
                         </button>
                     );
-                }) : <div className="px-3 py-6 text-center text-xs" style={{ color: theme.node.muted }}>{t(loading ? "agent.composer.mentions.loadingSkills" : command.type === "skill" ? "agent.composer.mentions.noSkills" : "agent.composer.mentions.noResources")}</div>}
+                }) : <div className="px-3 py-6 text-center text-xs" style={{ color: theme.node.muted }}>{t(emptyKey)}</div>}
             </div>
         </div>
     );
@@ -379,7 +391,7 @@ function adjacentToken(range: Range, previous: boolean) {
         if (previous ? offset > 0 : offset < text.length) return null;
         return tokenSibling(container, previous);
     }
-    const children = Array.from(container.childNodes);
+    const children = [...container.childNodes];
     const node = children[previous ? offset - 1 : offset];
     return node instanceof HTMLElement && node.dataset.agentToken ? node : tokenSibling(node || container, previous);
 }
@@ -392,7 +404,7 @@ function tokenSibling(node: Node, previous: boolean) {
 
 function syncSelectedMetadata(editor: HTMLElement) {
     const state = useAgentStore.getState();
-    const nodeIds = new Set(Array.from(editor.querySelectorAll<HTMLElement>("[data-agent-token-kind='resource']")).map((item) => item.dataset.nodeId));
+    const nodeIds = new Set([...editor.querySelectorAll<HTMLElement>('[data-agent-token-kind=\'resource\']')].map((item) => item.dataset.nodeId));
     const references = state.canvasReferences.filter((item) => nodeIds.has(item.nodeId));
     if (references.length !== state.canvasReferences.length) state.setAgentState({ canvasReferences: references });
     const selectedSkill = useAgentSkillStore.getState().selectedSkill;
@@ -410,7 +422,7 @@ function textBeforeCaret(editor: HTMLElement | null) {
 }
 
 function serializeEditor(editor: HTMLElement) {
-    return serializeNodes(editor.childNodes).replace(/﻿/g, "");
+    return serializeNodes(editor.childNodes).replaceAll('﻿', "");
 }
 
 function serializeNodes(nodes: NodeListOf<ChildNode>) {
