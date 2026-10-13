@@ -93,6 +93,25 @@ const reference = {
 };
 const json = (value: unknown, status = 200) => Response.json(value, { status });
 
+function videoContractConfig(
+  model: string,
+  overrides: Partial<AiConfig> = {},
+): AiConfig {
+  return {
+    ...config,
+    ...overrides,
+    model: `media group::${model}`,
+    size: "1280x720",
+    videoSeconds: "6",
+    channels: [
+      {
+        ...channels[0],
+        models: [...channels[0].models, { name: model, capability: "video" }],
+      },
+    ],
+  };
+}
+
 beforeEach(() => {
   siteFetch.mockReset();
   values.clear();
@@ -277,9 +296,9 @@ test("multiple video reference images retain frame metadata in the gateway task 
   expect(JSON.parse(String(init?.body))).toMatchObject({
     model: "sora-2",
     group: "media group",
+    input_reference: reference.dataUrl,
     images: [reference.dataUrl, reference.dataUrl],
     metadata: {
-      mode: "frames",
       first_frame: reference.dataUrl,
       last_frame: reference.dataUrl,
       generate_audio: true,
@@ -287,6 +306,337 @@ test("multiple video reference images retain frame metadata in the gateway task 
     },
   });
 });
+
+test.each([
+  {
+    model: "kling-v2-1",
+    plugin: "kling",
+    body: {
+      image: reference.dataUrl,
+      image_tail: "data:image/png;base64,dGFpbA==",
+    },
+  },
+  {
+    model: "doubao-seedance-2-0-260128",
+    plugin: "doubao",
+    body: {
+      content: [
+        {
+          type: "image_url",
+          image_url: { url: reference.dataUrl },
+          role: "first_frame",
+        },
+        {
+          type: "image_url",
+          image_url: { url: "data:image/png;base64,dGFpbA==" },
+          role: "last_frame",
+        },
+        { type: "text", text: "Animate" },
+      ],
+    },
+  },
+  {
+    model: "MiniMax-Hailuo-2.3",
+    plugin: "hailuo",
+    body: {
+      first_frame_image: reference.dataUrl,
+      last_frame_image: "data:image/png;base64,dGFpbA==",
+    },
+  },
+  {
+    model: "MiniMax-H3",
+    plugin: "hailuo",
+    body: {
+      resolution: "768P",
+      content: [
+        { type: "text", text: "Animate" },
+        {
+          type: "image_url",
+          image_url: { url: reference.dataUrl },
+          role: "first_frame",
+        },
+        {
+          type: "image_url",
+          image_url: { url: "data:image/png;base64,dGFpbA==" },
+          role: "last_frame",
+        },
+      ],
+    },
+  },
+  {
+    model: "grok-imagine-video",
+    plugin: "xai",
+    body: {
+      image: { url: reference.dataUrl },
+      last_frame: { url: "data:image/png;base64,dGFpbA==" },
+    },
+  },
+  {
+    model: "viduq2",
+    plugin: "vidu",
+    body: { images: [reference.dataUrl, "data:image/png;base64,dGFpbA=="] },
+  },
+])(
+  "$model frame requests survive the real plugin decoder and retain both frames upstream",
+  async ({ model, plugin, body }) => {
+    siteFetch.mockResolvedValueOnce(json({ id: "frames", status: "queued" }));
+    await createVideoGenerationTask(videoContractConfig(model), "Animate", [
+      reference,
+      { ...reference, id: "tail", dataUrl: "data:image/png;base64,dGFpbA==" },
+    ]);
+    const init = siteFetch.mock.calls[0][1];
+    expect(new Headers(init?.headers).get("Content-Type")).toBe(
+      "application/json",
+    );
+    const payload = JSON.parse(String(init?.body));
+    expect(payload.metadata?.mode).toBeUndefined();
+    const provider = await import(
+      new URL(
+        `../../../../../../plugins/tasks/${plugin}/plugin.js`,
+        import.meta.url,
+      ).href
+    );
+    const identity = {
+      model,
+      upstreamModel: model,
+      baseUrl: "https://fixture.example",
+      apiKey: "sk-fixture",
+      upstream: { kind: "new_api" },
+    };
+    const decoded = provider.protocols.openai_video.decodeRequest({
+      ...identity,
+      body: { kind: "json", value: payload },
+    });
+    const outbound = provider.buildSubmitRequest({
+      ...identity,
+      requestBody: decoded.requestBody,
+      action: decoded.action,
+    });
+    expect(outbound.body).toMatchObject(body);
+    if (plugin === "xai") expect(outbound.action).toBe("image_to_video");
+    if (plugin === "vidu") expect(outbound.action).toBe("first_tail_to_video");
+  },
+);
+
+test.each(["doubao-seedance-2-0-260128", "MiniMax-H3"])(
+  "%s keeps every image, video and audio in reference content accepted by its plugin",
+  async (model) => {
+    const videoUrls = [
+      "data:video/mp4;base64,dmlkZW8x",
+      "data:video/mp4;base64,dmlkZW8y",
+    ];
+    const audioUrls = [
+      "data:audio/wav;base64,YXVkaW8x",
+      "data:audio/wav;base64,YXVkaW8y",
+    ];
+    siteFetch.mockResolvedValueOnce(
+      json({ id: "references", status: "queued" }),
+    );
+    await createVideoGenerationTask(
+      videoContractConfig(model),
+      "Animate",
+      [reference, { ...reference, id: "second" }],
+      {
+        videos: videoUrls.map((url, index) => ({
+          id: `v${index}`,
+          name: "ref.mp4",
+          type: "video/mp4",
+          url,
+        })),
+        audios: audioUrls.map((url, index) => ({
+          id: `a${index}`,
+          name: "ref.wav",
+          type: "audio/wav",
+          url,
+        })),
+      },
+    );
+    const payload = JSON.parse(String(siteFetch.mock.calls[0][1]?.body));
+    expect(payload.images).toBeUndefined(); // content already contains the images; Doubao prepends images otherwise.
+    expect(payload.metadata.content).toEqual([
+      {
+        type: "image_url",
+        image_url: { url: reference.dataUrl },
+        role: "reference_image",
+      },
+      {
+        type: "image_url",
+        image_url: { url: reference.dataUrl },
+        role: "reference_image",
+      },
+      ...videoUrls.map((url) => ({
+        type: "video_url",
+        video_url: { url },
+        role: "reference_video",
+      })),
+      ...audioUrls.map((url) => ({
+        type: "audio_url",
+        audio_url: { url },
+        role: "reference_audio",
+      })),
+    ]);
+    const plugin = model === "MiniMax-H3" ? "hailuo" : "doubao";
+    const provider = await import(
+      new URL(
+        `../../../../../../plugins/tasks/${plugin}/plugin.js`,
+        import.meta.url,
+      ).href
+    );
+    const identity = {
+      model,
+      upstreamModel: model,
+      baseUrl: "https://fixture.example",
+    };
+    const decoded = provider.protocols.openai_video.decodeRequest({
+      ...identity,
+      body: { kind: "json", value: payload },
+    });
+    const outbound = provider.buildSubmitRequest({
+      ...identity,
+      requestBody: decoded.requestBody,
+      action: decoded.action,
+    });
+    expect(
+      outbound.body.content.filter(
+        (item: { type: string }) => item.type !== "text",
+      ),
+    ).toEqual(payload.metadata.content);
+  },
+);
+
+test("Doubao single-image requests use JSON content instead of its rejected input_reference upload", async () => {
+  siteFetch.mockResolvedValueOnce(json({ id: "single", status: "queued" }));
+  await createVideoGenerationTask(
+    videoContractConfig("doubao-seedance-2-0-260128"),
+    "Animate",
+    [reference],
+  );
+  const init = siteFetch.mock.calls[0][1];
+  expect(new Headers(init?.headers).get("Content-Type")).toBe(
+    "application/json",
+  );
+  expect(JSON.parse(String(init?.body)).metadata.content).toEqual([
+    {
+      type: "image_url",
+      image_url: { url: reference.dataUrl },
+      role: "first_frame",
+    },
+  ]);
+});
+
+test.each([
+  {
+    model: "viduq2",
+    plugin: "vidu",
+    body: { images: [reference.dataUrl, reference.dataUrl] },
+  },
+  {
+    model: "grok-imagine-video",
+    plugin: "xai",
+    body: {
+      reference_images: [
+        { url: reference.dataUrl },
+        { url: reference.dataUrl },
+      ],
+      reference_audios: [
+        { url: "data:audio/wav;base64,YXVkaW8x" },
+        { url: "data:audio/wav;base64,YXVkaW8y" },
+      ],
+    },
+  },
+])(
+  "$model explicit reference mode stays reference mode with two images",
+  async ({ model, plugin, body }) => {
+    siteFetch.mockResolvedValueOnce(
+      json({ id: "references", status: "queued" }),
+    );
+    await createVideoGenerationTask(
+      videoContractConfig(model, { videoMode: "reference" }),
+      "Animate",
+      [reference, { ...reference, id: "second" }],
+      {
+        audios:
+          plugin === "xai"
+            ? [
+                "data:audio/wav;base64,YXVkaW8x",
+                "data:audio/wav;base64,YXVkaW8y",
+              ].map((url, index) => ({
+                id: `a${index}`,
+                name: "ref.wav",
+                type: "audio/wav",
+                url,
+              }))
+            : [],
+      },
+    );
+    const payload = JSON.parse(String(siteFetch.mock.calls[0][1]?.body));
+    const provider = await import(
+      new URL(
+        `../../../../../../plugins/tasks/${plugin}/plugin.js`,
+        import.meta.url,
+      ).href
+    );
+    const identity = {
+      model,
+      upstreamModel: model,
+      baseUrl: "https://fixture.example",
+    };
+    const decoded = provider.protocols.openai_video.decodeRequest({
+      ...identity,
+      body: { kind: "json", value: payload },
+    });
+    const outbound = provider.buildSubmitRequest({
+      ...identity,
+      requestBody: decoded.requestBody,
+      action: decoded.action,
+    });
+    expect(outbound.action).toBe("reference_to_video");
+    expect(outbound.body).toMatchObject(body);
+  },
+);
+
+test.each(["google", "vertex-ai"])(
+  "%s plugin receives one image and its native resolution/audio parameter names",
+  async (plugin) => {
+    const model = "veo-3.0-generate-001";
+    siteFetch.mockResolvedValueOnce(json({ id: "veo", status: "queued" }));
+    await createVideoGenerationTask(videoContractConfig(model), "Animate", [
+      reference,
+    ]);
+    const payload = JSON.parse(String(siteFetch.mock.calls[0][1]?.body));
+    const provider = await import(
+      new URL(
+        `../../../../../../plugins/tasks/${plugin}/plugin.js`,
+        import.meta.url,
+      ).href
+    );
+    const identity = {
+      model,
+      upstreamModel: model,
+      baseUrl: "https://fixture.example",
+      auth: { projectId: "fixture" },
+    };
+    const decoded = provider.protocols.openai_video.decodeRequest({
+      ...identity,
+      body: { kind: "json", value: payload },
+    });
+    const outbound = provider.buildSubmitRequest({
+      ...identity,
+      requestBody: decoded.requestBody,
+      action: decoded.action,
+    });
+    expect(outbound.action).toBe("image_to_video");
+    expect(outbound.body.parameters).toMatchObject({
+      generateAudio: true,
+      resolution: "720p",
+      aspectRatio: "16:9",
+      durationSeconds: 6,
+    });
+    expect(outbound.body.parameters).not.toHaveProperty("resolution_name");
+    expect(outbound.body.parameters).not.toHaveProperty("generate_audio");
+    expect(outbound.body.instances[0].image).toBeDefined();
+  },
+);
 
 test("speech requests use standard OpenAI fields and reject JSON errors masquerading as audio", async () => {
   const speech = {
