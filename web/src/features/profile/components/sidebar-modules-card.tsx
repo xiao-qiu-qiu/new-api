@@ -63,6 +63,11 @@ export function SidebarModulesCard() {
       description: t('Playground and chat functions'),
       modules: [
         {
+          key: 'canvas',
+          title: t('Infinite Canvas'),
+          description: t('Create images and videos on an infinite canvas'),
+        },
+        {
           key: 'playground',
           title: t('Playground'),
           description: t('AI model testing environment'),

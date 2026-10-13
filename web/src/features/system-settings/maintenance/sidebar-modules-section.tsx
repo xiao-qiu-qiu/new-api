@@ -88,6 +88,10 @@ export function SidebarModulesSection({
     Record<string, { title: string; description: string }>
   > = {
     chat: {
+      canvas: {
+        title: t('Infinite Canvas'),
+        description: t('Create images and videos on an infinite canvas'),
+      },
       playground: {
         title: t('Playground'),
         description: t('Experiment with prompts and models in real time.'),
