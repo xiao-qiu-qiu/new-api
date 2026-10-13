@@ -1,14 +1,13 @@
-import localforage from "localforage";
-
 import i18n from "@/i18n";
+import { createUserLocalForage } from "@/lib/site-storage";
 import { getMediaBlob, resolveMediaUrl, setMediaBlob } from "@/services/file-storage";
 import { getImageBlob, resolveImageUrl, setImageBlob } from "@/services/image-storage";
 import { downloadWebdavFile, uploadWebdavFile, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
-import type { Asset } from "@/stores/use-asset-store";
-import { useAssetStore } from "@/stores/use-asset-store";
+import { type Asset,useAssetStore } from "@/stores/use-asset-store";
+
 import type { WebdavSyncConfig } from "@/stores/use-config-store";
-import type { CanvasDeletedProject, CanvasProject } from "@/stores/canvas/use-canvas-store";
-import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
+import { type CanvasDeletedProject, type CanvasProject,useCanvasStore } from "@/stores/canvas/use-canvas-store";
+
 
 type StoredLog = Record<string, unknown> & { id?: string };
 export type AppSyncDomainKey = "canvas" | "assets" | "image-workbench" | "video-workbench";
@@ -76,8 +75,8 @@ export type AppSyncProgressEvent = {
 export type AppSyncProgress = (event: AppSyncProgressEvent) => void;
 
 const FILE_CONCURRENCY = 3;
-const imageLogStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_generation_logs" });
-const videoLogStore = localforage.createInstance({ name: "infinite-canvas", storeName: "video_generation_logs" });
+const imageLogStore = createUserLocalForage("image_generation_logs");
+const videoLogStore = createUserLocalForage("video_generation_logs");
 type LogStore = typeof imageLogStore;
 const storageKeyPattern = /^(image|video|audio|file|video-reference|audio-reference):/;
 
@@ -333,7 +332,7 @@ function mergeById<T extends { id?: string }>(local: T[], remote: T[], timeKey: 
         const current = items.get(id);
         if (!current || getTime(item as Record<string, unknown>, timeKey) >= getTime(current as Record<string, unknown>, timeKey)) items.set(id, item);
     });
-    return Array.from(items.values()).sort((a, b) => getTime(b as Record<string, unknown>, timeKey) - getTime(a as Record<string, unknown>, timeKey));
+    return [...items.values()].sort((a, b) => getTime(b as Record<string, unknown>, timeKey) - getTime(a as Record<string, unknown>, timeKey));
 }
 
 function collectStorageKeys(value: unknown, keys = new Set<string>()) {
@@ -375,7 +374,7 @@ function getTime(item: Record<string, unknown>, key: string) {
 }
 
 function safeFileName(value: string) {
-    return value.replace(/[\\/:*?"<>|]/g, "_");
+    return value.replaceAll(/[\\/:*?"<>|]/g, "_");
 }
 
 function fileExtension(mimeType: string, storageKey: string) {
@@ -402,7 +401,7 @@ function waitForHydration<T extends { hydrated: boolean }>(store: { getState: ()
 }
 
 async function runWithConcurrency<T, R>(items: T[], limit: number, worker: (item: T, index: number) => Promise<R>) {
-    const results = new Array<R>(items.length);
+    const results: R[] = [];
     let nextIndex = 0;
     await Promise.all(
         Array.from({ length: Math.min(limit, items.length) }, async () => {

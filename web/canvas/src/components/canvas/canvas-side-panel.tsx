@@ -9,6 +9,7 @@ import { canvasThemes, type CanvasTheme } from "@/lib/canvas-theme";
 import { exportCanvasNodes } from "@/lib/canvas/canvas-export";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { cn } from "@/lib/utils";
+import { userLocalStorage } from "@/lib/site-storage";
 import { PromptDetailDialog } from "@/pages/prompts/components/prompt-detail-dialog";
 import { fetchSourcePrompts, type Prompt } from "@/services/api/prompts";
 import { uploadMediaFile } from "@/services/file-storage";
@@ -72,7 +73,7 @@ export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onPreview
             setWidth(nextWidth);
         };
         const onUp = () => {
-            localStorage.setItem("canvas-side-panel-width", String(nextWidth));
+            userLocalStorage.setItem("canvas-side-panel-width", String(nextWidth));
             window.removeEventListener("pointermove", onMove);
             window.removeEventListener("pointerup", onUp);
             setResizing(false);
@@ -108,11 +109,13 @@ export function CanvasSidePanel({ nodes, selectedNodeIds, onFocusNode, onPreview
                 <div className="mt-2 min-h-0 flex-1 overflow-hidden">
                     {tab === "canvas" ? (
                         <CanvasNodesTab nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={onFocusNode} onPreviewNode={onPreviewNode} onHoverNode={onHoverNode} theme={theme} />
-                    ) : tab === "assets" ? (
+                    ) : null}
+                    {tab === "assets" ? (
                         <CanvasAssetsTab onInsert={onInsertAsset} theme={theme} />
-                    ) : (
+                    ) : null}
+                    {tab === "prompts" ? (
                         <CanvasPromptsTab onInsert={onInsertAsset} theme={theme} />
-                    )}
+                    ) : null}
                 </div>
                 <button type="button" className="absolute inset-y-0 right-0 z-40 w-4 translate-x-1/2 cursor-col-resize" onPointerDown={startResize} aria-label={t("canvas.sidePanel.resize")} />
             </motion.aside>
@@ -253,8 +256,7 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, on
                 <Input size="small" allowClear prefix={<Search className="size-3.5 text-stone-400" />} placeholder={t("canvas.sidePanel.searchNodes")} value={keyword} onChange={(e) => setKeyword(e.target.value)} />
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
-                {nodeViewMode === "grid" ? (
-                    filtered.length ? (
+                {nodeViewMode === "grid" && filtered.length > 0 ? (
                         <div className="grid gap-2 px-1 [grid-template-columns:repeat(auto-fill,minmax(88px,1fr))]">
                             {filtered.map((node) => {
                                 const Icon = NODE_TYPE_ICON[node.type] || FileText;
@@ -290,10 +292,11 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, on
                                 );
                             })}
                         </div>
-                    ) : (
-                        <div className="pt-16 text-center text-sm opacity-40">{t("canvas.sidePanel.noNodes")}</div>
-                    )
-                ) : treeRows.length ? (
+                ) : null}
+                {nodeViewMode === "grid" && !filtered.length ? (
+                    <div className="pt-16 text-center text-sm opacity-40">{t("canvas.sidePanel.noNodes")}</div>
+                ) : null}
+                {nodeViewMode !== "grid" && treeRows.length > 0 ? (
                     <div className="space-y-1.5">
                         {treeRows.map(({ node, depth, hasChildren }) => {
                             const Icon = NODE_TYPE_ICON[node.type] || FileText;
@@ -340,9 +343,10 @@ function CanvasNodesTab({ nodes, selectedNodeIds, onFocusNode, onPreviewNode, on
                             );
                         })}
                     </div>
-                ) : (
+                ) : null}
+                {nodeViewMode !== "grid" && !treeRows.length ? (
                     <div className="pt-16 text-center text-sm opacity-40">{t("canvas.sidePanel.noNodes")}</div>
-                )}
+                ) : null}
             </div>
             {selectMode ? (
                 <div className="flex items-center gap-2 border-t px-3 py-2.5" style={{ borderColor: theme.toolbar.border }}>
@@ -402,7 +406,7 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ onInsert, theme }: { onI
     const [uploading, setUploading] = useState(false);
     const fileInputRef = useRef<HTMLInputElement>(null);
 
-    const allTags = useMemo(() => Array.from(new Set(assets.flatMap((asset) => asset.tags || []))).slice(0, 20), [assets]);
+    const allTags = useMemo(() => [...new Set(assets.flatMap((asset) => asset.tags || []))].slice(0, 20), [assets]);
 
     const filtered = useMemo(() => {
         const query = keyword.trim().toLowerCase();
@@ -412,7 +416,7 @@ const CanvasAssetsTab = memo(function CanvasAssetsTab({ onInsert, theme }: { onI
     const groups = useMemo(() => ASSET_GROUPS.map((group) => ({ ...group, items: filtered.filter((asset) => asset.kind === group.kind) })).filter((group) => group.items.length > 0), [filtered]);
 
     const handleFiles = async (fileList: FileList | null) => {
-        const files = Array.from(fileList || []);
+        const files = [...fileList || []];
         if (!files.length) return;
         setUploading(true);
         const hide = message.loading(t("canvas.sidePanel.addingAssets"), 0);
@@ -638,19 +642,22 @@ function PromptSourceGroup({
                         <div className="flex justify-center py-6">
                             <Spin size="small" />
                         </div>
-                    ) : query.isError ? (
+                    ) : null}
+                    {!query.isLoading && query.isError ? (
                         <button type="button" onClick={() => void query.refetch()} className="block w-full py-4 text-center text-xs text-red-500 opacity-80 transition hover:opacity-100">
                             {t("canvas.sidePanel.loadFailedRetry")}
                         </button>
-                    ) : filtered.length ? (
+                    ) : null}
+                    {!query.isLoading && !query.isError && filtered.length > 0 ? (
                         <div className="space-y-1.5">
                             {filtered.map((item) => (
                                 <PromptRow key={item.id} item={item} theme={theme} onInsert={() => insertPrompt(item)} onView={() => onView(item)} />
                             ))}
                         </div>
-                    ) : (
+                    ) : null}
+                    {!query.isLoading && !query.isError && !filtered.length ? (
                         <div className="py-4 text-center text-xs opacity-40">{keyword.trim() ? t("canvas.sidePanel.noMatchingPrompts") : t("canvas.sidePanel.sourceEmpty")}</div>
-                    )}
+                    ) : null}
                 </div>
             ) : null}
         </div>

@@ -1,5 +1,4 @@
-import localforage from "localforage";
-
+import { createUserLocalForage } from "@/lib/site-storage";
 import { runPromptSource, type RawPrompt } from "./prompt-source-runtime";
 import { usePromptSourceStore } from "@/stores/use-prompt-source-store";
 import i18n from "@/i18n";
@@ -46,7 +45,7 @@ type SourceCache = PromptSourceStatus & {
 };
 
 const cacheTtlMs = 1000 * 60 * 60;
-const promptCacheStore = localforage.createInstance({ name: "infinite-canvas", storeName: "prompt_cache" });
+const promptCacheStore = createUserLocalForage("prompt_cache");
 const loadingSources = new Map<string, Promise<PromptSourceRefreshResult>>();
 
 function enabledSources() {
@@ -213,7 +212,7 @@ function filterPrompts(items: Prompt[], options: { keyword: string; category: st
 }
 
 function collectTags(items: Prompt[]) {
-    return Array.from(new Set(items.flatMap((item) => item.tags).filter(Boolean)));
+    return [...new Set(items.flatMap((item) => item.tags).filter(Boolean))];
 }
 
 function isActiveOption(value: string) {

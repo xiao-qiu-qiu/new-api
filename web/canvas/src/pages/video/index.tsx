@@ -1,7 +1,7 @@
 import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, LoaderCircle, Plus, SlidersHorizontal, Sparkles, Trash2, Upload, VideoIcon } from "lucide-react";
 import { useEffect, useRef, useState, useSyncExternalStore, type DragEvent } from "react";
 import { App, Button, Checkbox, Drawer, Empty, Input, Modal, Tag, Typography } from "antd";
-import localforage from "localforage";
+import { createUserLocalForage } from "@/lib/site-storage";
 import { nanoid } from "nanoid";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
@@ -22,6 +22,7 @@ import { boolConfig, modelOptionLabel, useConfigStore, useEffectiveConfig, type 
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { ReferenceImage } from "@/types/image";
 import i18n from "@/i18n";
+import { toIntlLocale } from "@/i18n/languages";
 
 type GeneratedVideo = {
     id: string;
@@ -65,7 +66,7 @@ type GenerationLogConfig = Pick<AiConfig, "model" | "videoModel" | "size" | "vqu
 type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
 
 const LOG_STORE_KEY = "infinite-canvas:video_generation_logs";
-const logStore = localforage.createInstance({ name: "infinite-canvas", storeName: "video_generation_logs" });
+const logStore = createUserLocalForage("video_generation_logs");
 
 export default function VideoPage() {
     const { message } = App.useApp();
@@ -111,12 +112,8 @@ export default function VideoPage() {
         return () => window.clearInterval(timer);
     }, [running, startedAt]);
 
-    useEffect(() => {
-        void refreshLogs();
-    }, []);
-
     const addReferences = async (files?: FileList | null) => {
-        const selectedFiles = Array.from(files || []);
+        const selectedFiles = [...files || []];
         const unsupported = selectedFiles.filter((file) => !file.type.startsWith("image/"));
         if (unsupported.length) message.warning(t("videoWorkbench.unsupportedFiles"));
         const imageFiles = selectedFiles.filter((file) => file.type.startsWith("image/")).slice(0, 7 - references.length);
@@ -212,7 +209,7 @@ export default function VideoPage() {
             agentTaskIdRef.current = videoCommand.taskId;
             setAutoRunToken((value) => value + 1);
         }
-    }, [videoCommand, clearVideoCommand, running, updateAgentTask]);
+    }, [videoCommand, clearVideoCommand, running, updateAgentTask, t]);
 
     useEffect(() => {
         if (!autoRunToken) return;
@@ -366,8 +363,16 @@ export default function VideoPage() {
         if (log.config.videoGenerateAudio) updateConfig("videoGenerateAudio", log.config.videoGenerateAudio);
         if (log.config.videoWatermark) updateConfig("videoWatermark", log.config.videoWatermark);
         if (log.config.videoMode) updateConfig("videoMode", log.config.videoMode);
-        setResults(log.status === "pending" ? [{ id: log.id, status: "pending" }] : log.video ? [{ id: log.video.id, status: "success", video: log.video }] : [{ id: log.id, status: "failed", error: log.error || t("workbench.generationFailed") }]);
+        if (log.status === "pending") setResults([{ id: log.id, status: "pending" }]);
+        else if (log.video) setResults([{ id: log.video.id, status: "success", video: log.video }]);
+        else setResults([{ id: log.id, status: "failed", error: log.error || t("workbench.generationFailed") }]);
     };
+
+    // Resume the user's stored jobs once, using the configuration at mount.
+    const initialRefreshLogs = useRef(refreshLogs);
+    useEffect(() => {
+        void initialRefreshLogs.current();
+    }, []);
 
     return (
         <div className="flex h-full flex-col overflow-hidden bg-stone-50 text-stone-900 dark:bg-stone-950 dark:text-stone-100">
@@ -470,7 +475,11 @@ export default function VideoPage() {
                         </div>
                         {results.length ? (
                             <div className="grid gap-4">
-                                {results.map((result) => (result.status === "success" && result.video ? <ResultVideoCard key={result.id} video={result.video} onDownload={downloadVideo} onSaveAsset={saveResultToAssets} /> : result.status === "failed" ? <FailedVideoCard key={result.id} error={result.error || t("workbench.generationFailed")} onRetry={retryResult} /> : <PendingVideoCard key={result.id} />))}
+                                {results.map((result) => {
+                                    if (result.status === "success" && result.video) return <ResultVideoCard key={result.id} video={result.video} onDownload={downloadVideo} onSaveAsset={saveResultToAssets} />;
+                                    if (result.status === "failed") return <FailedVideoCard key={result.id} error={result.error || t("workbench.generationFailed")} onRetry={retryResult} />;
+                                    return <PendingVideoCard key={result.id} />;
+                                })}
                             </div>
                         ) : (
                             <div className="flex min-h-[320px] flex-col items-center justify-center rounded-lg border border-dashed border-stone-300 text-center dark:border-stone-700 lg:min-h-[560px]">
@@ -633,6 +642,15 @@ function LogPanel({
 
 function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: GenerationLog; selected: boolean; active: boolean; onSelectedChange: (checked: boolean) => void; onClick: () => void }) {
     const { t } = useTranslation();
+    let statusColor = "red";
+    let statusKey = "failed";
+    if (log.status === "success") {
+        statusColor = "blue";
+        statusKey = "success";
+    } else if (log.status === "pending") {
+        statusColor = "processing";
+        statusKey = "generating";
+    }
     return (
         <button type="button" className={`block w-full rounded-lg border p-2 text-left transition ${active ? "border-stone-900 bg-blue-50 dark:border-stone-100 dark:bg-blue-950/20" : "border-stone-200 bg-background hover:bg-stone-50 dark:border-stone-800 dark:hover:bg-stone-900"}`} onClick={onClick}>
             <div className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-2">
@@ -646,8 +664,8 @@ function LogCard({ log, selected, active, onSelectedChange, onClick }: { log: Ge
                     </div>
                 </div>
                 <div className="grid justify-items-end gap-2">
-                    <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" color={log.status === "success" ? "blue" : log.status === "pending" ? "processing" : "red"}>
-                        {t(`workbench.${log.status === "success" ? "success" : log.status === "pending" ? "generating" : "failed"}`)}
+                    <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" color={statusColor}>
+                        {t(`workbench.${statusKey}`)}
                     </Tag>
                     <Tag className="m-0 flex h-6 items-center rounded-md px-1.5 text-xs leading-none" color="green">
                         {formatDuration(log.durationMs)}
@@ -685,7 +703,7 @@ async function normalizeLog(log: Partial<GenerationLog>): Promise<GenerationLog>
         createdAt: log.createdAt || Date.now(),
         title: log.title || log.model || i18n.t("workbench.untitled"),
         prompt: log.prompt || "",
-        time: log.time || new Date().toLocaleString(i18n.resolvedLanguage, { hour12: false }),
+        time: log.time || new Date().toLocaleString(toIntlLocale(i18n.resolvedLanguage || i18n.language), { hour12: false }),
         model: log.model || config.videoModel || "",
         config,
         references,
@@ -755,7 +773,7 @@ function buildLog({ prompt, model, config, references, durationMs, status, task,
         createdAt: Date.now(),
         title: prompt.slice(0, 12) || i18n.t("workbench.untitled"),
         prompt,
-        time: new Date().toLocaleString(i18n.resolvedLanguage, { hour12: false }),
+        time: new Date().toLocaleString(toIntlLocale(i18n.resolvedLanguage || i18n.language), { hour12: false }),
         model,
         config: logConfig,
         references,

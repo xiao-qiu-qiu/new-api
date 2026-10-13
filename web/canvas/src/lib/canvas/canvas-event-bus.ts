@@ -1,4 +1,4 @@
-import localforage from "localforage";
+import { createUserLocalForage } from "@/lib/site-storage";
 
 import type { PluginStorage } from "@/types/canvas-plugin";
 
@@ -23,7 +23,7 @@ export function onCanvasEvent(event: string, handler: Handler) {
         handlers.set(event, set);
     }
     set.add(handler);
-    return () => set!.delete(handler);
+    return () => set.delete(handler);
 }
 
 // Private plugin storage isolated by pluginId namespace.
@@ -32,16 +32,16 @@ const stores = new Map<string, LocalForage>();
 export function createPluginStorage(pluginId: string): PluginStorage {
     let store = stores.get(pluginId);
     if (!store) {
-        store = localforage.createInstance({ name: "infinite-canvas-plugins", storeName: pluginId });
+        store = createUserLocalForage(pluginId, "infinite-canvas-plugins");
         stores.set(pluginId, store);
     }
     return {
-        get: (key) => store!.getItem(key),
+        get: (key) => store.getItem(key),
         set: async (key, value) => {
-            await store!.setItem(key, value);
+            await store.setItem(key, value);
         },
         remove: async (key) => {
-            await store!.removeItem(key);
+            await store.removeItem(key);
         },
     };
 }

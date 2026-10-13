@@ -4,7 +4,7 @@ import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
-import { getSiteContext } from "@/integration/site-context";
+import { getUserStorageKey } from "@/lib/site-storage";
 
 export type ApiCallFormat = "openai" | "gemini";
 export type ModelCapability = "image" | "video" | "text" | "audio";
@@ -13,6 +13,7 @@ export type ReasoningEffort = "auto" | "low" | "medium" | "high" | "xhigh";
 export type ChannelModel = {
     name: string;
     capability: ModelCapability;
+    capabilities?: ModelCapability[];
     script?: string;
 };
 
@@ -73,7 +74,7 @@ export type ChannelCredentialsImportResult = {
     channelName?: string;
 };
 
-export const CONFIG_STORE_KEY = `new-api:canvas:${typeof window === "undefined" ? "test" : getSiteContext().userId}:ai_config_store`;
+export const CONFIG_STORE_KEY = getUserStorageKey("infinite-canvas:ai_config_store");
 const CHANNEL_MODEL_SEPARATOR = "::";
 const OPENAI_BASE_URL = "https://api.openai.com";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
@@ -168,25 +169,27 @@ export function modelCapabilityOf(config: AiConfig, value: string): ModelCapabil
 
 export function modelMatchesCapability(config: AiConfig, value: string, capability?: ModelCapability) {
     if (!capability) return true;
-    return modelCapabilityOf(config, value) === capability;
+    const model = findChannelModel(config, value)?.model;
+    return model?.capability === capability || Boolean(model?.capabilities?.includes(capability));
 }
 
 export function resolveModelForCapability(config: AiConfig, currentModel: string | undefined, capability: ModelCapability) {
-    const defaultModel = capability === "image" ? config.imageModel : capability === "video" ? config.videoModel : capability === "audio" ? config.audioModel : config.textModel;
-    const fallbackModel = capability === "image" ? defaultConfig.imageModel : capability === "video" ? defaultConfig.videoModel : capability === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
+    const modelKey = `${capability}Model` as const;
+    const defaultModel = config[modelKey];
+    const fallbackModel = defaultConfig[modelKey];
     for (const model of [currentModel, defaultModel]) {
         if (!model) continue;
         const configuredCapability = modelCapabilityOf(config, model);
         // Keep unavailable selections visible so the readiness check blocks the
         // request. Only a known capability switch may choose another model.
-        if (!configuredCapability || configuredCapability === capability) return model;
+        if (!configuredCapability || modelMatchesCapability(config, model, capability)) return model;
     }
     return fallbackModel;
 }
 
 export function selectableModelsByCapability(config: AiConfig, capability?: ModelCapability) {
     if (!capability) return config.models;
-    return config.channels.flatMap((channel) => channel.models.filter((model) => model.capability === capability).map((model) => encodeChannelModel(channel.id, model.name)));
+    return config.channels.flatMap((channel) => channel.models.filter((model) => model.capability === capability || model.capabilities?.includes(capability)).map((model) => encodeChannelModel(channel.id, model.name)));
 }
 
 /** The user script (if any) attached to a model; empty string means use the system default call. */
@@ -293,7 +296,8 @@ export function normalizeChannelModels(models: Array<string | ChannelModel> | un
         seen.add(name);
         const capability = typeof item === "string" ? guessCapability(name) : item.capability || guessCapability(name);
         const script = typeof item === "string" ? undefined : item.script?.trim() || undefined;
-        result.push({ name, capability, script });
+        const capabilities = typeof item === "string" ? undefined : item.capabilities;
+        result.push({ name, capability, capabilities, script });
     }
     return result;
 }
@@ -468,7 +472,7 @@ function normalizeApiFormat(apiFormat: unknown): ApiCallFormat {
 }
 
 function uniqueModelOptions(models: string[]) {
-    return Array.from(new Set((models || []).map((model) => model.trim()).filter(Boolean)));
+    return [...new Set((models || []).map((model) => model.trim()).filter(Boolean))];
 }
 
 export function buildApiUrl(baseUrl: string, path: string) {

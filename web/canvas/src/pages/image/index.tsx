@@ -1,7 +1,7 @@
 import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download, FolderPlus, History, ImagePlus, LoaderCircle, PenLine, Plus, SlidersHorizontal, Sparkles, Trash2, Upload } from "lucide-react";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Tag, Tooltip, Typography } from "antd";
-import localforage from "localforage";
+import { createUserLocalForage } from "@/lib/site-storage";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
@@ -21,6 +21,7 @@ import { useAssetStore } from "@/stores/use-asset-store";
 import { useWorkbenchAgentStore } from "@/stores/use-workbench-agent-store";
 import type { ReferenceImage } from "@/types/image";
 import i18n from "@/i18n";
+import { toIntlLocale } from "@/i18n/languages";
 
 type GeneratedImage = {
     id: string;
@@ -65,7 +66,7 @@ type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => 
 
 const LOG_STORE_KEY = "infinite-canvas:image_generation_logs";
 const RESULT_ACTION_BUTTON_CLASS = "min-w-0 px-1.5 [&_.ant-btn-icon]:shrink-0 [&>span:last-child]:min-w-0 [&>span:last-child]:truncate";
-const logStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_generation_logs" });
+const logStore = createUserLocalForage("image_generation_logs");
 
 export default function ImagePage() {
     const { message } = App.useApp();
@@ -116,7 +117,7 @@ export default function ImagePage() {
     }, []);
 
     const addReferences = async (files?: FileList | null) => {
-        const imageFiles = Array.from(files || []).filter((file) => file.type.startsWith("image/"));
+        const imageFiles = [...files || []].filter((file) => file.type.startsWith("image/"));
         const nextReferences = await Promise.all(
             imageFiles.map(async (file) => {
                 const image = await uploadImage(file);
@@ -184,7 +185,9 @@ export default function ImagePage() {
         const successCount = successImages.length;
         const failCount = generationCount - successCount;
         const failed = result.find((item): item is PromiseRejectedResult => item.status === "rejected");
-        const error = failed?.reason instanceof Error ? failed.reason.message : failCount ? t("workbench.generationFailed") : undefined;
+        let error: string | undefined;
+        if (failed?.reason instanceof Error) error = failed.reason.message;
+        else if (failCount) error = t("workbench.generationFailed");
         if (agentTaskId) updateAgentTask(agentTaskId, { status: successCount ? "succeeded" : "failed", successCount, failCount, error: successCount ? undefined : error });
 
         try {
@@ -221,7 +224,7 @@ export default function ImagePage() {
             agentTaskIdRef.current = imageCommand.taskId;
             setAutoRunToken((value) => value + 1);
         }
-    }, [imageCommand, clearImageCommand, running, updateAgentTask]);
+    }, [imageCommand, clearImageCommand, running, updateAgentTask, t]);
 
     useEffect(() => {
         if (!autoRunToken) return;
@@ -499,15 +502,11 @@ export default function ImagePage() {
                         </div>
                         {results.length ? (
                             <div className="grid gap-4 sm:grid-cols-2 2xl:grid-cols-3">
-                                {results.map((result, index) =>
-                                    result.status === "success" && result.image ? (
-                                        <ResultImageCard key={result.id} image={result.image} index={index} onEdit={addResultToReferences} onDownload={downloadImage} onSaveAsset={saveResultToAssets} />
-                                    ) : result.status === "failed" ? (
-                                        <FailedImageCard key={result.id} error={result.error || t("workbench.generationFailed")} onRetry={() => retryResult(index)} />
-                                    ) : (
-                                        <PendingImageCard key={result.id} />
-                                    ),
-                                )}
+                                {results.map((result, index) => {
+                                    if (result.status === "success" && result.image) return <ResultImageCard key={result.id} image={result.image} index={index} onEdit={addResultToReferences} onDownload={downloadImage} onSaveAsset={saveResultToAssets} />;
+                                    if (result.status === "failed") return <FailedImageCard key={result.id} error={result.error || t("workbench.generationFailed")} onRetry={() => retryResult(index)} />;
+                                    return <PendingImageCard key={result.id} />;
+                                })}
                             </div>
                         ) : (
                             <div className="flex min-h-[320px] flex-col items-center justify-center rounded-lg border border-dashed border-stone-300 text-center dark:border-stone-700 lg:min-h-[560px]">
@@ -802,7 +801,7 @@ async function normalizeLog(log: Partial<GenerationLog>): Promise<GenerationLog>
         createdAt: log.createdAt || Date.now(),
         title: log.title || log.model || i18n.t("workbench.untitled"),
         prompt: log.prompt || log.title || "",
-        time: log.time || new Date().toLocaleString(i18n.resolvedLanguage, { hour12: false }),
+        time: log.time || new Date().toLocaleString(toIntlLocale(i18n.resolvedLanguage || i18n.language), { hour12: false }),
         model: log.model || config.imageModel || "",
         config,
         references,
@@ -886,7 +885,7 @@ function buildLog({
         createdAt: Date.now(),
         title: prompt.slice(0, 12) || i18n.t("workbench.untitled"),
         prompt,
-        time: new Date().toLocaleString(i18n.resolvedLanguage, { hour12: false }),
+        time: new Date().toLocaleString(toIntlLocale(i18n.resolvedLanguage || i18n.language), { hour12: false }),
         model,
         config: logConfig,
         references,

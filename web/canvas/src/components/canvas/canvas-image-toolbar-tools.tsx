@@ -3,6 +3,7 @@ import { Brush, Camera, Copy, FileText, Grid2x2, Lock, LockOpen, Maximize2, Scis
 
 import type { CanvasNodeData } from "@/types/canvas";
 import i18n from "@/i18n";
+import { getUserStorageKey } from "@/lib/site-storage";
 
 export type ImageNodeActionToolId = "copyPrompt" | "reversePrompt" | "replace" | "resize" | "maskEdit" | "crop" | "split" | "upscale" | "superResolve" | "angle" | "view";
 export type ImageQuickToolId = "info" | "delete" | "saveAsset" | "download" | ImageNodeActionToolId;
@@ -36,7 +37,7 @@ export type ImageQuickToolsConfig = {
     showLabels: boolean;
 };
 
-export const IMAGE_QUICK_TOOLS_STORAGE_KEY = "canvas-image-quick-tools-v7";
+export const IMAGE_QUICK_TOOLS_STORAGE_KEY = getUserStorageKey("canvas-image-quick-tools-v7");
 
 const defaultBaseToolIds: ImageQuickToolId[] = ["info", "delete", "saveAsset", "download"];
 

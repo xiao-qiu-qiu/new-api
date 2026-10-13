@@ -1,11 +1,11 @@
-import localforage from "localforage";
 import { nanoid } from "nanoid";
 
+import { createUserLocalForage } from "@/lib/site-storage";
 import { withLocalProxy } from "@/stores/use-config-store";
 
 export type UploadedFile = { url: string; storageKey: string; bytes: number; mimeType: string; width?: number; height?: number; durationMs?: number };
 
-const store = localforage.createInstance({ name: "infinite-canvas", storeName: "media_files" });
+const store = createUserLocalForage("media_files");
 const objectUrls = new Map<string, string>();
 
 export async function uploadMediaFile(input: string | Blob, prefix = "file"): Promise<UploadedFile> {
@@ -14,7 +14,9 @@ export async function uploadMediaFile(input: string | Blob, prefix = "file"): Pr
     await store.setItem(storageKey, blob);
     const url = URL.createObjectURL(blob);
     objectUrls.set(storageKey, url);
-    const meta = blob.type.startsWith("video/") ? await readVideoMeta(url) : blob.type.startsWith("audio/") ? await readAudioMeta(url) : {};
+    let meta: Pick<UploadedFile, "width" | "height" | "durationMs"> = {};
+    if (blob.type.startsWith("video/")) meta = await readVideoMeta(url);
+    else if (blob.type.startsWith("audio/")) meta = await readAudioMeta(url);
     return { url, storageKey, bytes: blob.size, mimeType: blob.type || "application/octet-stream", ...meta };
 }
 
@@ -42,7 +44,7 @@ export async function setMediaBlob(storageKey: string, blob: Blob) {
 
 export async function deleteStoredMedia(keys: Iterable<string>) {
     await Promise.all(
-        Array.from(new Set(keys)).map(async (key) => {
+        [...new Set(keys)].map(async (key) => {
             const url = objectUrls.get(key);
             if (url) URL.revokeObjectURL(url);
             objectUrls.delete(key);

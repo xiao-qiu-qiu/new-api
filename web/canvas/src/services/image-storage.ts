@@ -1,9 +1,8 @@
-import localforage from "localforage";
-
 import { nanoid } from "nanoid";
 import i18n from "@/i18n";
 import { withLocalProxy } from "@/stores/use-config-store";
 import { createImageThumbnail } from "@/lib/image-thumbnail";
+import { createUserLocalForage } from "@/lib/site-storage";
 
 export type UploadedImage = {
     url: string;
@@ -14,10 +13,10 @@ export type UploadedImage = {
     mimeType: string;
 };
 
-const store = localforage.createInstance({ name: "infinite-canvas", storeName: "image_files" });
-const previewStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_previews" });
-const imageLogStore = localforage.createInstance({ name: "infinite-canvas", storeName: "image_generation_logs" });
-const videoLogStore = localforage.createInstance({ name: "infinite-canvas", storeName: "video_generation_logs" });
+const store = createUserLocalForage("image_files");
+const previewStore = createUserLocalForage("image_previews");
+const imageLogStore = createUserLocalForage("image_generation_logs");
+const videoLogStore = createUserLocalForage("video_generation_logs");
 const objectUrls = new Map<string, string>();
 const previewUrls = new Map<string, string>();
 const previewListeners = new Set<() => void>();
@@ -107,12 +106,12 @@ function loadImageMeta(url: string, options?: ImageReadOptions, timeoutMs = IMAG
             resolve(value);
         };
         const abort = () => {
-            if (settled) return;
+            if (settled || !options?.signal) return;
             settled = true;
             window.clearTimeout(timer);
             image.onload = null;
             image.onerror = null;
-            reject(abortReason(options!.signal!));
+            reject(abortReason(options.signal));
         };
         const timer = window.setTimeout(() => finish(null), timeoutMs);
         options?.signal?.addEventListener("abort", abort, { once: true });
@@ -230,7 +229,7 @@ export async function imageToDataUrl(image: { url?: string; dataUrl?: string; st
 
 export async function deleteStoredImages(keys: Iterable<string>) {
     await Promise.all(
-        Array.from(new Set(keys)).map(async (key) => {
+        [...new Set(keys)].map(async (key) => {
             const url = objectUrls.get(key);
             if (url) URL.revokeObjectURL(url);
             objectUrls.delete(key);

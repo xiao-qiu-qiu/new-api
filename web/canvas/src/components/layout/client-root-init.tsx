@@ -1,10 +1,8 @@
-import type { ReactNode } from "react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { App } from "antd";
 import { useTranslation } from "react-i18next";
 
 import { useConfigStore } from "@/stores/use-config-store";
-import { usePromptSourceScheduler } from "@/hooks/use-prompt-source-scheduler";
 
 export function ClientRootInit({ children }: { children: ReactNode }) {
     const { message } = App.useApp();
@@ -12,8 +10,6 @@ export function ClientRootInit({ children }: { children: ReactNode }) {
     const handledConfigParams = useRef(false);
     const importChannelCredentials = useConfigStore((state) => state.importChannelCredentials);
     const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
-
-    usePromptSourceScheduler();
 
     useEffect(() => {
         if (handledConfigParams.current) return;
@@ -35,5 +31,5 @@ export function ClientRootInit({ children }: { children: ReactNode }) {
         else message.error(t("config.importedChannelBaseUrlInvalid"));
     }, [importChannelCredentials, message, openConfigDialog, t]);
 
-    return <>{children}</>;
+    return children;
 }

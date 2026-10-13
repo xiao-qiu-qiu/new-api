@@ -1,6 +1,7 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { createJSONStorage, persist } from "zustand/middleware";
 
+import { userLocalStorage } from "@/lib/site-storage";
 import { DEFAULT_PROMPT_SOURCES, createPromptSource, type PromptSource } from "@/services/api/prompt-source-presets";
 
 export type PromptSourceSchedule = {
@@ -45,6 +46,7 @@ export const usePromptSourceStore = create<PromptSourceStore>()(
         }),
         {
             name: PROMPT_SOURCE_STORE_KEY,
+            storage: createJSONStorage(() => userLocalStorage),
             partialize: (state) => ({ sources: state.sources, schedule: state.schedule }),
             merge: (persisted, current) => {
                 const persistedState = (persisted || {}) as Partial<PromptSourceStore>;
@@ -52,7 +54,7 @@ export const usePromptSourceStore = create<PromptSourceStore>()(
                 const enabledById = new Map(savedSources.map((source) => [source.id, source.enabled]));
                 const builtIn = DEFAULT_PROMPT_SOURCES.map((source) => ({ ...source, enabled: enabledById.get(source.id) ?? source.enabled }));
                 const custom = savedSources.filter((source) => !source.builtIn).map((source) => createPromptSource(source));
-                return { ...current, sources: [...builtIn, ...custom], schedule: { ...defaultSchedule, ...(persistedState.schedule || {}) } };
+                return { ...current, sources: [...builtIn, ...custom], schedule: { ...defaultSchedule, ...persistedState.schedule } };
             },
         },
     ),
