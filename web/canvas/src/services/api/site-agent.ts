@@ -1,5 +1,6 @@
 import { getSiteContext, siteFetch } from "@/integration/site-context";
 import i18n from "@/i18n";
+import { readSiteAgentStream } from "./site-agent-stream";
 
 export const SITE_AGENT_MAX_ROUNDS = 24;
 export const SITE_AGENT_MAX_TOOL_CALLS = 32;
@@ -16,8 +17,9 @@ export type SiteAgentMessage = {
 };
 export type SiteAgentTool = { type: "function"; function: { name: string; description: string; parameters: Record<string, unknown> } };
 export type SiteAgentUsage = { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
-type SiteAgentResponse = {
-    choices?: Array<{ message?: { content?: string | null; tool_calls?: SiteAgentToolCall[]; refusal?: string }; finish_reason?: string }>;
+type SiteAgentReply = { content?: string | null; tool_calls?: SiteAgentToolCall[]; refusal?: string };
+export type SiteAgentResponse = {
+    choices?: Array<{ message?: SiteAgentReply; finish_reason?: string }>;
     usage?: SiteAgentUsage;
     error?: { message?: string } | string;
     message?: string;
@@ -57,12 +59,13 @@ function responsesInput(messages: SiteAgentMessage[]): SiteAgentResponseItem[] {
 }
 
 function responsesReply(data: SiteAgentResponse) {
-    if (data.status === "incomplete") throw new Error(i18n.t("agent.site.truncatedResponse", { defaultValue: "模型回复被截断，请缩短请求后重试" }));
+    if (data.status && data.status !== "completed") throw new Error(i18n.t("agent.site.truncatedResponse", { defaultValue: "模型回复被截断，请缩短请求后重试" }));
     if (!Array.isArray(data.output)) throw new Error(i18n.t("agent.site.emptyResponse", { defaultValue: "模型没有返回内容" }));
     const text: string[] = [];
     const toolCalls: SiteAgentToolCall[] = [];
     for (const item of data.output) {
         if (item.type === "function_call") {
+            if (item.status && item.status !== "completed") throw new Error(i18n.t("agent.site.truncatedResponse", { defaultValue: "模型回复被截断，请缩短请求后重试" }));
             toolCalls.push({ id: item.call_id as string, type: "function", function: { name: item.name as string, arguments: item.arguments as string } });
         }
         if (item.type === "message" && Array.isArray(item.content)) {
@@ -113,11 +116,17 @@ export async function runSiteAgentLoop(options: {
     model: string;
     group: string;
     chatProtocol?: "chat" | "responses";
+    reasoningEffort?: string;
     messages: SiteAgentMessage[];
     tools: SiteAgentTool[];
     signal: AbortSignal;
     executeTool: (call: SiteAgentToolCall) => Promise<unknown>;
+    /** Final round snapshot; reconcile an existing streamed bubble instead of appending it again. */
     onAssistant: (text: string) => void;
+    /** Actual transport increments only; JSON-compatible responses use onAssistant alone. */
+    onAssistantDelta?: (text: string) => void;
+    onAssistantRoundStart?: (round: number) => void;
+    onAssistantRoundEnd?: (round: number) => void;
     onMessages: (messages: SiteAgentMessage[]) => void | Promise<void>;
     onUsage?: (usage: SiteAgentUsage) => void;
     request?: typeof siteFetch;
@@ -129,45 +138,70 @@ export async function runSiteAgentLoop(options: {
     for (let round = 0; round < SITE_AGENT_MAX_ROUNDS; round++) {
         options.signal.throwIfAborted();
         let path = "/pg/chat/completions";
-        let body: Record<string, unknown> = { model: options.model, group: options.group, messages: messages.map(({ role, content, tool_calls, tool_call_id }) => ({ role, content, tool_calls, tool_call_id })), tools: options.tools, tool_choice: "auto", stream: false };
+        let body: Record<string, unknown> = { model: options.model, group: options.group, messages: messages.map(({ role, content, tool_calls, tool_call_id }) => ({ role, content, tool_calls, tool_call_id })), tools: options.tools, tool_choice: "auto", stream: true, stream_options: { include_usage: true } };
         if (useResponses) {
             path = "/pg/responses";
-            body = { model: options.model, group: options.group, input: responsesInput(messages), tools: options.tools.map((tool) => ({ type: "function", ...tool.function, strict: false })), tool_choice: "auto", stream: false, store: false, include: ["reasoning.encrypted_content"] };
+            body = { model: options.model, group: options.group, input: responsesInput(messages), tools: options.tools.map((tool) => ({ type: "function", ...tool.function, strict: false })), tool_choice: "auto", stream: true, store: false, include: ["reasoning.encrypted_content"] };
         }
-        const response = await (options.request || siteFetch)(path, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(body),
-            signal: options.signal,
-        });
-        options.signal.throwIfAborted();
-        const data = await response.json() as SiteAgentResponse;
-        if (!response.ok || data.success === false || data.error) {
-            const error = typeof data.error === "string" ? data.error : data.error?.message;
-            throw new Error(error || data.message || i18n.t("agent.site.requestFailed", { defaultValue: "请求失败（{{status}}）", status: response.status }));
+        if (options.reasoningEffort && options.reasoningEffort !== "auto") {
+            if (useResponses) body.reasoning = { effort: options.reasoningEffort };
+            else body.reasoning_effort = options.reasoningEffort;
         }
-        const choice = data.choices?.[0];
-        let reply = choice?.message;
+        let reply: SiteAgentReply | undefined;
         let responseItems: SiteAgentResponseItem[] | undefined;
-        let usage = data.usage;
-        if (useResponses) {
-            const normalized = responsesReply(data);
-            reply = normalized.reply;
-            responseItems = normalized.responseItems;
-            usage = normalized.usage;
+        let calls: SiteAgentToolCall[] = [];
+        options.onAssistantRoundStart?.(round);
+        try {
+            const response = await (options.request || siteFetch)(path, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+                body: JSON.stringify(body),
+                signal: options.signal,
+            });
+            options.signal.throwIfAborted();
+            let data: SiteAgentResponse;
+            if (response.ok && response.headers?.get("content-type")?.toLowerCase().includes("text/event-stream")) {
+                data = await readSiteAgentStream(response, useResponses ? "responses" : "chat", options.signal, options.onAssistantDelta);
+            } else {
+                data = await response.json() as SiteAgentResponse;
+            }
+            options.signal.throwIfAborted();
+            if (!response.ok || data.success === false || data.error) {
+                const error = typeof data.error === "string" ? data.error : data.error?.message;
+                throw new Error(error || data.message || i18n.t("agent.site.requestFailed", { defaultValue: "请求失败（{{status}}）", status: response.status }));
+            }
+            const choice = data.choices?.[0];
+            reply = choice?.message;
+            let usage = data.usage;
+            if (useResponses) {
+                const normalized = responsesReply(data);
+                reply = normalized.reply;
+                responseItems = normalized.responseItems;
+                usage = normalized.usage;
+            }
+            if (!reply) throw new Error(i18n.t("agent.site.emptyResponse", { defaultValue: "模型没有返回内容" }));
+            if (choice?.finish_reason === "length" || choice?.finish_reason === "content_filter") throw new Error(i18n.t("agent.site.truncatedResponse", { defaultValue: "模型回复被截断，请缩短请求后重试" }));
+            if (reply.refusal) throw new Error(reply.refusal);
+            if (usage) options.onUsage?.(usage);
+            calls = reply.tool_calls || [];
+            if (!Array.isArray(calls)) throw new Error(i18n.t("agent.site.invalidToolCall", { defaultValue: "模型返回了无效的工具调用" }));
+            if (totalToolCalls + calls.length > SITE_AGENT_MAX_TOOL_CALLS) return { status: "budget" as const, reason: "tool_calls" as const };
+            if (calls.length && (calls.some((call) => typeof call.id !== "string" || !call.id || call.type !== "function" || typeof call.function?.name !== "string" || !call.function.name || typeof call.function.arguments !== "string") || new Set(calls.map((call) => call.id)).size !== calls.length)) {
+                throw new Error(i18n.t("agent.site.invalidToolCall", { defaultValue: "模型返回了无效的工具调用" }));
+            }
+            for (const call of calls) {
+                try {
+                    const input: unknown = JSON.parse(call.function.arguments);
+                    if (!input || typeof input !== "object" || Array.isArray(input)) throw new Error();
+                } catch {
+                    throw new Error(i18n.t("agent.site.invalidToolCall", { defaultValue: "模型返回了无效的工具调用" }));
+                }
+            }
+            options.signal.throwIfAborted();
+            if (reply.content) options.onAssistant(reply.content);
+        } finally {
+            options.onAssistantRoundEnd?.(round);
         }
-        if (!reply) throw new Error(i18n.t("agent.site.emptyResponse", { defaultValue: "模型没有返回内容" }));
-        if (choice?.finish_reason === "length") throw new Error(i18n.t("agent.site.truncatedResponse", { defaultValue: "模型回复被截断，请缩短请求后重试" }));
-        if (reply.refusal) throw new Error(reply.refusal);
-        if (usage) options.onUsage?.(usage);
-        const calls = reply.tool_calls || [];
-        if (!Array.isArray(calls)) throw new Error(i18n.t("agent.site.invalidToolCall", { defaultValue: "模型返回了无效的工具调用" }));
-        if (totalToolCalls + calls.length > SITE_AGENT_MAX_TOOL_CALLS) return { status: "budget" as const, reason: "tool_calls" as const };
-        if (calls.length && (calls.some((call) => !call.id || call.type !== "function" || !call.function?.name || typeof call.function.arguments !== "string") || new Set(calls.map((call) => call.id)).size !== calls.length)) {
-            throw new Error(i18n.t("agent.site.invalidToolCall", { defaultValue: "模型返回了无效的工具调用" }));
-        }
-        options.signal.throwIfAborted();
-        if (reply.content) options.onAssistant(reply.content);
         if (!calls.length) {
             if (!reply.content?.trim()) throw new Error(i18n.t("agent.site.emptyResponse", { defaultValue: "模型没有返回内容" }));
             messages.push({ role: "assistant", content: reply.content, responseItems });
