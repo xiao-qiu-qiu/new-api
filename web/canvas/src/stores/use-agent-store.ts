@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import i18n from "@/i18n";
-import { userLocalStorage } from "@/lib/site-storage";
+import { getUserStorageKey, userLocalStorage } from "@/lib/site-storage";
 
 import type { CanvasAgentOp, CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
@@ -15,7 +15,8 @@ export type AgentChatItem = { id: string; itemId?: string; clientMessageId?: str
 export type AgentEventLog = { id: string; time: string; title: string; text: string; raw?: unknown };
 export type AgentPendingToolCall = { requestId: string; name: string; input?: { ops?: CanvasAgentOp[]; path?: string } & Record<string, unknown> };
 export type AgentPermissionMode = "request" | "automatic" | "full";
-export type AgentReasoningEffort = "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+export type AgentReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+export type AgentRoute = "site" | "local";
 export type AgentModel = {
     id: string;
     model: string;
@@ -43,6 +44,10 @@ export type AgentConversationState = {
 export type AgentPanelTab = "chat" | "setup" | "history" | "skills" | "log";
 
 type AgentStore = {
+    route: AgentRoute;
+    routeEpoch: number;
+    routeStates: Partial<Record<AgentRoute, AgentRouteState>>;
+    setAgentRoute: (route: AgentRoute) => void;
     width: number;
     panelOpen: boolean;
     panelMounted: boolean;
@@ -98,7 +103,58 @@ type AgentStore = {
 
 export const CANVAS_AGENT_PANEL_MOTION_MS = 500;
 
+const routeFields = ["url", "token", "connected", "enabled", "silentConnect", "fragmentBootstrap", "prompt", "attachments", "canvasReferences", "sending", "waiting", "messages", "tokenUsage", "eventLogs", "threads", "siteThreads", "siteHistoryUserId", "siteHistoryReady", "siteBudgetReached", "activeThreadId", "activeTurnId", "workspacePath", "loadingThreads", "activeTab", "confirmTools", "permissionMode", "models", "model", "reasoningEffort", "activity", "conversation", "bootstrapStatus", "mcpStartupStatuses", "connectError", "pendingTool", "pendingApprovals"] as const;
+type AgentRouteState = Pick<AgentStore, typeof routeFields[number]>;
+const routeCleanups: Record<AgentRoute, Set<() => void>> = { site: new Set(), local: new Set() };
+
+/** Dispose transport work synchronously before another route owns the shared view. */
+export function registerAgentRouteCleanup(route: AgentRoute, cleanup: () => void): () => void {
+    routeCleanups[route].add(cleanup);
+    return () => { routeCleanups[route].delete(cleanup); };
+}
+
+export function isAgentRouteCurrent(route: AgentRoute, epoch: number): boolean {
+    const state = useAgentStore.getState();
+    return state.route === route && state.routeEpoch === epoch;
+}
+
+function routeDefaults(route: AgentRoute): AgentRouteState {
+    return {
+        url: route === "local" ? String(userLocalStorage.getItem("canvas-agent-url") || "http://127.0.0.1:17371") : "",
+        token: route === "local" ? window.sessionStorage.getItem(getUserStorageKey("canvas-agent-token")) || "" : "",
+        connected: false, enabled: false, silentConnect: false, fragmentBootstrap: false,
+        prompt: "", attachments: [], canvasReferences: [], sending: false, waiting: false, messages: [], tokenUsage: null,
+        eventLogs: [], threads: [], siteThreads: [], siteHistoryUserId: "", siteHistoryReady: false, siteBudgetReached: false,
+        activeThreadId: "", activeTurnId: "", workspacePath: "", loadingThreads: false, activeTab: route === "local" ? "setup" : "chat",
+        confirmTools: false, permissionMode: (userLocalStorage.getItem("canvas-agent-permission-mode") as AgentPermissionMode) || "request",
+        models: [], model: route === "local" ? String(userLocalStorage.getItem("canvas-agent-model") || "") : "",
+        reasoningEffort: (userLocalStorage.getItem(route === "local" ? "canvas-agent-local-reasoning-effort" : "canvas-agent-site-reasoning-effort") as AgentReasoningEffort) || "",
+        activity: i18n.t("agent.state.ready"), conversation: { revision: 0, conversationId: "", threadId: "", status: "idle", mcpStatuses: {} },
+        bootstrapStatus: null, mcpStartupStatuses: {}, connectError: "", pendingTool: null, pendingApprovals: [],
+    };
+}
+
 export const useAgentStore = create<AgentStore>((set, get) => ({
+    route: "site",
+    routeEpoch: 0,
+    routeStates: {},
+    setAgentRoute: (route) => {
+        if (get().route === route) return;
+        for (const cleanup of routeCleanups[get().route]) cleanup();
+        const state = get();
+        const saved = Object.fromEntries(routeFields.map((key) => [key, state[key]])) as AgentRouteState;
+        // The native transport releases Blob URLs on unmount; keep drafts usable on return.
+        saved.attachments = saved.attachments.map((item) => ({ ...item, url: item.dataUrl || item.url }));
+        saved.messages = saved.messages.map((item) => ({ ...item, streamId: undefined }));
+        const stopped = { sending: false, waiting: false, loadingThreads: false, pendingTool: null, pendingApprovals: [], activeTurnId: "", bootstrapStatus: null, mcpStartupStatuses: {} };
+        const restored = state.routeStates[route] || routeDefaults(route);
+        set({
+            ...restored, ...stopped, connected: route === "site" && restored.connected, enabled: route === "site" && restored.enabled,
+            conversation: { ...restored.conversation, status: restored.activeThreadId ? "ready" : "idle", mcpStatuses: {} },
+            route, routeEpoch: state.routeEpoch + 1,
+            routeStates: { ...state.routeStates, [state.route]: { ...saved, ...stopped, connected: state.route === "site" && saved.connected, enabled: state.route === "site" && saved.enabled } },
+        });
+    },
     width: Number(userLocalStorage.getItem("canvas-agent-panel-width")) || 440,
     panelOpen: false,
     panelMounted: true,
@@ -132,7 +188,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     permissionMode: (userLocalStorage.getItem("canvas-agent-permission-mode") as AgentPermissionMode) || "request",
     models: [],
     model: "",
-    reasoningEffort: (userLocalStorage.getItem("canvas-agent-reasoning-effort") as AgentReasoningEffort) || "",
+    reasoningEffort: (userLocalStorage.getItem("canvas-agent-site-reasoning-effort") as AgentReasoningEffort) || "",
     activity: i18n.t("agent.state.ready"),
     conversation: { revision: 0, conversationId: "", threadId: "", status: "idle", mcpStatuses: {} },
     bootstrapStatus: null,
@@ -151,9 +207,24 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     },
     togglePanel: () => (get().panelOpen ? get().closePanel() : get().openPanel()),
     setCanvasContext: (canvasContext) => set({ canvasContext }),
-    connectAgent: () => set({ enabled: true, connected: true, fragmentBootstrap: false, activity: i18n.t("agent.state.ready"), connectError: "", activeTab: "chat" }),
+    connectAgent: (options) => {
+        if (get().route === "site") return set({ enabled: true, connected: true, fragmentBootstrap: false, activity: i18n.t("agent.state.ready"), connectError: "", activeTab: "chat" });
+        const endpoint = get().url.trim().replace(/\/$/, "");
+        const token = get().token.trim();
+        if (!endpoint || !token) return set({ connectError: options?.silent ? "" : i18n.t("agent.state.connectionRequired") });
+        try {
+            if (!["http:", "https:"].includes(new URL(endpoint).protocol)) throw new Error();
+        } catch {
+            return set({ connectError: options?.silent ? "" : i18n.t("agent.state.invalidUrl") });
+        }
+        userLocalStorage.setItem("canvas-agent-url", endpoint);
+        window.sessionStorage.setItem(getUserStorageKey("canvas-agent-token"), token);
+        set({ url: endpoint, token, enabled: true, connected: false, silentConnect: options?.silent || false, connectError: "", activeTab: "setup" });
+    },
     disconnectAgent: (patch = {}) => {
-        set({ enabled: false, connected: false, silentConnect: false, fragmentBootstrap: false, activity: i18n.t("agent.state.offline"), conversation: { revision: 0, conversationId: "", threadId: "", status: "idle", mcpStatuses: {} }, bootstrapStatus: null, mcpStartupStatuses: {}, ...patch });
+        for (const cleanup of routeCleanups[get().route]) cleanup();
+        const routeEpoch = get().routeEpoch + Number(get().route === "local");
+        set({ enabled: false, connected: false, sending: false, waiting: false, pendingTool: null, pendingApprovals: [], activeTurnId: "", silentConnect: false, fragmentBootstrap: false, activity: i18n.t("agent.state.offline"), conversation: { revision: 0, conversationId: "", threadId: "", status: "idle", mcpStatuses: {} }, bootstrapStatus: null, mcpStartupStatuses: {}, ...patch, routeEpoch });
     },
     addMessage: (item) => set((state) => ({ messages: [...state.messages, item] })),
     addEventLog: (item) => set((state) => ({ eventLogs: [...state.eventLogs.slice(-160), item] })),

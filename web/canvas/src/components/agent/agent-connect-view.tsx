@@ -4,7 +4,8 @@ import copyToClipboard from "copy-to-clipboard";
 import { Copy, KeyRound, Link2, PlugZap } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
-import { canvasThemes } from "@/lib/canvas-theme";
+import type { canvasThemes } from "@/lib/canvas-theme";
+import { parseLocalAgentConnectionLink } from "./local-agent-connection";
 
 const AGENT_PLUGIN_REMOVE_COMMAND = "codex plugin remove infinite-canvas";
 const AGENT_MCP_REMOVE_COMMAND = "codex mcp remove infinite-canvas";
@@ -35,8 +36,11 @@ export function AgentConnectView({
     const { t } = useTranslation();
     const { message } = App.useApp();
     const steps = [{ title: t("agent.connect.pluginTitle"), text: t("agent.connect.pluginText") }, { title: t("agent.connect.directTitle"), text: t("agent.connect.directText"), command: "npx -y @basketikun/canvas-agent@latest" }];
-    const statusText = connectError ? t("agent.status.failed") : connected ? activity : enabled ? t("agent.status.connecting") : t("agent.status.disconnected");
-    const statusColor = connectError ? "#dc2626" : connected ? "#16a34a" : enabled ? "#d97706" : theme.node.muted;
+    let statusText = t("agent.status.disconnected");
+    let statusColor: string = theme.node.muted;
+    if (enabled) { statusText = t("agent.status.connecting"); statusColor = "#d97706"; }
+    if (connected) { statusText = activity; statusColor = "#16a34a"; }
+    if (connectError) { statusText = t("agent.status.failed"); statusColor = "#dc2626"; }
     const copyCommand = (command: string) => {
         copyToClipboard(command);
         message.success(t("agent.connect.commandCopied"));
@@ -126,7 +130,11 @@ export function AgentConnectView({
                                 {t("agent.connect.localAddress")}
                                 <span className="font-normal opacity-70">Local URL</span>
                             </span>
-                            <Input size="large" prefix={<Link2 className="mr-1 size-4" style={{ color: theme.node.faint }} />} value={url} onChange={(event) => onUrlChange(event.target.value)} placeholder={t("agent.connect.urlPlaceholder")} />
+                            <Input size="large" prefix={<Link2 className="mr-1 size-4" style={{ color: theme.node.faint }} />} value={url} onChange={(event) => {
+                                const connection = parseLocalAgentConnectionLink(event.target.value);
+                                if (connection) { onUrlChange(connection.url); onTokenChange(connection.token); }
+                                else onUrlChange(event.target.value);
+                            }} placeholder={t("agent.connect.urlPlaceholder")} />
                         </label>
                         <label className="grid gap-1.5">
                             <span className="flex items-center gap-1.5 text-xs font-medium" style={{ color: theme.node.muted }}>
