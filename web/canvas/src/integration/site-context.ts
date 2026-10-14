@@ -26,7 +26,7 @@ export type SiteContext = {
 type CanvasHost = {
   context: SiteContext
   fetch: (path: string, init?: RequestInit) => Promise<Response>
-  selectModel: (group: string, model: string) => void
+  selectAgentModel: (group: string, model: string) => void
 }
 
 declare global {
@@ -49,8 +49,8 @@ export function siteFetch(path: string, init?: RequestInit): Promise<Response> {
   return window.__newApiCanvasHost.fetch(path, init)
 }
 
-export function selectSiteModel(group: string, model: string): void {
-  window.__newApiCanvasHost?.selectModel(group, model)
+export function selectSiteAgentModel(group: string, model: string): void {
+  window.__newApiCanvasHost?.selectAgentModel(group, model)
 }
 
 export async function initializeSiteContext(): Promise<void> {

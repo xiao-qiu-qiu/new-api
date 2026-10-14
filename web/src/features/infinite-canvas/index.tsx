@@ -1,16 +1,9 @@
-import {
-  Bot,
-  ImagePlus,
-  Infinity as InfinityIcon,
-  RefreshCw,
-} from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
-import { ModelGroupSelector } from '@/components/model-group-selector'
-import { Button } from '@/components/ui/button'
+import { useSidebar } from '@/components/ui/sidebar'
 import { useTheme } from '@/context/theme-provider'
 import { useAuthStore } from '@/stores/auth-store'
 
@@ -33,6 +26,16 @@ export function InfiniteCanvasPage() {
 function CanvasWorkspace(props: { userId: number }) {
   const { t, i18n } = useTranslation()
   const { resolvedTheme } = useTheme()
+  const sidebar = useSidebar()
+  const sidebarRef = useRef(sidebar)
+  sidebarRef.current = sidebar
+
+  useEffect(() => {
+    const previousOpen = sidebarRef.current.open
+    sidebarRef.current.setOpen(false)
+    sidebarRef.current.setOpenMobile(false)
+    return () => sidebarRef.current.setOpen(previousOpen)
+  }, [])
   const catalog = useCanvasCatalog()
   const storageKey = `new-api:canvas-selection:${props.userId}`
   const [selection, setSelection] = useState<Selection>(() => {
@@ -154,11 +157,11 @@ function CanvasWorkspace(props: { userId: number }) {
         context: contextRef.current,
         fetch: (path: string, init?: RequestInit) =>
           fetchCanvasRelay(props.userId, path, init),
-        selectModel: (nextGroup: string, nextModel: string) =>
+        selectAgentModel: (nextGroup: string, nextModel: string) =>
           setSelection((current) => ({
             ...current,
-            group: nextGroup,
-            model: nextModel,
+            agentGroup: nextGroup,
+            agentModel: nextModel,
           })),
       }
       frame.postMessage(
@@ -198,91 +201,10 @@ function CanvasWorkspace(props: { userId: number }) {
   }
 
   return (
-    <section className='flex size-full min-h-0 flex-col overflow-hidden'>
-      <header className='bg-background flex shrink-0 flex-wrap items-center justify-between gap-2 border-b px-3 py-2'>
-        <div className='flex items-center gap-2 text-sm font-medium'>
-          <InfinityIcon className='size-4' />
-          <span>{t('Infinite Canvas')}</span>
-        </div>
-        <div className='flex flex-wrap items-center gap-2'>
-          <div
-            className='flex items-center gap-1.5'
-            aria-label={t('Image and video model')}
-          >
-            <ImagePlus
-              className='text-muted-foreground size-4'
-              aria-hidden='true'
-            />
-            <ModelGroupSelector
-              selectedGroup={group}
-              selectedModel={model}
-              groups={catalog.groups.filter((item) =>
-                mediaChannels.some((channel) => channel.id === item.value)
-              )}
-              models={mediaModels.map((item) => ({
-                value: item.name,
-                label: item.name,
-              }))}
-              onGroupChange={(value) =>
-                setSelection((current) => ({
-                  ...current,
-                  group: value,
-                  model: '',
-                }))
-              }
-              onModelChange={(value) =>
-                setSelection((current) => ({ ...current, model: value }))
-              }
-              disabled={!mediaChannels.length}
-            />
-          </div>
-          <div
-            className='flex items-center gap-1.5'
-            aria-label={t('Canvas Agent model')}
-          >
-            <Bot className='text-muted-foreground size-4' aria-hidden='true' />
-            <ModelGroupSelector
-              selectedGroup={agentGroup}
-              selectedModel={agentModel}
-              groups={catalog.groups.filter((item) =>
-                agentChannels.some((channel) => channel.id === item.value)
-              )}
-              models={agentModels.map((item) => ({
-                value: item.name,
-                label: item.name,
-              }))}
-              onGroupChange={(value) =>
-                setSelection((current) => ({
-                  ...current,
-                  agentGroup: value,
-                  agentModel: '',
-                }))
-              }
-              onModelChange={(value) =>
-                setSelection((current) => ({ ...current, agentModel: value }))
-              }
-              disabled={!agentChannels.length}
-            />
-          </div>
-          <Button
-            variant='ghost'
-            size='icon'
-            title={t('Refresh models')}
-            aria-label={t('Refresh models')}
-            onClick={() => void catalog.refetch()}
-          >
-            <RefreshCw className='size-4' />
-          </Button>
-        </div>
-      </header>
-      {!mediaChannels.length && (
-        <p
-          role='status'
-          className='text-muted-foreground border-b px-3 py-2 text-xs'
-        >
-          {t('No image or video models are available in your groups')}
-        </p>
-      )}
+    <section
+      data-canvas-workspace
+      className='flex size-full min-h-0 flex-col overflow-hidden'
+    >
       <div className='relative min-h-0 flex-1'>
         {!ready && (
           <div className='bg-background absolute inset-0 z-10'>

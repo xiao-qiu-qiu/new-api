@@ -1,3 +1,5 @@
+import { useRouterState } from '@tanstack/react-router'
+
 /*
 Copyright (C) 2023-2026 QuantumNous
 
@@ -33,6 +35,9 @@ type AuthenticatedLayoutProps = {
 
 export function AuthenticatedLayout(props: AuthenticatedLayoutProps) {
   const defaultOpen = getCookie('sidebar_state') !== 'false'
+  const isCanvas = useRouterState({
+    select: (state) => /^\/canvas\/?$/.test(state.location.pathname),
+  })
 
   return (
     <LayoutProvider>
@@ -47,7 +52,9 @@ export function AuthenticatedLayout(props: AuthenticatedLayoutProps) {
                 '@container/content',
                 'h-[calc(100svh-var(--app-header-height,0px))]',
                 'min-h-0 overflow-hidden',
-                'peer-data-[variant=inset]:h-[calc(100svh-var(--app-header-height,0px)-(var(--spacing)*4))]'
+                isCanvas
+                  ? 'md:peer-data-[variant=inset]:m-0 md:peer-data-[variant=inset]:rounded-none md:peer-data-[variant=inset]:shadow-none'
+                  : 'peer-data-[variant=inset]:h-[calc(100svh-var(--app-header-height,0px)-(var(--spacing)*4))]'
               )}
             >
               {props.children ?? <AnimatedOutlet />}

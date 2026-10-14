@@ -1,4 +1,14 @@
 /* The host sidebar reduces the editor's available width independently of the viewport. */
+.canvas-model-menu {
+  height: min(340px, calc(100dvh - 160px));
+  min-height: 180px;
+}
+
+.canvas-model-menu button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
 .site-canvas-shell section:has(> [data-canvas-bottom-toolbar]) {
   container-type: inline-size;
   container-name: canvas-workspace;

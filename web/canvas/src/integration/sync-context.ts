@@ -1,7 +1,6 @@
 import i18n from '@/i18n'
 import {
   decodeChannelModel,
-  encodeChannelModel,
   modelOptionsFromChannels,
   selectableModelsByCapability,
   useConfigStore,
@@ -9,8 +8,6 @@ import {
 import { useThemeStore } from '@/stores/use-theme-store'
 
 import { getSiteContext } from './site-context'
-
-let previousSelection = ''
 
 export function applySiteContext(): void {
   const context = getSiteContext()
@@ -20,10 +17,6 @@ export function applySiteContext(): void {
   )
   const current = useConfigStore.getState().config
   const models = modelOptionsFromChannels(context.channels)
-  const selected = encodeChannelModel(context.group, context.model)
-  const selectedCapability = context.channels
-    .find((channel) => channel.id === context.group)
-    ?.models.find((model) => model.name === context.model)?.capability
   const next = {
     ...current,
     channels: context.channels,
@@ -43,17 +36,6 @@ export function applySiteContext(): void {
         candidates[0] ??
         ''
     }
-  }
-  if (
-    selected !== previousSelection &&
-    (selectedCapability === 'image' || selectedCapability === 'video')
-  ) {
-    next[`${selectedCapability}Model`] = selected
-    next.model = selected
-    previousSelection = selected
-  }
-  if (context.agentGroup && context.agentModel) {
-    next.textModel = encodeChannelModel(context.agentGroup, context.agentModel)
   }
   useConfigStore.setState({ config: next })
 }

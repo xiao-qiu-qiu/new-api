@@ -48,6 +48,29 @@ beforeEach(() => {
 })
 afterEach(() => vi.unstubAllGlobals())
 
+it('keeps workbench selections when the Agent model or site theme changes', async () => {
+  context.channels = [currentChannel, {
+    ...currentChannel,
+    id: 'other',
+    models: [{ name: 'image', capability: 'image' }, { name: 'chat', capability: 'text' }],
+  }]
+  context.agentGroup = 'other'
+  context.agentModel = 'chat'
+  const { defaultConfig, useConfigStore } = await import('@/stores/use-config-store')
+  const { applySiteContext } = await import('../sync-context')
+  useConfigStore.setState({ config: { ...defaultConfig, imageModel: 'other::image', textModel: 'current::multimodal' } })
+
+  applySiteContext()
+  context.theme = 'dark'
+  applySiteContext()
+
+  expect(useConfigStore.getState().config.imageModel).toBe('other::image')
+  expect(useConfigStore.getState().config.textModel).toBe('current::multimodal')
+  context.agentGroup = ''
+  context.agentModel = ''
+  context.theme = 'light'
+})
+
 it.each([
   ['first handshake', '', false],
   ['refresh after a saved model is removed', 'removed::video', true],
