@@ -6,8 +6,9 @@ License: MIT, retained in `LICENSE`.
 
 The upstream editor is built separately and served at `/canvas-app/` inside
 the authenticated new-api `/canvas` page. This isolates its Ant Design, router,
-and global styles from the host's Base UI components. The host reuses its
-`ModelGroupSelector`, authentication client, and theme provider. Upstream canvas
+and global styles from the host's Base UI components. The host provides its authentication client and theme provider. Model selection
+lives inside the editor workbenches, nodes and Agent composer, using the upstream
+`ModelPicker` extended with searchable group/model columns and provider icons. Upstream canvas
 gestures, node editors, asset management, and archive support remain together.
 
 `src/integration/site-context.ts` is the host boundary. Model credentials are
@@ -23,9 +24,11 @@ The upstream editor remains a separate frontend package. Host lint and formatter
 commands exclude the vendored package and generated assets; use its TypeScript
 check and run root oxlint with `--no-ignore` on integration changes. `bun run
 canvas:test` runs the upstream Bun tests and integration Vitest suites with the
-editor's own `@` alias. The host's selectors reuse `ModelGroupSelector`; the
-graph editor, asset library and node tools retain their upstream implementations
-because the host has no corresponding canvas editor.
+editor's own `@` alias. The editor keeps its own Ant Design controls because it is a separately bundled
+application with its own styles, routing and model IDs. Its existing `ModelPicker`
+is shared across the workbenches, graph editor and online Agent; the host selector
+is no longer mounted. The graph editor, asset library and node tools retain their
+upstream implementations because the host has no corresponding canvas editor.
 
 Authentication review (2026-10-14): the `/pg` media routes require the existing
 dashboard session access JWT, verify allowed groups on the server and retain
@@ -52,6 +55,22 @@ SQL or transaction changes were made; no three-database compatibility matrix was
 run. Real provider generation and billing still require acceptance on a deployed
 instance with the site's configured models. Local project and asset storage is
 per user and browser; archives and optional WebDAV provide transfer and backup.
+
+Controls update (2026-10-14): the redundant host canvas header is removed, the
+host sidebar collapses on entry, and the editor uses the available content area.
+Image/video workbenches and canvas nodes share the searchable native model picker;
+the online Agent has its own group/model picker and reasoning effort in the composer.
+The original local Codex route is available alongside the online route, with separate
+conversation state and cleanup of pending work when switching routes. Online Chat
+and Responses replies render transport deltas immediately and execute tools only
+after complete arguments arrive. New controls include all seven host languages.
+
+Focused checks for this update passed: TypeScript for both frontends, canvas build,
+stream/tool/route regression suites, context-selection synchronization and locale
+checks. Browser fixtures verified the selected image group/model in the request,
+Agent model/group/reasoning fields, visible text before stream completion, local
+connection entry, conversation restoration, theme synchronization and a 390px picker.
+These fixtures did not call paid upstream models or run a local Codex service.
 
 Frontend acceptance (2026-10-14): `bun run typecheck`, `bun run build`,
 `bun run canvas:test`, the host's model-catalog and host-fetch Vitest suites,

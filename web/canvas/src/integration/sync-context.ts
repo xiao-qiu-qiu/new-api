@@ -1,4 +1,4 @@
-import i18n from '@/i18n'
+import i18n, { getCanvasLocale } from '@/i18n'
 import {
   decodeChannelModel,
   modelOptionsFromChannels,
@@ -12,9 +12,7 @@ import { getSiteContext } from './site-context'
 export function applySiteContext(): void {
   const context = getSiteContext()
   useThemeStore.setState({ theme: context.theme })
-  void i18n.changeLanguage(
-    context.language.startsWith('zh') ? 'zh-CN' : 'en-US'
-  )
+  void i18n.changeLanguage(getCanvasLocale(context.language))
   const current = useConfigStore.getState().config
   const models = modelOptionsFromChannels(context.channels)
   const next = {
