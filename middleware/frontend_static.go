@@ -40,6 +40,23 @@ func ServeFrontendFiles(frontendFS static.ServeFileSystem) gin.HandlerFunc {
 			return
 		}
 		c.Abort()
+		// Embedded applications load their own index directly. FileServer's
+		// directory redirect can conflict with the host router's slash handling.
+		if urlPath != "/index.html" && strings.HasSuffix(urlPath, "/index.html") {
+			file, err := frontendFS.Open(urlPath)
+			if err != nil {
+				http.NotFound(c.Writer, c.Request)
+				return
+			}
+			defer file.Close()
+			info, err := file.Stat()
+			if err != nil {
+				http.NotFound(c.Writer, c.Request)
+				return
+			}
+			http.ServeContent(c.Writer, c.Request, info.Name(), info.ModTime(), file)
+			return
+		}
 		if !strings.Contains(c.GetHeader("Accept-Encoding"), "gzip") ||
 			ginGzip.DefaultExcludedExtentions.Contains(path.Ext(urlPath)) ||
 			strings.HasSuffix(urlPath, "/index.html") {

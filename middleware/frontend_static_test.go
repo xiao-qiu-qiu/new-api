@@ -49,6 +49,9 @@ func TestServeFrontendFilesCompressesEachFileOnce(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(frontendDir, "static", "js", "app.js"), script, 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(frontendDir, "logo.png"), image, 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(frontendDir, "index.html"), []byte("<html></html>"), 0o644))
+	canvasIndex := []byte("<html>canvas</html>")
+	require.NoError(t, os.MkdirAll(filepath.Join(frontendDir, "canvas-app"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(frontendDir, "canvas-app", "index.html"), canvasIndex, 0o644))
 	frontendFS := &countingFrontendFS{ServeFileSystem: static.LocalFile(frontendDir, false)}
 
 	router := gin.New()
@@ -99,6 +102,19 @@ func TestServeFrontendFilesCompressesEachFileOnce(t *testing.T) {
 	index := performFrontendRequest(router, http.MethodGet, "/index.html", "gzip")
 	assert.Equal(t, http.StatusMovedPermanently, index.Code)
 	assert.Equal(t, "./", index.Header().Get("Location"))
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		for _, encoding := range []string{"", "gzip"} {
+			canvas := performFrontendRequest(router, method, "/canvas-app/index.html", encoding)
+			require.Equal(t, http.StatusOK, canvas.Code)
+			assert.Empty(t, canvas.Header().Get("Location"))
+			assert.Contains(t, canvas.Header().Get("Content-Type"), "text/html")
+			if method == http.MethodHead {
+				assert.Empty(t, canvas.Body.Bytes())
+			} else {
+				assert.Equal(t, canvasIndex, canvas.Body.Bytes())
+			}
+		}
+	}
 
 	missing := performFrontendRequest(router, http.MethodGet, "/static/js/missing.js", "gzip")
 	assert.Equal(t, http.StatusTeapot, missing.Code)
