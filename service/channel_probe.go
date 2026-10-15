@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 )
 
 type ChannelProbeView struct {
@@ -134,7 +136,7 @@ func BuildChannelProbeView(probe model.ChannelProbe, now time.Time) (ChannelProb
 	probe.Normalize()
 	view := ChannelProbeView{ChannelProbe: probe, History: make([]model.ChannelProbeResult, 0), Status: "unknown", Stale: true, ModelStatuses: make([]PublicChannelProbeView, 0, len(probe.Models))}
 	for _, name := range probe.Models {
-		item, err := BuildPublicChannelProbeModel(probe, name, now, 1)
+		item, err := BuildPublicChannelProbeModel(probe, name, now, 1, "")
 		if err != nil {
 			return view, err
 		}
@@ -147,7 +149,7 @@ func BuildChannelProbeView(probe model.ChannelProbe, now time.Time) (ChannelProb
 	return view, nil
 }
 
-func BuildPublicChannelProbeModel(probe model.ChannelProbe, name string, now time.Time, hours int) (PublicChannelProbeView, error) {
+func BuildPublicChannelProbeModel(probe model.ChannelProbe, name string, now time.Time, hours int, userGroup string) (PublicChannelProbeView, error) {
 	probe.Normalize()
 	// All buckets contain whole minutes, including the current partial minute.
 	// Window bounds are rounded up by at most 59 seconds; no samples are invented.
@@ -221,6 +223,22 @@ func BuildPublicChannelProbeModel(probe model.ChannelProbe, name string, now tim
 	// An unavailable log database must not take the existing status page down.
 	if usage, err := model.GetChannelProbeUsageStats(probe, name, start, end); err == nil {
 		view.ChannelProbeUsageStats = usage
+	}
+	basePrice := view.EstimatedPricePer100MTokens
+	view.EstimatedPricePer100MTokens = nil
+	// An upstream can serve multiple billing groups, so it has no unique
+	// consumer price. Keep its operational/cache metrics without inventing one.
+	if basePrice == nil || probe.Scope != "group" || !IsUserSelectableGroup(userGroup, probe.GroupName) {
+		return view, nil
+	}
+	ratio, special := ratio_setting.GetGroupGroupRatio(userGroup, probe.GroupName)
+	if !special {
+		ratio = ratio_setting.GetGroupRatio(probe.GroupName)
+	}
+	price := *basePrice * ratio
+	if ratio >= 0 && !math.IsNaN(ratio) && !math.IsInf(ratio, 0) && !math.IsNaN(price) && !math.IsInf(price, 0) {
+		// Allocate a viewer-specific value; cached aggregate pointers are shared.
+		view.EstimatedPricePer100MTokens = &price
 	}
 	return view, nil
 }

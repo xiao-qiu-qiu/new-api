@@ -192,6 +192,11 @@ type RelayInfo struct {
 	FinalRequestRelayFormat types.RelayFormat
 
 	StreamStatus *StreamStatus
+	// Snapshot once per request, including retries. The lifecycle belongs to
+	// one HTTP attempt and is closed with that attempt's response body.
+	StreamDisconnectMode      string
+	StreamDrainTimeoutSeconds int
+	StreamLifecycle           *StreamLifecycle
 	// VendorToolUsage reads the upstream's own billed tool counts from a raw
 	// response body (non-stream) or the raw terminal stream frame. The channel
 	// adaptor's Init sets it for upstreams whose usage extension names a billed
@@ -643,6 +648,7 @@ func genBaseRelayInfo(c *gin.Context, request dto.Request) *RelayInfo {
 		},
 	}
 
+	info.SnapshotStreamDisconnectSettings()
 	if info.RelayMode == relayconstant.RelayModeUnknown {
 		info.RelayMode = c.GetInt("relay_mode")
 	}

@@ -29,6 +29,7 @@ import { PageTransition } from '@/components/page-transition'
 import { Button } from '@/components/ui/button'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { cn } from '@/lib/utils'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { getChannelStatus } from './api'
 import { StatusCard } from './components/status-card'
@@ -38,11 +39,13 @@ import type { ProbeScope, StatusHours } from './types'
 
 export function ChannelStatus() {
   const { t } = useTranslation()
+  const user = useAuthStore((state) => state.auth.user)
   const [hours, setHours] = useState<StatusHours>(1)
   const [scope, setScope] = useState<ProbeScope | 'all'>('all')
   const query = useQuery({
-    queryKey: ['channel-status', hours],
+    queryKey: ['channel-status', hours, user?.id ?? null, user?.group ?? null],
     queryFn: ({ signal }) => getChannelStatus(hours, signal),
+    staleTime: 0,
     refetchInterval: 30_000,
     meta: { errorToast: false },
   })

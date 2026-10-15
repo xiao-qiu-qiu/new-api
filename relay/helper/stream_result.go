@@ -11,8 +11,9 @@ import (
 // to record soft errors, signal fatal stops, or mark normal completion.
 // StreamScannerHandler checks IsStopped() after each callback invocation.
 type StreamResult struct {
-	status  *relaycommon.StreamStatus
-	stopped bool
+	status    *relaycommon.StreamStatus
+	stopped   bool
+	lifecycle *relaycommon.StreamLifecycle
 }
 
 func newStreamResult(status *relaycommon.StreamStatus) *StreamResult {
@@ -34,6 +35,13 @@ func (r *StreamResult) Error(err error) {
 
 // Stop records a fatal error and marks the stream to stop after this chunk.
 func (r *StreamResult) Stop(err error) {
+	// A provider may explicitly stop on a downstream cancellation. Keep
+	// draining in that case, while genuine protocol/parse errors still stop.
+	if r.lifecycle != nil && r.lifecycle.Drain && r.lifecycle.ClientError() != nil && !r.status.ResponseFailed() &&
+		(err == nil || errors.Is(err, r.lifecycle.ClientError())) {
+		r.status.MarkClientGone(r.lifecycle.ClientError())
+		return
+	}
 	r.Error(err)
 	r.status.SetEndReason(relaycommon.StreamEndReasonHandlerStop, err)
 	r.stopped = true
@@ -42,6 +50,9 @@ func (r *StreamResult) Stop(err error) {
 // Done signals that the handler has finished processing normally
 // (e.g., Dify "message_end"). The stream stops after this chunk.
 func (r *StreamResult) Done() {
+	if r.lifecycle != nil && r.lifecycle.ClientError() != nil {
+		r.status.MarkClientGone(r.lifecycle.ClientError())
+	}
 	r.status.SetEndReason(relaycommon.StreamEndReasonDone, nil)
 	r.stopped = true
 }

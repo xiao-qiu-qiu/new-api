@@ -255,7 +255,7 @@ export function StatusCard(props: { probe: PublicChannelStatus }) {
                   </TooltipTrigger>
                   <TooltipContent>
                     {t(
-                      'Estimated from actual charges and total input + output tokens in {{count}} requests in this window, including cache discounts.',
+                      'Estimated from {{count}} recent requests in this window, adjusted to your applicable group rate. Includes input, output and cache tokens; actual costs vary with usage.',
                       {
                         count: formatNumber(probe.price_sample_count, locale),
                       }

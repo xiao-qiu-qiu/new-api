@@ -135,6 +135,7 @@ export function CommonLogMobileCard<TData>(props: {
   const contentCell = props.cells.get('content')
   const channelCell = props.cells.get('channel')
   const cacheRead = other?.cache_tokens || 0
+  const showCacheRead = cacheRead > 0 || (log.type === 2 && cacheRead === 0)
   const cacheHitRate = getLogCacheHitRate(log, other)
   const cacheWrite =
     (other?.cache_creation_tokens_5m || 0) +
@@ -311,7 +312,7 @@ export function CommonLogMobileCard<TData>(props: {
               {log.completion_tokens.toLocaleString()}
             </span>
           </span>
-          {cacheRead > 0 && (
+          {showCacheRead && (
             <span className='whitespace-nowrap'>
               {t('Cache')} ↓ {cacheRead.toLocaleString()}{' '}
               <LogCacheHitRate rate={cacheHitRate} />

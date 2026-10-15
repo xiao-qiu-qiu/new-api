@@ -32,7 +32,7 @@ await i18n.use(initReactI18next).init({
     en: {
       translation: {
         Auto: 'Auto',
-        'Cross-group': 'Cross-group',
+        'Multiple groups': 'Multiple groups',
         Ratio: 'Ratio',
         'Automatically selects the best available group with circuit breaker mechanism':
           'Automatically selects the best available group with circuit breaker mechanism',
@@ -43,6 +43,7 @@ await i18n.use(initReactI18next).init({
 
 function CellHarness(props: {
   group: string
+  autoGroups?: string[]
   ratio?: number | string
   crossGroupRetry?: boolean
   shouldReduceMotion?: boolean
@@ -51,6 +52,7 @@ function CellHarness(props: {
     <I18nextProvider i18n={i18n}>
       <TooltipProvider>
         <ApiKeyGroupCell
+          autoGroups={props.autoGroups}
           group={props.group}
           ratio={props.ratio}
           crossGroupRetry={props.crossGroupRetry ?? false}
@@ -62,11 +64,27 @@ function CellHarness(props: {
 }
 
 describe('API key group table cell', () => {
+  test('shows custom groups in priority order and exposes billing and retry state on focus', async () => {
+    render(<CellHarness group='auto' autoGroups={['gpt', 'deepseek']} />)
+    expect(screen.getByText('gpt → deepseek')).toBeVisible()
+    await userEvent.tab()
+    const tooltip = (
+      await screen.findByText(
+        'Billed at the rate of the group used for each request.'
+      )
+    ).closest('[data-slot="tooltip-content"]')
+    expect(tooltip).toHaveTextContent('gpt → deepseek')
+    expect(tooltip).toHaveTextContent('Cross-group retry: Disabled')
+    expect(tooltip).toHaveTextContent(
+      'Billed at the rate of the group used for each request.'
+    )
+  })
+
   test('keeps the group and compact localized multiplier together with one subtle flowing edge', () => {
     const { container } = render(
       <CellHarness group='auto' ratio='自动' crossGroupRetry />
     )
-    const group = screen.getByText('Cross-group')
+    const group = screen.getByText('Multiple groups')
     const multiplier = screen
       .getByText('Auto')
       .closest<HTMLElement>('[data-slot="badge"]')
@@ -93,7 +111,7 @@ describe('API key group table cell', () => {
 
   test('does not invent a multiplier while automatic ratio data is unavailable', () => {
     render(<CellHarness group='auto' />)
-    expect(screen.getByText('Cross-group')).toBeInTheDocument()
+    expect(screen.getByText('Multiple groups')).toBeInTheDocument()
     expect(screen.queryByText('Auto')).not.toBeInTheDocument()
   })
 

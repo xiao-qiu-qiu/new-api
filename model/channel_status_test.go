@@ -31,7 +31,7 @@ func setupChannelStatusTest(t *testing.T) {
 }
 
 func TestChannelProbeUsageEstimates(t *testing.T) {
-	const normal = `{"model_ratio":1,"model_price":-1,"cache_tokens":50}`
+	const normal = `{"model_ratio":1,"model_price":-1,"group_ratio":1,"cache_tokens":50}`
 	for _, tc := range []struct {
 		name       string
 		other      string
@@ -43,30 +43,42 @@ func TestChannelProbeUsageEstimates(t *testing.T) {
 		priceCount int64
 	}{
 		{name: "normal", other: normal, prompt: 100, quota: 100, rate: common.GetPointer(50.0), price: common.GetPointer(100.0), cacheCount: 10, priceCount: 10},
-		{name: "zero is valid", other: `{"model_ratio":0,"model_price":-1,"cache_tokens":0}`, prompt: 100, rate: common.GetPointer(0.0), price: common.GetPointer(0.0), cacheCount: 10, priceCount: 10},
-		{name: "anthropic cache added once", other: `{"billing_mode":"tiered_expr","billing_unit":"token","usage_semantic":"anthropic","cache_tokens":60,"cache_write_tokens":30,"cache_creation_tokens":30,"cache_creation_tokens_5m":10,"cache_creation_tokens_1h":20}`, prompt: 10, quota: 100, rate: common.GetPointer(60.0), price: common.GetPointer(100.0), cacheCount: 10, priceCount: 10},
-		{name: "modern openai overrides claude request flag", other: `{"model_ratio":1,"model_price":-1,"usage_semantic":"openai","claude":true,"cache_tokens":50,"cache_write_tokens":20}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), price: common.GetPointer(100.0), cacheCount: 10, priceCount: 10},
-		{name: "subscription actual usage", other: `{"model_ratio":1,"model_price":-1,"cache_tokens":50,"billing_source":"subscription","subscription_consumed":200}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), price: common.GetPointer(200.0), cacheCount: 10, priceCount: 10},
-		{name: "unknown cache retains price only", other: `{"model_ratio":1,"model_price":-1}`, prompt: 100, quota: 100, price: common.GetPointer(100.0), priceCount: 10},
-		{name: "anthropic unknown cache read", other: `{"model_ratio":1,"model_price":-1,"usage_semantic":"anthropic","cache_creation_tokens":0}`, prompt: 100, quota: 100},
-		{name: "anthropic unknown cache write", other: `{"model_ratio":1,"model_price":-1,"usage_semantic":"anthropic","cache_tokens":50}`, prompt: 100, quota: 100},
-		{name: "anthropic explicit total", other: `{"model_ratio":1,"model_price":-1,"usage_semantic":"anthropic","input_tokens_total":100}`, prompt: 10, quota: 100, price: common.GetPointer(100.0), priceCount: 10},
+		{name: "zero is valid", other: `{"model_ratio":0,"model_price":-1,"group_ratio":1,"cache_tokens":0}`, prompt: 100, rate: common.GetPointer(0.0), price: common.GetPointer(0.0), cacheCount: 10, priceCount: 10},
+		{name: "anthropic cache added once", other: `{"billing_mode":"tiered_expr","billing_unit":"token","group_ratio":1,"usage_semantic":"anthropic","cache_tokens":60,"cache_write_tokens":30,"cache_creation_tokens":30,"cache_creation_tokens_5m":10,"cache_creation_tokens_1h":20}`, prompt: 10, quota: 100, rate: common.GetPointer(60.0), price: common.GetPointer(100.0), cacheCount: 10, priceCount: 10},
+		{name: "modern openai overrides claude request flag", other: `{"model_ratio":1,"model_price":-1,"group_ratio":1,"usage_semantic":"openai","claude":true,"cache_tokens":50,"cache_write_tokens":20}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), price: common.GetPointer(100.0), cacheCount: 10, priceCount: 10},
+		{name: "subscription actual usage", other: `{"model_ratio":1,"model_price":-1,"group_ratio":1,"cache_tokens":50,"billing_source":"subscription","subscription_consumed":200}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), price: common.GetPointer(200.0), cacheCount: 10, priceCount: 10},
+		{name: "unknown cache retains price only", other: `{"model_ratio":1,"model_price":-1,"group_ratio":1}`, prompt: 100, quota: 100, price: common.GetPointer(100.0), priceCount: 10},
+		{name: "anthropic unknown cache read", other: `{"model_ratio":1,"model_price":-1,"group_ratio":1,"usage_semantic":"anthropic","cache_creation_tokens":0}`, prompt: 100, quota: 100},
+		{name: "anthropic unknown cache write", other: `{"model_ratio":1,"model_price":-1,"group_ratio":1,"usage_semantic":"anthropic","cache_tokens":50}`, prompt: 100, quota: 100},
+		{name: "anthropic explicit total", other: `{"model_ratio":1,"model_price":-1,"group_ratio":1,"usage_semantic":"anthropic","input_tokens_total":100}`, prompt: 10, quota: 100, price: common.GetPointer(100.0), priceCount: 10},
 		{name: "negative quota", other: normal, prompt: 100, quota: -1},
 		{name: "negative input", other: normal, prompt: -1, quota: 100},
-		{name: "invalid cache count", other: `{"model_ratio":1,"cache_tokens":101}`, prompt: 100, quota: 100},
-		{name: "fractional token count", other: `{"model_ratio":1,"cache_tokens":0.5}`, prompt: 100, quota: 100},
+		{name: "invalid cache count", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":101}`, prompt: 100, quota: 100},
+		{name: "fractional token count", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":0.5}`, prompt: 100, quota: 100},
 		{name: "invalid metadata", other: "{", prompt: 100, quota: 100},
-		{name: "fixed request", other: `{"model_ratio":1,"model_price":0,"cache_tokens":50}`, prompt: 100, quota: 100},
-		{name: "tiered request", other: `{"billing_mode":"tiered_expr","billing_unit":"request","cache_tokens":50}`, prompt: 100, quota: 100},
-		{name: "media tokens", other: `{"model_ratio":1,"cache_tokens":50,"billing_tokens":{"img":1}}`, prompt: 100, quota: 100},
-		{name: "task", other: `{"model_ratio":1,"cache_tokens":50,"is_task":true}`, prompt: 100, quota: 100},
-		{name: "audio", other: `{"model_ratio":1,"cache_tokens":50,"audio_input":1}`, prompt: 100, quota: 100},
-		{name: "abnormal stream", other: `{"model_ratio":1,"cache_tokens":50,"stream_status":{"status":"error"}}`, prompt: 100, quota: 100},
-		{name: "normal completed stream", other: `{"model_ratio":1,"cache_tokens":50,"stream_status":{"status":"ok","response_status":"completed","end_reason":"done"}}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), price: common.GetPointer(100.0), cacheCount: 10, priceCount: 10},
-		{name: "rejected", other: `{"model_ratio":1,"cache_tokens":50,"admin_info":{"reject_reason":"rejected"}}`, prompt: 100, quota: 100},
-		{name: "saturated", other: `{"model_ratio":1,"cache_tokens":50,"admin_info":{"quota_saturation":{"kind":"overflow"}}}`, prompt: 100, quota: 100},
-		{name: "estimated usage", other: `{"model_ratio":1,"cache_tokens":50,"admin_info":{"usage_billing_path":"billing-usage-openai-estimated"}}`, prompt: 100, quota: 100},
-		{name: "tool charge keeps cache only", other: `{"model_ratio":1,"cache_tokens":50,"tool_surcharges":[{"count":1,"price":1}]}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), cacheCount: 10},
+		{name: "fixed request", other: `{"model_ratio":1,"model_price":0,"group_ratio":1,"cache_tokens":50}`, prompt: 100, quota: 100},
+		{name: "tiered request", other: `{"billing_mode":"tiered_expr","billing_unit":"request","group_ratio":1,"cache_tokens":50}`, prompt: 100, quota: 100},
+		{name: "media tokens", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"billing_tokens":{"img":1}}`, prompt: 100, quota: 100},
+		{name: "task", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"is_task":true}`, prompt: 100, quota: 100},
+		{name: "audio", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"audio_input":1}`, prompt: 100, quota: 100},
+		{name: "abnormal stream", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"stream_status":{"status":"error"}}`, prompt: 100, quota: 100},
+		{name: "client gone excludes both metrics", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"stream_status":{"status":"error","end_reason":"client_gone"}}`, prompt: 100, quota: 100},
+		{name: "client gone overrides completed status", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"stream_status":{"status":"ok","response_status":"completed","end_reason":"client_gone"}}`, prompt: 100, quota: 100},
+		{name: "normal completed stream", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"stream_status":{"status":"ok","response_status":"completed","end_reason":"done"}}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), price: common.GetPointer(100.0), cacheCount: 10, priceCount: 10},
+		{name: "rejected", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"admin_info":{"reject_reason":"rejected"}}`, prompt: 100, quota: 100},
+		{name: "saturated", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"admin_info":{"quota_saturation":{"kind":"overflow"}}}`, prompt: 100, quota: 100},
+		{name: "estimated usage", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"admin_info":{"usage_billing_path":"billing-usage-openai-estimated"}}`, prompt: 100, quota: 100},
+		{name: "tool charge keeps cache only", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"tool_surcharges":[{"count":1,"price":1}]}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), cacheCount: 10},
+		{name: "discount removed", other: `{"model_ratio":1,"group_ratio":0.5,"cache_tokens":50}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), price: common.GetPointer(200.0), cacheCount: 10, priceCount: 10},
+		{name: "markup removed", other: `{"model_ratio":1,"group_ratio":2,"cache_tokens":50}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), price: common.GetPointer(50.0), cacheCount: 10, priceCount: 10},
+		{name: "special group ratio applied once", other: `{"model_ratio":1,"group_ratio":0.25,"user_group_ratio":0.25,"cache_tokens":50}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), price: common.GetPointer(400.0), cacheCount: 10, priceCount: 10},
+		{name: "tiered discount removed", other: `{"billing_mode":"tiered_expr","billing_unit":"token","group_ratio":0.5,"cache_tokens":50}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), price: common.GetPointer(200.0), cacheCount: 10, priceCount: 10},
+		{name: "subscription discount removed", other: `{"model_ratio":1,"group_ratio":0.5,"cache_tokens":50,"billing_source":"subscription","subscription_consumed":200}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), price: common.GetPointer(400.0), cacheCount: 10, priceCount: 10},
+		{name: "missing group ratio keeps cache only", other: `{"model_ratio":1,"user_group_ratio":0.5,"cache_tokens":50}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), cacheCount: 10},
+		{name: "null group ratio keeps cache only", other: `{"model_ratio":1,"group_ratio":null,"cache_tokens":50}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), cacheCount: 10},
+		{name: "zero group ratio keeps cache only", other: `{"model_ratio":1,"group_ratio":0,"cache_tokens":50}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), cacheCount: 10},
+		{name: "negative group ratio keeps cache only", other: `{"model_ratio":1,"group_ratio":-1,"cache_tokens":50}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), cacheCount: 10},
+		{name: "normalization overflow keeps cache only", other: `{"model_ratio":1,"group_ratio":1e-308,"cache_tokens":50}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), cacheCount: 10},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			logs := make([]Log, 10)
@@ -91,12 +103,39 @@ func TestChannelProbeUsageEstimates(t *testing.T) {
 	assert.Nil(t, insufficient.EstimatedPricePer100MTokens)
 	assert.Nil(t, aggregateChannelProbeUsage(logs, math.SmallestNonzeroFloat64).EstimatedPricePer100MTokens)
 	logs[0].PromptTokens = 1000
-	logs[0].Other = `{"model_ratio":1,"cache_tokens":900}`
+	logs[0].Other = `{"model_ratio":1,"group_ratio":1,"cache_tokens":900}`
 	weighted := aggregateChannelProbeUsage(logs, 500000)
 	require.NotNil(t, weighted.AverageCacheHitRate)
 	require.NotNil(t, weighted.EstimatedPricePer100MTokens)
 	assert.InDelta(t, 1350.0/1900*100, *weighted.AverageCacheHitRate, 1e-9)
 	assert.InDelta(t, 1000.0/2900*200, *weighted.EstimatedPricePer100MTokens, 1e-9)
+	t.Run("client gone leaves valid sample counts and weighted values unchanged", func(t *testing.T) {
+		mixed := append(logs, Log{
+			PromptTokens: 100000, CompletionTokens: 1, Quota: 100000,
+			Other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":99000,"stream_status":{"status":"error","end_reason":"client_gone"}}`,
+		})
+		assert.Equal(t, weighted, aggregateChannelProbeUsage(mixed, 500000))
+	})
+}
+
+func TestChannelProbeUsageGroupRatioNormalization(t *testing.T) {
+	logs := make([]Log, 10)
+	for i := range logs {
+		logs[i] = Log{PromptTokens: 100, CompletionTokens: 100, Quota: 50, Other: `{"model_ratio":1,"group_ratio":0.5,"cache_tokens":50}`}
+	}
+	logs[0] = Log{PromptTokens: 900, CompletionTokens: 100, Quota: 1000, Other: `{"model_ratio":1,"group_ratio":2,"cache_tokens":450}`}
+	stats := aggregateChannelProbeUsage(logs, 500000)
+	require.NotNil(t, stats.EstimatedPricePer100MTokens)
+	assert.EqualValues(t, 10, stats.PriceSampleCount)
+	assert.InDelta(t, (9*100.0+500)/(9*200+1000)*200, *stats.EstimatedPricePer100MTokens, 1e-9)
+
+	logs[0].Other = `{"model_ratio":1,"cache_tokens":450}`
+	stats = aggregateChannelProbeUsage(logs, 500000)
+	assert.EqualValues(t, 10, stats.CacheSampleCount)
+	require.NotNil(t, stats.AverageCacheHitRate)
+	assert.Equal(t, 50.0, *stats.AverageCacheHitRate)
+	assert.EqualValues(t, 9, stats.PriceSampleCount)
+	assert.Nil(t, stats.EstimatedPricePer100MTokens)
 }
 
 func TestChannelProbeUsageDatabaseMatrix(t *testing.T) {
@@ -147,7 +186,7 @@ func TestChannelProbeUsageDatabaseMatrix(t *testing.T) {
 			var logs []Log
 			for _, age := range []int64{60, 2 * 3600, 8 * 3600, 16 * 3600} {
 				for range 10 {
-					logs = append(logs, Log{CreatedAt: end - age, Type: LogTypeConsume, ModelName: "model%_test", ChannelId: 7, Group: "group'\"test", PromptTokens: 100, CompletionTokens: 100, Quota: 100, Other: `{"model_ratio":1,"cache_tokens":50}`})
+					logs = append(logs, Log{CreatedAt: end - age, Type: LogTypeConsume, ModelName: "model%_test", ChannelId: 7, Group: "group'\"test", PromptTokens: 100, CompletionTokens: 100, Quota: 100, Other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50}`})
 				}
 			}
 			for _, wrong := range []Log{
@@ -157,7 +196,7 @@ func TestChannelProbeUsageDatabaseMatrix(t *testing.T) {
 				{CreatedAt: end, Type: LogTypeConsume, ModelName: "model%_test", ChannelId: 7, Group: "group'\"test"},
 				{CreatedAt: end - 24*3600 - 1, Type: LogTypeConsume, ModelName: "model%_test", ChannelId: 7, Group: "group'\"test"},
 			} {
-				wrong.PromptTokens, wrong.CompletionTokens, wrong.Quota, wrong.Other = 100, 100, 9999, `{"model_ratio":1,"cache_tokens":100}`
+				wrong.PromptTokens, wrong.CompletionTokens, wrong.Quota, wrong.Other = 100, 100, 9999, `{"model_ratio":1,"group_ratio":1,"cache_tokens":100}`
 				logs = append(logs, wrong)
 			}
 			require.NoError(t, db.Create(&logs).Error)
@@ -175,7 +214,7 @@ func TestChannelProbeUsageDatabaseMatrix(t *testing.T) {
 			}
 			latest := make([]Log, 1001)
 			for i := range latest {
-				latest[i] = Log{CreatedAt: end - 30, Type: LogTypeConsume, ModelName: "bounded", ChannelId: 7, PromptTokens: 100, CompletionTokens: 100, Quota: 100, Other: `{"model_ratio":1,"cache_tokens":50}`}
+				latest[i] = Log{CreatedAt: end - 30, Type: LogTypeConsume, ModelName: "bounded", ChannelId: 7, PromptTokens: 100, CompletionTokens: 100, Quota: 100, Other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50}`}
 			}
 			latest[0].Quota = 999999
 			require.NoError(t, db.CreateInBatches(&latest, 100).Error)

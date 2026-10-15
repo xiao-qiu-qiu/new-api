@@ -52,7 +52,7 @@ type AutoGroupOrderEditorProps = Omit<ComponentProps<'div'>, 'onChange'> & {
 export function AutoGroupOrderEditor(props: AutoGroupOrderEditorProps) {
   const { t } = useTranslation()
   const maxCount =
-    Number.isInteger(props.maxCount) && props.maxCount > 0 ? props.maxCount : 5
+    Number.isInteger(props.maxCount) && props.maxCount > 0 ? props.maxCount : 20
   const isInheriting = props.mode === 'inherit'
   const atLimit = props.value.length >= maxCount
   const candidates = useMemo(
@@ -94,7 +94,7 @@ export function AutoGroupOrderEditor(props: AutoGroupOrderEditorProps) {
       data-form-root={props['data-form-root']}
       role='group'
       tabIndex={-1}
-      aria-label={props['aria-label'] || t('Auto group order')}
+      aria-label={props['aria-label'] || t('Selected groups')}
       aria-describedby={props['aria-describedby']}
       aria-invalid={props['aria-invalid']}
       className={cn('flex flex-col gap-3', props.className)}
@@ -102,7 +102,7 @@ export function AutoGroupOrderEditor(props: AutoGroupOrderEditorProps) {
       <div className='flex items-center justify-between gap-3'>
         <p className='text-muted-foreground text-xs' aria-live='polite'>
           {isInheriting
-            ? t('Using the complete global Auto order ({{count}} groups)', {
+            ? t('Using global groups ({{count}} groups)', {
                 count: props.globalOptions.length,
               })
             : t('{{count}} / {{max}} groups selected', {
@@ -119,7 +119,7 @@ export function AutoGroupOrderEditor(props: AutoGroupOrderEditorProps) {
             props.onChange({ groups: [], mode: 'inherit' })
           }}
         >
-          {t('Restore global Auto')}
+          {t('Use global groups')}
         </Button>
       </div>
 
@@ -130,7 +130,7 @@ export function AutoGroupOrderEditor(props: AutoGroupOrderEditorProps) {
         placeholder={
           atLimit
             ? t('Maximum {{max}} groups selected', { max: maxCount })
-            : t('Add Auto group')
+            : t('Add group')
         }
         disabled={atLimit || candidates.length === 0}
       />
@@ -138,9 +138,9 @@ export function AutoGroupOrderEditor(props: AutoGroupOrderEditorProps) {
       {isInheriting && props.globalOptions.length === 0 && (
         <Empty className='min-h-28 border'>
           <EmptyHeader>
-            <EmptyTitle>{t('Inherit global Auto order')}</EmptyTitle>
+            <EmptyTitle>{t('Use global groups')}</EmptyTitle>
             <EmptyDescription>
-              {t('No available groups in the global Auto order.')}
+              {t('No available global groups.')}
             </EmptyDescription>
           </EmptyHeader>
         </Empty>
@@ -149,7 +149,7 @@ export function AutoGroupOrderEditor(props: AutoGroupOrderEditorProps) {
       {isInheriting && props.globalOptions.length > 0 && (
         <ol
           data-slot='global-auto-order'
-          aria-label={t('Inherit global Auto order')}
+          aria-label={t('Use global groups')}
           className='flex max-h-24 flex-wrap content-start gap-1.5 overflow-y-auto'
         >
           {props.globalOptions.map((option, index) => (
@@ -199,11 +199,9 @@ export function AutoGroupOrderEditor(props: AutoGroupOrderEditorProps) {
       {!isInheriting && props.value.length === 0 && (
         <Empty className='min-h-24 border'>
           <EmptyHeader>
-            <EmptyTitle>{t('Auto group order')}</EmptyTitle>
+            <EmptyTitle>{t('Selected groups')}</EmptyTitle>
             <EmptyDescription>
-              {t(
-                'No valid custom Auto groups remain. Add a group or restore global Auto.'
-              )}
+              {t('No groups selected. Add a group or use global groups.')}
             </EmptyDescription>
           </EmptyHeader>
         </Empty>

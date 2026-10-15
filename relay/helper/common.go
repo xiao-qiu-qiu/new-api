@@ -28,6 +28,9 @@ func FlushWriter(c *gin.Context) (err error) {
 	if requestContextDone(c) {
 		return fmt.Errorf("request context done: %w", c.Request.Context().Err())
 	}
+	if writer, ok := c.Writer.(*streamWriter); ok {
+		return writer.FlushError()
+	}
 
 	flusher, ok := c.Writer.(http.Flusher)
 	if !ok {
@@ -39,6 +42,13 @@ func FlushWriter(c *gin.Context) (err error) {
 }
 
 func requestContextDone(c *gin.Context) bool {
+	// Drain callbacks still parse usage and conversions after a disconnect;
+	// the writer suppresses all downstream output without surfacing fatal errors.
+	if c != nil {
+		if _, ok := c.Writer.(*streamWriter); ok {
+			return false
+		}
+	}
 	return c != nil && c.Request != nil && c.Request.Context().Err() != nil
 }
 

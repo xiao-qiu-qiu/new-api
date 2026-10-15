@@ -21,6 +21,7 @@ import { useTranslation } from 'react-i18next'
 import { StatusBadge, type StatusVariant } from '@/components/status-badge'
 import { toIntlLocale } from '@/i18n/languages'
 import { formatNumber } from '@/lib/format'
+import { cn } from '@/lib/utils'
 
 export function LogCacheHitRate(props: { rate: number | null }) {
   const { t, i18n } = useTranslation()
@@ -41,7 +42,10 @@ export function LogCacheHitRate(props: { rate: number | null }) {
       variant={variant}
       label={`(${formatNumber(props.rate, locale)}%)`}
       title={t('Cache read tokens / total input tokens')}
-      className='align-baseline text-[11px] tabular-nums'
+      className={cn(
+        'align-baseline text-[11px] tabular-nums',
+        props.rate < 30 && 'text-red-900 dark:text-red-300'
+      )}
     />
   )
 }

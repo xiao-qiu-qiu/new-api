@@ -25,6 +25,7 @@ import { PaymentSettingsSection } from '../integrations/payment-settings-section
 import { RatioSettingsCard } from '../models/ratio-settings-card'
 import type { BillingSettings } from '../types'
 import { createSectionRegistry } from '../utils/section-registry'
+import { StreamBillingSection } from './stream-billing-section'
 
 const getModelDefaults = (settings: BillingSettings) => ({
   ModelPrice: settings.ModelPrice,
@@ -76,6 +77,24 @@ const BILLING_SECTIONS = [
           (settings['payment_setting.compliance_confirmed'] ?? false) &&
           settings['payment_setting.compliance_terms_version'] === 'v1'
         }
+      />
+    ),
+  },
+  {
+    id: 'stream',
+    titleKey: 'Stream Billing',
+    build: (settings: BillingSettings) => (
+      <StreamBillingSection
+        defaultValues={{
+          quota_setting: {
+            stream_disconnect_mode:
+              settings['quota_setting.stream_disconnect_mode'] === 'drain'
+                ? 'drain'
+                : 'cancel',
+            stream_drain_timeout_seconds:
+              settings['quota_setting.stream_drain_timeout_seconds'] ?? 300,
+          },
+        }}
       />
     ),
   },

@@ -110,6 +110,21 @@ test('shows the recorded request and response models in log details', () => {
 })
 
 describe('usage facts billing details', () => {
+  test.each([
+    { cache: 0, expected: 'Unknown' },
+    { cache: 4, expected: '4' },
+  ])(
+    'incomplete input shows cache as $expected without inventing zero',
+    ({ cache, expected }) => {
+      const queryClient = renderDetails(
+        { cache_tokens: cache, cache_usage_known: false },
+        1000
+      )
+      expect(rowValue('Cache Read')).toBe(expected)
+      queryClient.clear()
+    }
+  )
+
   test('shows the settled image count and a per-image price', () => {
     const queryClient = renderDetails({
       billing_mode: 'tiered_expr',

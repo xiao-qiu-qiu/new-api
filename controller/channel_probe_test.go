@@ -20,6 +20,8 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -69,6 +71,99 @@ func channelProbeTestDB(t *testing.T) *gorm.DB {
 
 func channelProbeFixture() model.ChannelProbe {
 	return model.ChannelProbe{ChannelID: 123, Model: "probe-model", PublicName: "Public display", Enabled: true, Public: true, ActiveEnabled: true, PassiveEnabled: true, IntervalSeconds: 60, TimeoutSeconds: 5, GreenMS: 1000, YellowMS: 3000}
+}
+
+func TestPublicChannelProbeViewerPrice(t *testing.T) {
+	db := channelProbeTestDB(t)
+	previousLogDB, previousLogEnabled, previousQuota := model.LOG_DB, common.LogConsumeEnabled, common.QuotaPerUnit
+	previousRatios := ratio_setting.GroupRatio2JSONString()
+	previousSpecial := ratio_setting.GroupGroupRatio2JSONString()
+	previousUsable := setting.UserUsableGroups2JSONString()
+	t.Cleanup(func() {
+		model.LOG_DB, common.LogConsumeEnabled, common.QuotaPerUnit = previousLogDB, previousLogEnabled, previousQuota
+		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(previousRatios))
+		require.NoError(t, ratio_setting.UpdateGroupGroupRatioByJSONString(previousSpecial))
+		require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(previousUsable))
+		require.NoError(t, db.Migrator().DropTable(&model.Log{}))
+	})
+	model.LOG_DB, common.LogConsumeEnabled, common.QuotaPerUnit = db, true, 500000
+	require.NoError(t, db.AutoMigrate(&model.Log{}))
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"deepseek":0.2}`))
+	require.NoError(t, ratio_setting.UpdateGroupGroupRatioByJSONString(`{"old":{"deepseek":0.1},"free":{"deepseek":0}}`))
+	require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{"deepseek":"DeepSeek"}`))
+	probe := channelProbeFixture()
+	probe.Scope, probe.GroupName, probe.ChannelID = "group", "deepseek", 0
+	require.NoError(t, model.SaveChannelProbe(&probe, true))
+	for i := range 10 {
+		quota, ratio := 100, 0.1
+		if i >= 5 {
+			quota, ratio = 200, 0.2
+		}
+		require.NoError(t, db.Create(&model.Log{
+			Type: model.LogTypeConsume, ModelName: probe.Model, Group: "deepseek", ChannelId: 123, CreatedAt: time.Now().Unix() - 10,
+			PromptTokens: 10000, CompletionTokens: 10000, Quota: quota,
+			Other: fmt.Sprintf(`{"model_ratio":1,"group_ratio":%g,"cache_tokens":9000}`, ratio),
+		}).Error)
+	}
+	for _, tc := range []struct {
+		name  string
+		group string
+		price float64
+	}{
+		{"new user", "default", 2},
+		{"old user", "old", 1},
+		{"anonymous base price", "", 2},
+		{"explicit free group", "free", 0},
+		{"new user after discounted cached response", "default", 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodGet, "/api/channel/probes/status?group=old", nil)
+			// Group comes only from the existing authentication middleware.
+			c.Set("group", tc.group)
+			GetPublicChannelProbeStatus(c)
+			require.Equal(t, http.StatusOK, recorder.Code)
+			assert.Equal(t, "no-store", recorder.Header().Get("Cache-Control"))
+			var response struct {
+				Success bool                             `json:"success"`
+				Data    []service.PublicChannelProbeView `json:"data"`
+			}
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+			require.True(t, response.Success)
+			require.Len(t, response.Data, 1)
+			view := response.Data[0]
+			require.NotNil(t, view.EstimatedPricePer100MTokens)
+			assert.InDelta(t, tc.price, *view.EstimatedPricePer100MTokens, 1e-9)
+			assert.EqualValues(t, 10, view.PriceSampleCount)
+			require.NotNil(t, view.AverageCacheHitRate)
+			assert.Equal(t, 90.0, *view.AverageCacheHitRate)
+		})
+	}
+	t.Run("updated discount applies to cached samples", func(t *testing.T) {
+		require.NoError(t, ratio_setting.UpdateGroupGroupRatioByJSONString(`{"old":{"deepseek":0.05}}`))
+		view, err := service.BuildPublicChannelProbeModel(probe, probe.Model, time.Now(), 1, "old")
+		require.NoError(t, err)
+		require.NotNil(t, view.EstimatedPricePer100MTokens)
+		assert.InDelta(t, 0.5, *view.EstimatedPricePer100MTokens, 1e-9)
+	})
+	t.Run("upstream without a billing group hides consumer price", func(t *testing.T) {
+		upstream := probe
+		upstream.Scope, upstream.ChannelID, upstream.GroupName = "upstream", 123, ""
+		view, err := service.BuildPublicChannelProbeModel(upstream, probe.Model, time.Now(), 1, "old")
+		require.NoError(t, err)
+		assert.EqualValues(t, 10, view.PriceSampleCount)
+		assert.Nil(t, view.EstimatedPricePer100MTokens)
+		require.NotNil(t, view.AverageCacheHitRate)
+		assert.Equal(t, 90.0, *view.AverageCacheHitRate)
+	})
+	t.Run("unavailable group hides price but preserves status", func(t *testing.T) {
+		require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{}`))
+		view, err := service.BuildPublicChannelProbeModel(probe, probe.Model, time.Now(), 1, "old")
+		require.NoError(t, err)
+		assert.Nil(t, view.EstimatedPricePer100MTokens)
+		assert.Equal(t, probe.PublicName, view.PublicName)
+	})
 }
 
 func TestChannelProbeContentTiming(t *testing.T) {
@@ -316,7 +411,7 @@ func TestChannelProbeTimelineFailureThresholds(t *testing.T) {
 				}
 				require.NoError(t, model.StoreChannelProbeResult(probe, result))
 			}
-			view, err := service.BuildPublicChannelProbeModel(probe, probe.Model, now, 1)
+			view, err := service.BuildPublicChannelProbeModel(probe, probe.Model, now, 1, "")
 			require.NoError(t, err)
 			assert.Equal(t, tc.status, view.Timeline[59].Status)
 			assert.EqualValues(t, tc.count, view.SampleCount)
@@ -371,10 +466,10 @@ func TestChannelProbeClientCancellationIsNotAvailabilityFailure(t *testing.T) {
 			result := observer.Result(tc.ctx, &relaycommon.RelayInfo{IsStream: true, StreamStatus: stream}, tc.apiErr)
 			assert.Equal(t, tc.code, result.ErrorCode)
 			assert.Equal(t, tc.code == "", result.Success)
-			before, err := service.BuildPublicChannelProbeModel(probe, probe.Model, time.Now(), 1)
+			before, err := service.BuildPublicChannelProbeModel(probe, probe.Model, time.Now(), 1, "")
 			require.NoError(t, err)
 			service.RecordPassiveChannelProbeResult([]model.ChannelProbe{probe}, result)
-			after, err := service.BuildPublicChannelProbeModel(probe, probe.Model, time.Now(), 1)
+			after, err := service.BuildPublicChannelProbeModel(probe, probe.Model, time.Now(), 1, "")
 			require.NoError(t, err)
 			if tc.code == "cancelled" {
 				assert.Equal(t, before.SampleCount, after.SampleCount)
@@ -496,7 +591,7 @@ func TestChannelProbeUpgradeMultiModelWindowsAndOrder(t *testing.T) {
 	var nullSortOrders int64
 	require.NoError(t, db.Model(&model.ChannelProbe{}).Where("sort_order IS NULL").Count(&nullSortOrders).Error)
 	assert.Zero(t, nullSortOrders, "legacy default ordering must be identical across databases")
-	oldView, err := service.BuildPublicChannelProbeModel(upgraded, upgraded.Model, now, 24)
+	oldView, err := service.BuildPublicChannelProbeModel(upgraded, upgraded.Model, now, 24, "")
 	require.NoError(t, err)
 	assert.EqualValues(t, 1, oldView.SampleCount, "second migration must not import samples again")
 	assert.Equal(t, "yellow", oldView.Status, "exactly 5 seconds is yellow")
@@ -535,7 +630,7 @@ func TestChannelProbeUpgradeMultiModelWindowsAndOrder(t *testing.T) {
 		count, success int64
 	}{{1, 1, 0}, {6, 66, 65}, {12, 66, 65}, {24, 67, 66}} {
 		t.Run(fmt.Sprintf("window-%dh", tc.hours), func(t *testing.T) {
-			view, err := service.BuildPublicChannelProbeModel(first, "model-a", now, tc.hours)
+			view, err := service.BuildPublicChannelProbeModel(first, "model-a", now, tc.hours, "")
 			require.NoError(t, err)
 			assert.Equal(t, tc.count, view.SampleCount)
 			assert.Equal(t, tc.success, view.SuccessCount)
@@ -561,7 +656,7 @@ func TestChannelProbeUpgradeMultiModelWindowsAndOrder(t *testing.T) {
 			}
 		})
 	}
-	viewB, err := service.BuildPublicChannelProbeModel(first, "model-b", now, 24)
+	viewB, err := service.BuildPublicChannelProbeModel(first, "model-b", now, 24, "")
 	require.NoError(t, err)
 	assert.EqualValues(t, 1, viewB.SampleCount)
 	assert.Equal(t, "yellow", viewB.Status)
@@ -569,7 +664,7 @@ func TestChannelProbeUpgradeMultiModelWindowsAndOrder(t *testing.T) {
 	first.GroupName = "renamed-group"
 	require.NoError(t, model.SaveChannelProbe(&first, false))
 	require.NoError(t, model.StoreChannelProbeResult(old, model.ChannelProbeResult{Model: "model-b", Source: "passive", CheckedAt: now.Unix(), Success: true}))
-	after, err := service.BuildPublicChannelProbeModel(first, "model-b", now, 24)
+	after, err := service.BuildPublicChannelProbeModel(first, "model-b", now, 24, "")
 	require.NoError(t, err)
 	assert.Zero(t, after.SampleCount)
 	assert.Nil(t, after.Latest)
@@ -681,22 +776,22 @@ func TestChannelProbeModelEditsPreserveRetainedHistory(t *testing.T) {
 	probe.Models = []string{probe.Model, "new-model"}
 	require.NoError(t, model.SaveChannelProbe(&probe, false))
 	require.NoError(t, model.StoreChannelProbeResult(oldRevision, model.ChannelProbeResult{Source: "passive", CheckedAt: now.Unix(), Success: false}))
-	existing, err := service.BuildPublicChannelProbeModel(probe, "probe-model", now, 24)
+	existing, err := service.BuildPublicChannelProbeModel(probe, "probe-model", now, 24, "")
 	require.NoError(t, err)
 	assert.EqualValues(t, 1, existing.SampleCount)
 	assert.EqualValues(t, 1, existing.SuccessCount)
 	assert.Len(t, existing.History, 1, "adding a model must preserve existing raw history")
-	added, err := service.BuildPublicChannelProbeModel(probe, "new-model", now, 24)
+	added, err := service.BuildPublicChannelProbeModel(probe, "new-model", now, 24, "")
 	require.NoError(t, err)
 	assert.Zero(t, added.SampleCount)
 	require.NoError(t, model.StoreChannelProbeResult(probe, model.ChannelProbeResult{Model: "new-model", Source: "passive", CheckedAt: now.Unix(), Success: true, TTFTMS: &ms}))
 	probe.Models = []string{"new-model"}
 	require.NoError(t, model.SaveChannelProbe(&probe, false))
-	removed, err := service.BuildPublicChannelProbeModel(probe, "probe-model", now, 24)
+	removed, err := service.BuildPublicChannelProbeModel(probe, "probe-model", now, 24, "")
 	require.NoError(t, err)
 	assert.Zero(t, removed.SampleCount, "removed model aggregates must be deleted")
 	assert.Empty(t, removed.History, "removed model raw samples must be deleted")
-	retained, err := service.BuildPublicChannelProbeModel(probe, "new-model", now, 24)
+	retained, err := service.BuildPublicChannelProbeModel(probe, "new-model", now, 24, "")
 	require.NoError(t, err)
 	assert.EqualValues(t, 1, retained.SampleCount)
 	assert.Len(t, retained.History, 1)

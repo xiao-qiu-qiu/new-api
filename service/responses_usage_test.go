@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -339,4 +340,122 @@ func TestResponsesUsageAccumulatorMissingUsageEstimation(t *testing.T) {
 			assert.Equal(t, tc.wantPrompt+tc.wantCompletion, usage.TotalTokens)
 		})
 	}
+}
+
+func TestResponsesUsageAccumulatorBillingCompleteness(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		upstream       []string
+		wantPrompt     int
+		wantCompletion int
+		wantCache      int
+		wantCacheKnown bool
+		wantEstimated  bool
+		wantPath       string
+	}{
+		{
+			name: "no upstream usage", wantPrompt: 100, wantCompletion: 1,
+			wantEstimated: true, wantPath: usageBillingPathLocal,
+		},
+		{
+			name: "empty upstream usage", upstream: []string{`{}`},
+			wantPrompt: 100, wantCompletion: 1, wantEstimated: true, wantPath: usageBillingPathLocal,
+		},
+		{
+			name:       "complete usage with known zero cache",
+			upstream:   []string{`{"input_tokens":20,"output_tokens":5,"input_tokens_details":{"cached_tokens":0}}`},
+			wantPrompt: 20, wantCompletion: 5, wantCacheKnown: true, wantPath: usageBillingPathOpenAI,
+		},
+		{
+			name:       "known zero cache arrives after output usage",
+			upstream:   []string{`{"output_tokens":5}`, `{"input_tokens":20,"input_tokens_details":{"cached_tokens":0}}`},
+			wantPrompt: 20, wantCompletion: 5, wantCacheKnown: true, wantPath: usageBillingPathOpenAI,
+		},
+		{
+			name:       "missing cache facts",
+			upstream:   []string{`{"input_tokens":20,"output_tokens":5}`},
+			wantPrompt: 20, wantCompletion: 5, wantPath: usageBillingPathOpenAI,
+		},
+		{
+			name:       "estimated output keeps known zero cache",
+			upstream:   []string{`{"input_tokens":20,"input_tokens_details":{"cached_tokens":0}}`},
+			wantPrompt: 20, wantCompletion: 1, wantCacheKnown: true, wantEstimated: true, wantPath: usageBillingPathOpenAIEstimated,
+		},
+		{
+			name:       "estimated output keeps upstream cache across partial updates",
+			upstream:   []string{`{"input_tokens":20,"input_tokens_details":{"cached_tokens":4}}`, `{}`},
+			wantPrompt: 20, wantCompletion: 1, wantCache: 4, wantCacheKnown: true, wantEstimated: true, wantPath: usageBillingPathOpenAIEstimated,
+		},
+		{
+			name:       "output only usage still settles estimated input",
+			upstream:   []string{`{"output_tokens":5}`},
+			wantPrompt: 100, wantCompletion: 5, wantEstimated: true, wantPath: usageBillingPathOpenAIEstimated,
+		},
+		{
+			name:       "missing input leaves cache rate unknown while preserving cache count",
+			upstream:   []string{`{"output_tokens":5,"input_tokens_details":{"cached_tokens":4}}`},
+			wantPrompt: 100, wantCompletion: 5, wantCache: 4, wantEstimated: true, wantPath: usageBillingPathOpenAIEstimated,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-4o"}, StreamStatus: relaycommon.NewStreamStatus()}
+			info.SetEstimatePromptTokens(100)
+			accumulator := NewResponsesUsageAccumulator(info)
+			accumulator.Observe(&dto.ResponsesStreamResponse{Type: "response.output_text.delta", Delta: "hello"}, nil)
+			for _, raw := range tc.upstream {
+				var upstream dto.Usage
+				require.NoError(t, common.UnmarshalJsonStr(raw, &upstream))
+				accumulator.Observe(&dto.ResponsesStreamResponse{Type: "response.completed", Response: &dto.OpenAIResponsesResponse{Usage: &upstream}}, nil)
+			}
+			usage := accumulator.Finish()
+			require.NotNil(t, usage.BillingUsage)
+			assert.Equal(t, tc.wantEstimated, usage.BillingUsage.Estimated)
+			assert.Same(t, usage, accumulator.Finish())
+
+			settled := effectiveBillingUsage(usage)
+			assert.Equal(t, tc.wantPrompt, settled.PromptTokens)
+			assert.Equal(t, tc.wantCompletion, settled.CompletionTokens)
+			assert.Equal(t, tc.wantPrompt+tc.wantCompletion, settled.TotalTokens)
+			assert.Equal(t, tc.wantCache, settled.PromptTokensDetails.CachedTokens)
+
+			other := model.NewLogOther()
+			other.SetPublic("cache_tokens", settled.PromptTokensDetails.CachedTokens)
+			appendUsageBillingPathForLog(other, false, usage)
+			var logged map[string]any
+			require.NoError(t, common.UnmarshalJsonStr(other.JSONString(), &logged))
+			assert.Equal(t, tc.wantEstimated, logged["usage_estimated"])
+			assert.Equal(t, tc.wantCacheKnown, logged["cache_usage_known"])
+			assert.Equal(t, float64(tc.wantCache), logged["cache_tokens"])
+			admin, ok := logged["admin_info"].(map[string]any)
+			require.True(t, ok)
+			assert.Equal(t, tc.wantPath, admin["usage_billing_path"])
+		})
+	}
+}
+
+func TestResponsesUsageAccumulatorDisconnectLogKeepsFinalUsage(t *testing.T) {
+	info := &relaycommon.RelayInfo{
+		IsStream: true, StreamDisconnectMode: "drain", StreamStatus: relaycommon.NewStreamStatus(),
+		ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-4o"},
+	}
+	info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, nil)
+	accumulator := NewResponsesUsageAccumulator(info)
+	var upstream dto.Usage
+	require.NoError(t, common.UnmarshalJsonStr(`{"input_tokens":100,"output_tokens":10,"input_tokens_details":{"cached_tokens":80}}`, &upstream))
+	accumulator.Observe(&dto.ResponsesStreamResponse{Type: "response.completed", Response: &dto.OpenAIResponsesResponse{Usage: &upstream}}, nil)
+	info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
+	usage := accumulator.Finish()
+	other := model.NewLogOther()
+	appendStreamStatus(info, other)
+	appendUsageBillingPathForLog(other, false, usage)
+	var logged map[string]any
+	require.NoError(t, common.UnmarshalJsonStr(other.JSONString(), &logged))
+	assert.Equal(t, false, logged["usage_estimated"])
+	assert.Equal(t, true, logged["cache_usage_known"])
+	status, ok := logged["stream_status"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "client_gone", status["end_reason"])
+	assert.Equal(t, "done", status["drain_end_reason"])
+	assert.Equal(t, "completed", status["response_status"])
+	assert.Equal(t, "drain", status["disconnect_mode"])
 }
