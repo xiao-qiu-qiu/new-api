@@ -18,11 +18,12 @@ const (
 	channelProbeUsageTTL     = 30 * time.Second
 )
 
-// ChannelProbeUsageStats estimates realized consumer cost, including group and
-// user multipliers, from at most the newest 1000 consume logs in the selected
-// scope/window. Each metric needs 10 independently eligible requests. Cache hit
-// rate is input-token weighted; price is sum(actual quota) / sum(input+output)
-// * 1e8 / QuotaPerUnit, in system USD. This is not a configured upstream price.
+// ChannelProbeUsageStats estimates realized cost at a 1x group ratio from at most
+// the newest 1000 consume logs in the selected scope/window. Each metric needs
+// 10 independently eligible requests. Cache hit rate is input-token weighted;
+// price is sum(actual quota / historical effective group_ratio) / sum(input+output)
+// * 1e8 / QuotaPerUnit, in system USD. The service applies the viewer's current
+// effective group ratio. This is not a configured upstream price.
 type ChannelProbeUsageStats struct {
 	AverageCacheHitRate         *float64 `json:"average_cache_hit_rate"`
 	EstimatedPricePer100MTokens *float64 `json:"estimated_price_per_100m_tokens"`
@@ -118,6 +119,7 @@ type channelProbeUsageMetadata struct {
 	BillingUnit          string              `json:"billing_unit"`
 	ModelPrice           *float64            `json:"model_price"`
 	ModelRatio           *float64            `json:"model_ratio"`
+	GroupRatio           *float64            `json:"group_ratio"`
 	FixedPrice           *float64            `json:"fixed_price"`
 	BillingSource        string              `json:"billing_source"`
 	SubscriptionConsumed *int64              `json:"subscription_consumed"`
@@ -161,7 +163,7 @@ type channelProbeUsageMetadata struct {
 
 func aggregateChannelProbeUsage(logs []Log, quotaPerUnit float64) ChannelProbeUsageStats {
 	var stats ChannelProbeUsageStats
-	var cacheInput, cachedTokens, pricedTokens, actualQuota float64
+	var cacheInput, cachedTokens, pricedTokens, baseQuota float64
 	for _, log := range logs {
 		var other channelProbeUsageMetadata
 		if log.PromptTokens < 0 || log.CompletionTokens < 0 || log.Quota < 0 || int64(log.Quota) > 1<<53-1 || common.UnmarshalJsonStr(log.Other, &other) != nil {
@@ -250,6 +252,9 @@ func aggregateChannelProbeUsage(logs []Log, quotaPerUnit float64) ChannelProbeUs
 		if total <= 0 || len(other.ToolSurcharges) > 0 || other.WebSearch || other.FileSearch || other.ImageGenerationCall {
 			continue
 		}
+		if other.GroupRatio == nil || *other.GroupRatio <= 0 || math.IsNaN(*other.GroupRatio) || math.IsInf(*other.GroupRatio, 0) {
+			continue
+		}
 		quota := float64(log.Quota)
 		if other.BillingSource == "subscription" && other.SubscriptionConsumed != nil {
 			if *other.SubscriptionConsumed < 0 || *other.SubscriptionConsumed > 1<<53-1 {
@@ -259,16 +264,21 @@ func aggregateChannelProbeUsage(logs []Log, quotaPerUnit float64) ChannelProbeUs
 		} else if other.BillingSource != "" && other.BillingSource != "wallet" && other.BillingSource != "subscription" {
 			continue
 		}
+		// group_ratio already includes any user-specific group override.
+		quota /= *other.GroupRatio
+		if math.IsNaN(quota) || math.IsInf(quota, 0) {
+			continue
+		}
 		stats.PriceSampleCount++
 		pricedTokens += total
-		actualQuota += quota
+		baseQuota += quota
 	}
 	if stats.CacheSampleCount >= channelProbeUsageMinimum && cacheInput > 0 {
 		rate := cachedTokens / cacheInput * 100
 		stats.AverageCacheHitRate = &rate
 	}
 	if stats.PriceSampleCount >= channelProbeUsageMinimum && quotaPerUnit > 0 && !math.IsNaN(quotaPerUnit) && !math.IsInf(quotaPerUnit, 0) {
-		price := actualQuota / pricedTokens * 1e8 / quotaPerUnit
+		price := baseQuota / pricedTokens * 1e8 / quotaPerUnit
 		if !math.IsNaN(price) && !math.IsInf(price, 0) {
 			stats.EstimatedPricePer100MTokens = &price
 		}

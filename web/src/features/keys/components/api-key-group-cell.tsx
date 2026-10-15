@@ -32,6 +32,7 @@ import { cn } from '@/lib/utils'
 import { GroupRatioBadge, type GroupRatio } from './auto-group-visuals'
 
 type ApiKeyGroupCellProps = {
+  autoGroups?: string[] | null
   crossGroupRetry: boolean
   group: string
   ratio?: GroupRatio
@@ -73,30 +74,42 @@ export function ApiKeyGroupCell(props: ApiKeyGroupCellProps) {
             data-api-key-group-cell='auto'
             tabIndex={0}
             className={cn(
-              'ml-0 gap-3 overflow-visible text-xs',
-              isMobile ? 'w-full justify-between' : 'max-w-50'
+              'ml-0 flex-col items-start gap-1 overflow-visible text-xs',
+              isMobile ? 'w-full' : 'max-w-50'
             )}
           />
         }
       >
-        <StatusBadge
-          label={t('Cross-group')}
-          variant='info'
-          copyable={false}
-          className='px-0'
-        />
-        <GroupRatioBadge
-          ratio={props.ratio}
-          isAuto
-          shouldReduceMotion={props.shouldReduceMotion}
-        />
-      </TooltipTrigger>
-      <TooltipContent>
-        <span className='text-xs'>
-          {t(
-            'Automatically selects the best available group with circuit breaker mechanism'
-          )}
+        <span className='flex w-full items-center justify-between gap-3'>
+          <StatusBadge
+            label={t('Multiple groups')}
+            variant='info'
+            copyable={false}
+            className='px-0'
+          />
+          <GroupRatioBadge
+            ratio={props.ratio}
+            isAuto
+            shouldReduceMotion={props.shouldReduceMotion}
+          />
         </span>
+        <span className='text-muted-foreground block w-full truncate'>
+          {props.autoGroups?.length
+            ? props.autoGroups.join(' → ')
+            : t('Use global groups')}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent className='max-h-64 max-w-80 flex-col items-start overflow-y-auto break-words'>
+        <p>
+          {props.autoGroups?.length
+            ? props.autoGroups.join(' → ')
+            : t('Use global groups')}
+        </p>
+        <p>
+          {t('Cross-group retry')}:{' '}
+          {props.crossGroupRetry ? t('Enabled') : t('Disabled')}
+        </p>
+        <p>{t('Billed at the rate of the group used for each request.')}</p>
       </TooltipContent>
     </Tooltip>
   )

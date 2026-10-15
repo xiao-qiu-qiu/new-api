@@ -63,7 +63,7 @@ func GetPublicChannelProbeStatus(c *gin.Context) {
 			continue
 		}
 		for _, name := range probe.Models {
-			view, err := service.BuildPublicChannelProbeModel(probe, name, now, hours)
+			view, err := service.BuildPublicChannelProbeModel(probe, name, now, hours, c.GetString("group"))
 			if err != nil {
 				c.JSON(http.StatusOK, gin.H{"success": false, "message": "status temporarily unavailable"})
 				return

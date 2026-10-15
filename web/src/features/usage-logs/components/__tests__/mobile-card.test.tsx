@@ -253,6 +253,30 @@ it('keeps input, output and cache quantities readable without empty metric cells
 for (const desktop of [false, true]) {
   it.each([
     {
+      name: 'explicit zero cache reads',
+      other: { cache_tokens: 0 },
+      rateCount: 1,
+    },
+    { name: 'missing cache data', other: {}, rateCount: 0 },
+    {
+      name: 'zero cache reads with cache writes',
+      other: { cache_tokens: 0, cache_creation_tokens: 100 },
+      rateCount: 2,
+    },
+  ])(
+    `shows zero cache reads for $name in ${desktop ? 'desktop' : 'mobile'} tokens`,
+    (fixture) => {
+      renderLogs({
+        desktop,
+        logs: [{ ...log, other: JSON.stringify(fixture.other) }],
+      })
+      expect(screen.getByText(/Cache\s*\u2193\s*0/)).toBeVisible()
+      expect(screen.queryAllByText('(0%)')).toHaveLength(fixture.rateCount)
+    }
+  )
+
+  it.each([
+    {
       name: 'below 75 percent',
       prompt: 1000,
       other: { cache_tokens: 749 },
@@ -373,11 +397,6 @@ for (const desktop of [false, true]) {
   )
 
   it.each([
-    {
-      name: 'explicit zero cache reads',
-      prompt: 1000,
-      other: { cache_tokens: 0 },
-    },
     { name: 'missing cache data', prompt: 1000, other: {} },
     { name: 'zero total input', prompt: 0, other: { cache_tokens: 0 } },
     {

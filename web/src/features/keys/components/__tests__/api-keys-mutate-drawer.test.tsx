@@ -16,7 +16,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import { afterEach, describe, expect, test } from 'vitest'
 
 const { createInstance } = await import('i18next')
@@ -84,14 +90,14 @@ function installApiFixtures(createdPayloads: Array<Record<string, unknown>>) {
   }
 }
 
-async function renderCreateDrawer(): Promise<void> {
+async function renderCreateDrawer(defaultUseAutoGroup = true): Promise<void> {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
   const freshAt = Date.now() + 60_000
   queryClient.setQueryData(
     ['status'],
-    { default_use_auto_group: true },
+    { default_use_auto_group: defaultUseAutoGroup },
     { updatedAt: freshAt }
   )
   queryClient.setQueryData(
@@ -153,7 +159,7 @@ function findButton(text: string, required = true): HTMLButtonElement | null {
 
 function getControlByLabel(labelText: 'Name' | 'Quantity'): HTMLInputElement
 function getControlByLabel(labelText: 'Group'): HTMLButtonElement
-function getControlByLabel(labelText: 'Auto group order'): HTMLElement
+function getControlByLabel(labelText: 'Selected groups'): HTMLElement
 function getControlByLabel(labelText: string): HTMLElement {
   const label = [...document.querySelectorAll<HTMLLabelElement>('label')].find(
     (candidate) => candidate.textContent?.trim() === labelText
@@ -209,19 +215,18 @@ describe('API keys mutate drawer Auto group integration', () => {
     installApiFixtures(createdPayloads)
     await renderCreateDrawer()
 
-    const groupTrigger = getControlByLabel('Group')
-    expect(groupTrigger.textContent?.includes('auto')).toBe(true)
     expect(
-      document.body.textContent?.includes(
-        'Using the complete global Auto order (2 groups)'
-      )
+      screen.getByRole('button', { name: 'Multiple groups' })
+    ).toHaveAttribute('aria-pressed', 'true')
+    expect(
+      document.body.textContent?.includes('Using global groups (2 groups)')
     ).toBe(true)
     expect(
       [
         ...document.querySelectorAll('[data-slot="global-auto-order-name"]'),
       ].map((item) => item.textContent)
     ).toEqual(['vip', 'default'])
-    expect(findButton('Restore global Auto', true).disabled).toBe(true)
+    expect(findButton('Use global groups', true).disabled).toBe(true)
 
     changeInput(getControlByLabel('Name'), 'batch')
     changeInput(getControlByLabel('Quantity'), '2')
@@ -242,12 +247,12 @@ describe('API keys mutate drawer Auto group integration', () => {
     installApiFixtures(createdPayloads)
     await renderCreateDrawer()
 
-    const autoOrderControl = getControlByLabel('Auto group order')
+    const autoOrderControl = getControlByLabel('Selected groups')
     const addGroupTrigger = autoOrderControl.querySelector<HTMLButtonElement>(
       'button[role="combobox"]'
     )
     if (!addGroupTrigger) {
-      throw new Error('Expected Auto group order combobox')
+      throw new Error('Expected Selected groups combobox')
     }
     selectComboboxOption(addGroupTrigger, 'Priority access')
 
@@ -257,12 +262,13 @@ describe('API keys mutate drawer Auto group integration', () => {
     expect(document.body.textContent?.includes('1 / 3 groups selected')).toBe(
       true
     )
-    expect(findButton('Restore global Auto', true).disabled).toBe(false)
+    expect(findButton('Use global groups', true).disabled).toBe(false)
 
+    fireEvent.click(screen.getByRole('button', { name: 'Single group' }))
     const groupTrigger = getControlByLabel('Group')
     selectComboboxOption(groupTrigger, 'Standard access')
     expect(document.querySelector('button[aria-label="Remove vip"]')).toBe(null)
-    selectComboboxOption(groupTrigger, 'Automatic routing')
+    fireEvent.click(screen.getByRole('button', { name: 'Multiple groups' }))
 
     expect(
       document.querySelector('button[aria-label="Remove vip"]')
@@ -270,11 +276,38 @@ describe('API keys mutate drawer Auto group integration', () => {
     expect(document.body.textContent?.includes('1 / 3 groups selected')).toBe(
       true
     )
-    expect(findButton('Restore global Auto', true).disabled).toBe(false)
+    expect(findButton('Use global groups', true).disabled).toBe(false)
 
     changeInput(getControlByLabel('Name'), 'custom')
     fireEvent.click(findButton('Save changes', true))
     await waitFor(() => expect(createdPayloads).toHaveLength(1))
     expect(createdPayloads[0]?.auto_groups).toEqual(['vip'])
+  })
+
+  test('switches a single group to multiple groups and submits both selected groups on one key', async () => {
+    const createdPayloads: Array<Record<string, unknown>> = []
+    installApiFixtures(createdPayloads)
+    await renderCreateDrawer(false)
+    selectComboboxOption(getControlByLabel('Group'), 'Standard access')
+
+    expect(
+      screen.getByRole('button', { name: 'Single group' })
+    ).toHaveAttribute('aria-pressed', 'true')
+    fireEvent.click(screen.getByRole('button', { name: 'Multiple groups' }))
+    expect(screen.getByRole('button', { name: 'Remove default' })).toBeVisible()
+    const addGroupTrigger = within(
+      getControlByLabel('Selected groups')
+    ).getByRole<HTMLButtonElement>('combobox')
+    selectComboboxOption(addGroupTrigger, 'Priority access')
+    expect(screen.getByRole('button', { name: 'Remove vip' })).toBeVisible()
+
+    changeInput(getControlByLabel('Name'), 'shared-models')
+    fireEvent.click(findButton('Save changes', true))
+    await waitFor(() => expect(createdPayloads).toHaveLength(1))
+    expect(createdPayloads[0]).toMatchObject({
+      group: 'auto',
+      auto_groups: ['default', 'vip'],
+      cross_group_retry: true,
+    })
   })
 })

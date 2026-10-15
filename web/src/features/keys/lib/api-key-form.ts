@@ -28,9 +28,9 @@ import type { ApiKey, ApiKeyFormData } from '../types'
 // Form Schema
 // ============================================================================
 
-export function getApiKeyFormSchema(t: TFunction, maxAutoGroups = 5) {
+export function getApiKeyFormSchema(t: TFunction, maxAutoGroups = 20) {
   const autoGroupLimit =
-    Number.isInteger(maxAutoGroups) && maxAutoGroups > 0 ? maxAutoGroups : 5
+    Number.isInteger(maxAutoGroups) && maxAutoGroups > 0 ? maxAutoGroups : 20
 
   return z
     .object({
@@ -55,9 +55,7 @@ export function getApiKeyFormSchema(t: TFunction, maxAutoGroups = 5) {
           ctx.addIssue({
             code: 'custom',
             path: ['auto_groups'],
-            message: t(
-              'Select at least one Auto group or restore global Auto.'
-            ),
+            message: t('Select at least one group or use global groups.'),
           })
         }
 
@@ -65,7 +63,7 @@ export function getApiKeyFormSchema(t: TFunction, maxAutoGroups = 5) {
           ctx.addIssue({
             code: 'custom',
             path: ['auto_groups'],
-            message: t('Select at most {{max}} Auto groups', {
+            message: t('Select at most {{max}} groups', {
               max: autoGroupLimit,
             }),
           })
@@ -75,7 +73,7 @@ export function getApiKeyFormSchema(t: TFunction, maxAutoGroups = 5) {
           ctx.addIssue({
             code: 'custom',
             path: ['auto_groups'],
-            message: t('Auto groups must not contain duplicates'),
+            message: t('Groups must not contain duplicates'),
           })
         }
       }
@@ -166,7 +164,7 @@ export function transformFormDataToPayload(
 export function transformApiKeyToFormDefaults(
   apiKey: ApiKey,
   availableAutoGroups: string[] = [],
-  maxAutoGroups = 5
+  maxAutoGroups = 20
 ): ApiKeyFormValues {
   const availableSet = new Set(availableAutoGroups)
   const storedAutoGroups = apiKey.auto_groups ?? []
