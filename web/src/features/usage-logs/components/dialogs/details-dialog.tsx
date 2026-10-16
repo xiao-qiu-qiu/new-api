@@ -395,10 +395,13 @@ function TokenBreakdown(props: { log: UsageLog; other: LogOtherData }) {
     value: completionTokens.toLocaleString(),
   })
 
-  if (cacheRead > 0) {
+  if (other.cache_usage_known === false || cacheRead > 0) {
     rows.push({
       label: t('Cache Read'),
-      value: cacheRead.toLocaleString(),
+      value:
+        other.cache_usage_known === false && cacheRead === 0
+          ? t('Unknown')
+          : cacheRead.toLocaleString(),
     })
   }
 

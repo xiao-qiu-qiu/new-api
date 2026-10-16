@@ -7,7 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -20,16 +20,15 @@ import (
 	"github.com/bytedance/gopkg/util/gopool"
 
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 const (
 	InitialScannerBufferSize    = 64 << 10  // 64KB (64*1024)
 	DefaultMaxScannerBufferSize = 128 << 20 // 64MB (64*1024*1024) default SSE buffer size
 	DefaultPingInterval         = 10 * time.Second
-	// streamWriteTimeout bounds a single blocked write to a slow client so the
-	// unconditional wg.Wait() in cleanup can always finish. Without it, a slow
-	// but connected client (full TCP buffer, no server WriteTimeout) could hang
-	// the handler forever.
+	// Bound a synchronous write to a slow client (full TCP buffer and no
+	// server WriteTimeout), so it cannot keep the handler from cleaning up.
 	streamWriteTimeout = 30 * time.Second
 )
 
@@ -81,236 +80,222 @@ func ExtendWriteDeadline(c *gin.Context) {
 }
 
 func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, dataHandler func(data string, sr *StreamResult)) {
-
-	if resp == nil || dataHandler == nil {
+	if resp == nil || resp.Body == nil || dataHandler == nil {
 		return
 	}
-
-	// 无条件新建 StreamStatus
+	info.SnapshotStreamDisconnectSettings()
 	info.StreamStatus = relaycommon.NewStreamStatus()
+	lifecycle := info.StreamLifecycle
+	if lifecycle == nil {
+		lifecycle = relaycommon.NewStreamLifecycle(c.Request.Context(), info.StreamDisconnectMode == "drain" && !info.IsChannelTest, time.Duration(info.StreamDrainTimeoutSeconds)*time.Second)
+		info.StreamLifecycle = lifecycle
+	}
+	InstallStreamWriter(c, lifecycle)
 
-	ctx, cancel := context.WithCancel(context.Background())
-
+	// Only this reader runs concurrently. It never touches Gin, adaptor state,
+	// or stream status. EOF travels through the same FIFO as the final usage.
+	type scanEvent struct {
+		line string
+		end  bool
+		err  error
+	}
+	events := make(chan scanEvent, 10)
+	readerCtx, stopReader := context.WithCancel(context.Background())
+	readerDone := make(chan struct{})
+	readStarted := time.Now()
+	var lastRead atomic.Int64
 	streamingTimeout := time.Duration(constant.StreamingTimeout) * time.Second
-
-	var (
-		stopChan    = make(chan bool, 3) // 增加缓冲区避免阻塞
-		scanner     = NewStreamScanner(resp.Body)
-		ticker      = time.NewTicker(streamingTimeout)
-		pingTicker  *time.Ticker
-		writeMutex  sync.Mutex     // Mutex to protect concurrent writes
-		wg          sync.WaitGroup // 用于等待所有 goroutine 退出
-		cleanupOnce sync.Once
-		stopOnce    sync.Once
-	)
-
-	stop := func() {
-		stopOnce.Do(func() {
-			close(stopChan)
-		})
+	if streamingTimeout <= 0 {
+		streamingTimeout = 300 * time.Second
 	}
-
-	generalSettings := operation_setting.GetGeneralSetting()
-	pingEnabled := generalSettings.PingIntervalEnabled && !info.DisablePing
-	pingInterval := time.Duration(generalSettings.PingIntervalSeconds) * time.Second
-	if pingInterval <= 0 {
-		pingInterval = DefaultPingInterval
+	idle := time.NewTimer(streamingTimeout)
+	general := operation_setting.GetGeneralSetting()
+	var ping *time.Ticker
+	var pingC <-chan time.Time
+	if general.PingIntervalEnabled && !info.DisablePing {
+		interval := time.Duration(general.PingIntervalSeconds) * time.Second
+		if interval <= 0 {
+			interval = DefaultPingInterval
+		}
+		ping = time.NewTicker(interval)
+		pingC = ping.C
 	}
+	defer func() {
+		if r := recover(); r != nil {
+			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonPanic, fmt.Errorf("stream panic: %v", r))
+		}
+		lifecycle.ObserveClient()
+		if err := lifecycle.ClientError(); err != nil {
+			info.StreamStatus.MarkClientGone(err)
+		}
+		stopReader()
+		lifecycle.Close()
+		_ = resp.Body.Close()
+		idle.Stop()
+		if ping != nil {
+			ping.Stop()
+		}
+		<-readerDone
+		if info.StreamStatus.IsNormalEnd() && !info.StreamStatus.HasErrors() {
+			logger.LogInfo(c, common.LogText("stream ended: %s", info.StreamStatus.Summary()))
+		} else {
+			logger.LogError(c, common.LogText("stream ended: %s, received=%d", info.StreamStatus.Summary(), info.ReceivedResponseCount))
+		}
+	}()
 
-	if pingEnabled {
-		pingTicker = time.NewTicker(pingInterval)
-	}
-
-	logger.LogDebug(c, "relay timeout seconds: %d", common.RelayTimeout)
-	logger.LogDebug(c, "relay max idle conns: %d", common.RelayMaxIdleConns)
-	logger.LogDebug(c, "relay max idle conns per host: %d", common.RelayMaxIdleConnsPerHost)
-	logger.LogDebug(c, "streaming timeout seconds: %d", int64(streamingTimeout.Seconds()))
-	logger.LogDebug(c, "ping interval seconds: %d", int64(pingInterval.Seconds()))
-
-	cleanup := func() {
-		cleanupOnce.Do(func() {
-			cancel()
-			stop()
-			if resp.Body != nil {
-				_ = resp.Body.Close()
+	gopool.Go(func() {
+		defer close(readerDone)
+		defer close(events)
+		defer func() {
+			if r := recover(); r != nil {
+				select {
+				case events <- scanEvent{end: true, err: fmt.Errorf("scanner panic: %v", r)}:
+				case <-readerCtx.Done():
+				}
 			}
-
-			ticker.Stop()
-			if pingTicker != nil {
-				pingTicker.Stop()
+		}()
+		scanner := NewStreamScanner(&streamActivityReader{Reader: resp.Body, started: readStarted, lastRead: &lastRead})
+		for scanner.Scan() {
+			select {
+			case events <- scanEvent{line: scanner.Text()}:
+			case <-readerCtx.Done():
+				return
 			}
+		}
+		select {
+		case events <- scanEvent{end: true, err: scanner.Err()}:
+		case <-readerCtx.Done():
+		}
+	})
 
-			wg.Wait()
-		})
-	}
-	// Ensure gin.Context is not returned to Gin's pool while any stream goroutine can still use it.
-	defer cleanup()
-
-	scanner.Split(bufio.ScanLines)
 	copyCodexSSEHeaders(c, resp)
 	SetEventStreamHeaders(c)
-
-	ctx = context.WithValue(ctx, "stop_chan", stopChan)
-
-	// Handle ping data sending with improved error handling
-	if pingEnabled && pingTicker != nil {
-		wg.Add(1)
-		gopool.Go(func() {
-			defer func() {
-				if r := recover(); r != nil {
-					logger.LogError(c, common.LogText("ping goroutine panic: %v", r))
-					info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonPanic, fmt.Errorf("ping panic: %v", r))
-					stop()
-				}
-				logger.LogDebug(c, "ping goroutine exited")
-				wg.Done()
-			}()
-
-			// 添加超时保护，防止 goroutine 无限运行
-			maxPingDuration := 30 * time.Minute // 最大 ping 持续时间
-			pingTimeout := time.NewTimer(maxPingDuration)
-			defer pingTimeout.Stop()
-
-			for {
-				select {
-				case <-pingTicker.C:
-					var err error
-					func() {
-						writeMutex.Lock()
-						defer writeMutex.Unlock()
-						ExtendWriteDeadline(c)
-						err = PingData(c)
-					}()
-					if err != nil {
-						logger.LogError(c, common.LogText("ping data error: %s", err.Error()))
-						info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonPingFail, err)
-						return
-					}
-					logger.LogDebug(c, "ping data sent")
-				case <-ctx.Done():
-					return
-				case <-stopChan:
-					return
-				case <-c.Request.Context().Done():
-					// 监听客户端断开连接
-					return
-				case <-pingTimeout.C:
-					logger.LogError(c, common.LogText("ping goroutine max duration reached"))
-					return
-				}
+	gone := lifecycle.Gone
+	sr := newStreamResult(info.StreamStatus)
+	sr.lifecycle = lifecycle
+	for {
+		// Observe cancellation before processing already buffered data, too.
+		lifecycle.ObserveClient()
+		if err := lifecycle.ClientError(); err != nil {
+			info.StreamStatus.MarkClientGone(err)
+			gone = nil
+			pingC = nil
+			if ping != nil {
+				ping.Stop()
 			}
-		})
-	}
-
-	dataChan := make(chan string, 10)
-
-	wg.Add(1)
-	gopool.Go(func() {
-		defer func() {
-			if r := recover(); r != nil {
-				logger.LogError(c, common.LogText("data handler goroutine panic: %v", r))
-				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonPanic, fmt.Errorf("handler panic: %v", r))
-			}
-			stop()
-			wg.Done()
-		}()
-		sr := newStreamResult(info.StreamStatus)
-		for data := range dataChan {
-			sr.reset()
-			func() {
-				writeMutex.Lock()
-				defer writeMutex.Unlock()
-				ExtendWriteDeadline(c)
-				dataHandler(data, sr)
-			}()
-			if sr.IsStopped() {
+			if !lifecycle.Drain {
 				return
 			}
 		}
-	})
-
-	// Scanner goroutine with improved error handling
-	wg.Add(1)
-	common.RelayCtxGo(ctx, func() {
-		defer func() {
-			close(dataChan)
-			if r := recover(); r != nil {
-				logger.LogError(c, common.LogText("scanner goroutine panic: %v", r))
-				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonPanic, fmt.Errorf("scanner panic: %v", r))
-			}
-			stop()
-			logger.LogDebug(c, "scanner goroutine exited")
-			wg.Done()
-		}()
-
-		for scanner.Scan() {
-			// 检查是否需要停止
+		if lifecycle.Context.Err() != nil {
+			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDrainTimeout, context.Cause(lifecycle.Context))
+			return
+		}
+		var event scanEvent
+		var ok bool
+		// Callback work may take longer than the idle interval while the reader
+		// has already queued the final usage. Always consume that FIFO first.
+		select {
+		case event, ok = <-events:
+		default:
 			select {
-			case <-stopChan:
-				return
-			case <-ctx.Done():
-				return
-			default:
-			}
-
-			ticker.Reset(streamingTimeout)
-			data := scanner.Text()
-			logger.LogDebug(c, "stream scanner data: %s", data)
-
-			if len(data) < 6 {
+			case <-gone:
 				continue
-			}
-			if data[:5] != "data:" && data[:6] != "[DONE]" {
+			case <-lifecycle.Context.Done():
 				continue
-			}
-			data = data[5:]
-			data = strings.TrimSpace(data)
-			if data == "" {
-				continue
-			}
-			if !strings.HasPrefix(data, "[DONE]") {
-				info.SetFirstResponseTime()
-				info.ReceivedResponseCount++
-
-				select {
-				case dataChan <- data:
-				case <-ctx.Done():
-					return
-				case <-stopChan:
-					return
+			case <-idle.C:
+				if len(events) > 0 {
+					// Keep the timer armed when a queued event wins this race.
+					idle.Reset(time.Nanosecond)
+					continue
 				}
-			} else {
-				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
-				logger.LogDebug(c, "received [DONE], stopping scanner")
+				remaining := streamingTimeout - (time.Since(readStarted) - time.Duration(lastRead.Load()))
+				if remaining > 0 {
+					idle.Reset(remaining)
+					continue
+				}
+				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonTimeout, nil)
+				return
+			case <-pingC:
+				ExtendWriteDeadline(c)
+				if err := PingData(c); err != nil {
+					lifecycle.Disconnect(err)
+				}
+				continue
+			case event, ok = <-events:
+			}
+		}
+		// Cancellation may have happened while waiting for a queued event.
+		lifecycle.ObserveClient()
+		if err := lifecycle.ClientError(); err != nil {
+			info.StreamStatus.MarkClientGone(err)
+			if !lifecycle.Drain {
 				return
 			}
 		}
-
-		if err := scanner.Err(); err != nil {
-			if err != io.EOF {
-				logger.LogError(c, common.LogText("scanner error: %s", err.Error()))
-				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonScannerErr, err)
+		if lifecycle.Context.Err() != nil {
+			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDrainTimeout, context.Cause(lifecycle.Context))
+			return
+		}
+		if !ok || event.end {
+			if event.err != nil && event.err != io.EOF {
+				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonScannerErr, event.err)
+			} else {
+				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonEOF, nil)
+			}
+			return
+		}
+		data := strings.TrimSpace(event.line)
+		if data == "[DONE]" {
+			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
+			return
+		}
+		payload, ok := strings.CutPrefix(data, "data:")
+		if !ok {
+			continue
+		}
+		payload = strings.TrimSpace(payload)
+		if payload == "" {
+			continue
+		}
+		if strings.HasPrefix(payload, "[DONE]") {
+			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
+			return
+		}
+		info.SetFirstResponseTime()
+		info.ReceivedResponseCount++
+		sr.reset()
+		ExtendWriteDeadline(c)
+		dataHandler(payload, sr)
+		if err := lifecycle.ClientError(); err != nil {
+			info.StreamStatus.MarkClientGone(err)
+		}
+		// These protocol terminals carry the last accounting facts. Do not
+		// wait for EOF on providers/conversions that leave the socket open.
+		if !sr.IsStopped() {
+			switch gjson.Get(payload, "type").Str {
+			case "response.completed", "response.done", "response.failed", "response.incomplete", "response.cancelled", "response.canceled", "message_stop", "message_end":
+				sr.Done()
 			}
 		}
-		info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonEOF, nil)
-	})
-
-	// 主循环等待完成或超时
-	select {
-	case <-ticker.C:
-		info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonTimeout, nil)
-	case <-stopChan:
-		// EndReason already set by the goroutine that triggered stopChan
-	case <-c.Request.Context().Done():
-		// 客户端断开：立即 cleanup 关闭上游 resp.Body，解除 scanner 阻塞并让上游停止生成，
-		// 避免为已放弃的请求继续消费上游 token。
-		info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, c.Request.Context().Err())
+		if sr.IsStopped() {
+			return
+		}
 	}
+}
 
-	cleanup()
-	if info.StreamStatus.IsNormalEnd() && !info.StreamStatus.HasErrors() {
-		logger.LogInfo(c, common.LogText("stream ended: %s", info.StreamStatus.Summary()))
-	} else {
-		logger.LogError(c, common.LogText("stream ended: %s, received=%d", info.StreamStatus.Summary(), info.ReceivedResponseCount))
+// Count transport read activity, including partial SSE lines and comments;
+// downstream callback time must not manufacture an upstream idle timeout.
+type streamActivityReader struct {
+	io.Reader
+	started  time.Time
+	lastRead *atomic.Int64
+}
+
+func (r *streamActivityReader) Read(data []byte) (int, error) {
+	n, err := r.Reader.Read(data)
+	if n > 0 {
+		r.lastRead.Store(int64(time.Since(r.started)))
 	}
+	return n, err
 }

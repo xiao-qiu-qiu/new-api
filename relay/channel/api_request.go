@@ -440,9 +440,13 @@ func toWebSocketURL(raw string) string {
 	}
 }
 
-func startPingKeepAlive(c *gin.Context, pingInterval time.Duration) (context.CancelFunc, <-chan struct{}) {
+func startPingKeepAlive(c *gin.Context, pingInterval time.Duration, lifecycle *common.StreamLifecycle) (context.CancelFunc, <-chan struct{}) {
 	pingerCtx, stopPinger := context.WithCancel(context.Background())
 	done := make(chan struct{})
+	var clientGone <-chan struct{}
+	if lifecycle != nil {
+		clientGone = lifecycle.Gone
+	}
 
 	gopool.Go(func() {
 		defer close(done)
@@ -483,6 +487,8 @@ func startPingKeepAlive(c *gin.Context, pingInterval time.Duration) (context.Can
 				}
 			// 收到退出信号
 			case <-pingerCtx.Done():
+				return
+			case <-clientGone:
 				return
 			// request 结束
 			case <-c.Request.Context().Done():
@@ -526,6 +532,24 @@ func keepUpstreamRedirectResponse(_ *http.Request, _ []*http.Request) error {
 }
 
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
+	if info.IsStream && info.RelayMode != constant.RelayModeRealtime {
+		clientErr := c.Request.Context().Err()
+		if clientErr == nil && info.StreamLifecycle != nil {
+			clientErr = info.StreamLifecycle.ClientError()
+		}
+		// Draining belongs to the already dispatched attempt. Never start
+		// another generation after the client has stopped receiving output.
+		if clientErr != nil {
+			if info.StreamStatus == nil {
+				info.StreamStatus = common.NewStreamStatus()
+			}
+			info.StreamStatus.MarkClientGone(clientErr)
+			if req.Body != nil {
+				_ = req.Body.Close()
+			}
+			return nil, types.NewError(clientErr, types.ErrorCodeDoRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+	}
 	if info.IsChannelTest {
 		// Adapter tests and scheduled probes have an explicit timeout. Bind
 		// their upstream request as well, including the wait for HTTP headers.
@@ -541,6 +565,16 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	// transparent stream retries.
 	relayClient := *client
 	relayClient.CheckRedirect = keepUpstreamRedirectResponse
+	var lifecycle *common.StreamLifecycle
+	if info.IsStream && !info.IsChannelTest && info.RelayMode != constant.RelayModeRealtime {
+		info.SnapshotStreamDisconnectSettings()
+		lifecycle = common.NewStreamLifecycle(c.Request.Context(), info.StreamDisconnectMode == "drain", time.Duration(info.StreamDrainTimeoutSeconds)*time.Second)
+		info.StreamLifecycle = lifecycle
+		helper.InstallStreamWriter(c, lifecycle)
+		// This context must reach net/http, including adaptors that originally
+		// created their request with the client's cancellable context.
+		req = req.WithContext(lifecycle.Context)
+	}
 	if common2.DebugEnabled && req != nil && req.URL != nil {
 		policy := service.NormalizeHTTPTransportPolicy(info.ChannelSetting)
 		logger.LogDebug(c, "http transport select: host=%s protocol=%s shards=%d policy=%s",
@@ -558,7 +592,7 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		generalSettings := operation_setting.GetGeneralSetting()
 		if generalSettings.PingIntervalEnabled && !info.DisablePing {
 			pingInterval := time.Duration(generalSettings.PingIntervalSeconds) * time.Second
-			stopPinger, pingerDone = startPingKeepAlive(c, pingInterval)
+			stopPinger, pingerDone = startPingKeepAlive(c, pingInterval, lifecycle)
 			// 使用defer确保在任何情况下都能停止ping goroutine
 			defer func() {
 				if stopPinger != nil {
@@ -573,11 +607,32 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	common2.SetContextKey(c, appconstant.ContextKeyUpstreamRequestOrigin, req.URL.Scheme+"://"+req.URL.Host)
 	resp, err := relayClient.Do(req)
 	if err != nil {
+		options := []types.NewAPIErrorOptions{types.ErrOptionWithHideErrMsg("upstream error: do request failed")}
+		clientErr := c.Request.Context().Err()
+		if clientErr == nil && lifecycle != nil {
+			clientErr = lifecycle.ClientError()
+		}
+		if info.IsStream && clientErr != nil {
+			options = append(options, types.ErrOptionWithSkipRetry())
+			if info.StreamStatus == nil {
+				info.StreamStatus = common.NewStreamStatus()
+			}
+			info.StreamStatus.MarkClientGone(clientErr)
+		}
+		if lifecycle != nil {
+			lifecycle.Close()
+		}
 		logger.LogError(c, common2.LogText("do request failed: %s", err.Error()))
-		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, types.ErrOptionWithHideErrMsg("upstream error: do request failed"))
+		return nil, types.NewError(err, types.ErrorCodeDoRequestFailed, options...)
 	}
 	if resp == nil {
+		if lifecycle != nil {
+			lifecycle.Close()
+		}
 		return nil, errors.New("resp is nil")
+	}
+	if lifecycle != nil {
+		resp.Body = &streamResponseBody{ReadCloser: resp.Body, lifecycle: lifecycle}
 	}
 	if common2.DebugEnabled {
 		policy := service.NormalizeHTTPTransportPolicy(info.ChannelSetting)
@@ -593,9 +648,23 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		c.Set(common2.UpstreamRequestIdKey, upID)
 	}
 
-	_ = req.Body.Close()
-	_ = c.Request.Body.Close()
+	if req.Body != nil {
+		_ = req.Body.Close()
+	}
+	if c.Request.Body != nil {
+		_ = c.Request.Body.Close()
+	}
 	return resp, nil
+}
+
+type streamResponseBody struct {
+	io.ReadCloser
+	lifecycle *common.StreamLifecycle
+}
+
+func (b *streamResponseBody) Close() error {
+	b.lifecycle.Close()
+	return b.ReadCloser.Close()
 }
 
 func DoTaskApiRequest(a TaskAdaptor, c *gin.Context, info *common.RelayInfo, requestBody io.Reader) (*http.Response, error) {

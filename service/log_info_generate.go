@@ -157,6 +157,12 @@ func appendStreamStatus(relayInfo *relaycommon.RelayInfo, other *model.LogOther)
 		return
 	}
 	ss := relayInfo.StreamStatus
+	if lifecycle := relayInfo.StreamLifecycle; lifecycle != nil {
+		lifecycle.ObserveClient()
+		if err := lifecycle.ClientError(); err != nil {
+			ss.MarkClientGone(err)
+		}
+	}
 	status := "ok"
 	if !ss.IsNormalEnd() || ss.HasErrors() || ss.ResponseFailed() {
 		status = "error"
@@ -164,6 +170,13 @@ func appendStreamStatus(relayInfo *relaycommon.RelayInfo, other *model.LogOther)
 	streamInfo := map[string]any{
 		"status":     status,
 		"end_reason": string(ss.EndReason),
+	}
+	if snapshot := ss.OutcomeSnapshot(); snapshot.ClientGone {
+		streamInfo["client_gone"] = true
+		streamInfo["disconnect_mode"] = relayInfo.StreamDisconnectMode
+		if snapshot.DrainEndReason != relaycommon.StreamEndReasonNone {
+			streamInfo["drain_end_reason"] = string(snapshot.DrainEndReason)
+		}
 	}
 	if outcome := ss.ResponseOutcome(); outcome != "" {
 		streamInfo["response_status"] = outcome

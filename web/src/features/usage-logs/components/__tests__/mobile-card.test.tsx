@@ -398,6 +398,16 @@ for (const desktop of [false, true]) {
 
   it.each([
     { name: 'missing cache data', prompt: 1000, other: {} },
+    {
+      name: 'estimated input with unknown cache usage',
+      prompt: 1000,
+      other: { cache_tokens: 0, cache_usage_known: false },
+    },
+    {
+      name: 'known cache count with estimated total input',
+      prompt: 1000,
+      other: { cache_tokens: 4, cache_usage_known: false },
+    },
     { name: 'zero total input', prompt: 0, other: { cache_tokens: 0 } },
     {
       name: 'negative cache reads',

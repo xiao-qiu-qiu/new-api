@@ -2,19 +2,28 @@ package openai
 
 import (
 	"bytes"
+	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -449,6 +458,391 @@ func TestAzureHostedWebSearch(t *testing.T) {
 				}
 			}
 			assert.Equal(t, map[string]int{"bing_web_search": 5}, billed)
+		})
+	}
+}
+
+// These cases use the production HTTP transport and the native Responses
+// accumulator, so detaching only the scanner context cannot make them pass.
+func TestResponsesStreamDisconnectTransport(t *testing.T) {
+	service.InitHttpClient()
+	for _, tc := range []struct {
+		name, mode           string
+		writeFail, flushFail bool
+	}{
+		{name: "cancel", mode: "cancel"},
+		{name: "drain client cancellation", mode: "drain"},
+		{name: "drain write failure", mode: "drain", writeFail: true},
+		{name: "drain flush failure", mode: "drain", flushFail: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			release := make(chan struct{})
+			var releaseOnce sync.Once
+			disconnect := func() {
+				if !tc.writeFail && !tc.flushFail {
+					cancel()
+				}
+				releaseOnce.Do(func() { close(release) })
+			}
+			upstreamDone := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer close(upstreamDone)
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n")
+				w.(http.Flusher).Flush()
+				select {
+				case <-release:
+				case <-r.Context().Done():
+					return
+				}
+				_, _ = fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":100,\"output_tokens\":7,\"total_tokens\":107,\"input_tokens_details\":{\"cached_tokens\":80}}}}\n\n")
+				w.(http.Flusher).Flush()
+				// No EOF: the handler must close upstream on the terminal itself.
+				<-r.Context().Done()
+			}))
+			defer server.Close()
+			writer := &disconnectTestWriter{ResponseRecorder: httptest.NewRecorder(), disconnect: disconnect, writeFail: tc.writeFail, flushFail: tc.flushFail}
+			c, _ := gin.CreateTestContext(writer)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(client)
+			info := &relaycommon.RelayInfo{IsStream: true, DisablePing: true, StreamDisconnectMode: tc.mode, StreamDrainTimeoutSeconds: 3,
+				OriginModelName: "gpt-4o", ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-4o"}}
+			info.SetEstimatePromptTokens(9)
+			req, err := http.NewRequestWithContext(client, http.MethodPost, server.URL, strings.NewReader("{}"))
+			require.NoError(t, err)
+			resp, err := channel.DoRequest(c, req, info)
+			require.NoError(t, err)
+			usage, apiErr := OaiResponsesStreamHandler(c, info, resp)
+			require.Nil(t, apiErr)
+			require.NotNil(t, usage)
+			select {
+			case <-upstreamDone:
+			case <-time.After(2 * time.Second):
+				t.Fatal("HTTP transport still owns the upstream request")
+			}
+			outcome := info.StreamStatus.OutcomeSnapshot()
+			assert.Equal(t, relaycommon.StreamEndReasonClientGone, outcome.EndReason)
+			assert.True(t, outcome.ClientGone)
+			if tc.mode == "drain" {
+				assert.Equal(t, 100, usage.PromptTokens)
+				assert.Equal(t, 7, usage.CompletionTokens)
+				assert.Equal(t, 80, usage.PromptTokensDetails.CachedTokens)
+				assert.Equal(t, relaycommon.StreamEndReasonDone, outcome.DrainEndReason)
+				assert.Equal(t, relaycommon.ResponseOutcomeCompleted, outcome.Response)
+				if tc.writeFail || tc.flushFail {
+					assert.NoError(t, client.Err(), "write failure alone must trigger drain")
+				}
+			} else {
+				assert.NotEqual(t, 100, usage.PromptTokens)
+				assert.Zero(t, usage.PromptTokensDetails.CachedTokens)
+				assert.Equal(t, 1, info.ReceivedResponseCount, "cancel must stop before the terminal")
+			}
+			assert.NotContains(t, writer.Body.String(), "response.completed", "no terminal write after downstream loss")
+			assert.Equal(t, writer.writesAtDisconnect, writer.writes, "drain must suppress every later write")
+		})
+	}
+}
+
+type disconnectTestWriter struct {
+	*httptest.ResponseRecorder
+	disconnect           func()
+	writeFail, flushFail bool
+	writes               int
+	writesAtDisconnect   int
+}
+
+func (w *disconnectTestWriter) Write(data []byte) (int, error) {
+	w.writes++
+	if w.writeFail {
+		w.writesAtDisconnect = w.writes
+		w.disconnect()
+		return 0, errors.New("downstream write failed")
+	}
+	n, err := w.ResponseRecorder.Write(data)
+	if !w.flushFail {
+		w.writesAtDisconnect = w.writes
+		w.disconnect()
+	}
+	return n, err
+}
+
+func (w *disconnectTestWriter) FlushError() error {
+	if w.flushFail {
+		w.writesAtDisconnect = w.writes
+		w.disconnect()
+		return errors.New("downstream flush failed")
+	}
+	w.ResponseRecorder.Flush()
+	return nil
+}
+
+func TestResponsesStreamDrainLimits(t *testing.T) {
+	service.InitHttpClient()
+	previousIdle := constant.StreamingTimeout
+	constant.StreamingTimeout = 1
+	t.Cleanup(func() { constant.StreamingTimeout = previousIdle })
+	for _, tc := range []struct {
+		name    string
+		seconds int
+		active  bool
+		want    relaycommon.StreamEndReason
+	}{
+		{"total limit despite active upstream", 1, true, relaycommon.StreamEndReasonDrainTimeout},
+		{"existing idle limit", 300, false, relaycommon.StreamEndReasonTimeout},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			serverDone := make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				defer close(serverDone)
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = fmt.Fprint(w, "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n")
+				w.(http.Flusher).Flush()
+				if !tc.active {
+					<-r.Context().Done()
+					return
+				}
+				ticker := time.NewTicker(100 * time.Millisecond)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-r.Context().Done():
+						return
+					case <-ticker.C:
+						_, _ = fmt.Fprint(w, ": heartbeat\n\n")
+						w.(http.Flusher).Flush()
+					}
+				}
+			}))
+			defer server.Close()
+			writer := &disconnectTestWriter{ResponseRecorder: httptest.NewRecorder(), disconnect: cancel}
+			c, _ := gin.CreateTestContext(writer)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(client)
+			info := &relaycommon.RelayInfo{IsStream: true, DisablePing: true, StreamDisconnectMode: "drain", StreamDrainTimeoutSeconds: tc.seconds,
+				ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-4o"}}
+			req, err := http.NewRequestWithContext(client, http.MethodPost, server.URL, strings.NewReader("{}"))
+			require.NoError(t, err)
+			resp, err := channel.DoRequest(c, req, info)
+			require.NoError(t, err)
+			_, apiErr := OaiResponsesStreamHandler(c, info, resp)
+			require.Nil(t, apiErr)
+			assert.Equal(t, relaycommon.StreamEndReasonClientGone, info.StreamStatus.EndReason)
+			assert.Equal(t, tc.want, info.StreamStatus.DrainEndReason)
+			select {
+			case <-serverDone:
+			case <-time.After(time.Second):
+				t.Fatal("drain limit did not cancel transport")
+			}
+		})
+	}
+}
+
+func TestStreamDrainBufferedTailAndDoneWriteFailure(t *testing.T) {
+	for _, ending := range []string{"", "data: [DONE]\n"} {
+		t.Run(fmt.Sprintf("ending %q", ending), func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			client, cancel := context.WithCancel(context.Background())
+			cancel()
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(client)
+			info := &relaycommon.RelayInfo{StreamDisconnectMode: "drain", StreamDrainTimeoutSeconds: 3, DisablePing: true}
+			const prefix = "data: chunk\n"
+			resp := &http.Response{Body: io.NopCloser(strings.NewReader(strings.Repeat(prefix, 25) + "data: final_usage\n" + ending))}
+			var got []string
+			helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) { got = append(got, data) })
+			require.Len(t, got, 26)
+			assert.Equal(t, "final_usage", got[25])
+			assert.Equal(t, relaycommon.StreamEndReasonClientGone, info.StreamStatus.EndReason)
+			want := relaycommon.StreamEndReasonEOF
+			if ending != "" {
+				want = relaycommon.StreamEndReasonDone
+			}
+			assert.Equal(t, want, info.StreamStatus.DrainEndReason)
+		})
+	}
+	t.Run("Done then failed write in same callback", func(t *testing.T) {
+		writer := &disconnectTestWriter{ResponseRecorder: httptest.NewRecorder(), disconnect: func() {}, writeFail: true}
+		c, _ := gin.CreateTestContext(writer)
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+		info := &relaycommon.RelayInfo{StreamDisconnectMode: "drain", StreamDrainTimeoutSeconds: 3, DisablePing: true}
+		resp := &http.Response{Body: io.NopCloser(strings.NewReader("data: terminal\n"))}
+		helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
+			sr.Done()
+			require.NoError(t, helper.StringData(c, data))
+		})
+		assert.Equal(t, relaycommon.StreamEndReasonClientGone, info.StreamStatus.EndReason)
+		assert.Equal(t, relaycommon.StreamEndReasonDone, info.StreamStatus.DrainEndReason)
+	})
+}
+
+func TestResponsesStreamErrorBeforeTerminalKeepsUsage(t *testing.T) {
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	info := &relaycommon.RelayInfo{DisablePing: true, ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-4o"}}
+	body := "data: {\"type\":\"error\",\"code\":\"upstream_error\"}\n\n" +
+		"data: {\"type\":\"response.error\"}\n\n" +
+		"data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"usage\":{\"input_tokens\":100,\"output_tokens\":7,\"total_tokens\":107,\"input_tokens_details\":{\"cached_tokens\":80}}}}\n\n"
+	usage, apiErr := OaiResponsesStreamHandler(c, info, &http.Response{Body: io.NopCloser(strings.NewReader(body))})
+	require.Nil(t, apiErr)
+	assert.Equal(t, 100, usage.PromptTokens)
+	assert.Equal(t, 7, usage.CompletionTokens)
+	assert.Equal(t, 80, usage.PromptTokensDetails.CachedTokens)
+	assert.Equal(t, relaycommon.ResponseOutcomeFailed, info.StreamStatus.OutcomeSnapshot().Response)
+}
+
+func TestStreamDisconnectOptionValidationAndSnapshot(t *testing.T) {
+	for key, values := range map[string][]string{
+		"quota_setting.stream_disconnect_mode":       {"cancel", "drain"},
+		"quota_setting.stream_drain_timeout_seconds": {"1", "300", "3600"},
+	} {
+		for _, value := range values {
+			require.NoError(t, operation_setting.ValidateQuotaOption(key, value))
+		}
+	}
+	for key, values := range map[string][]string{
+		"quota_setting.stream_disconnect_mode":       {"", "foo", "DRAIN"},
+		"quota_setting.stream_drain_timeout_seconds": {"0", "-1", "3601", "1.5", "NaN", "Inf", ""},
+	} {
+		for _, value := range values {
+			require.Error(t, operation_setting.ValidateQuotaOption(key, value))
+		}
+	}
+	setting := operation_setting.GetQuotaSetting()
+	previous := *setting
+	t.Cleanup(func() { *setting = previous })
+	setting.StreamDisconnectMode, setting.StreamDrainTimeoutSeconds = "drain", 25
+	info := &relaycommon.RelayInfo{}
+	info.SnapshotStreamDisconnectSettings()
+	setting.StreamDisconnectMode, setting.StreamDrainTimeoutSeconds = "cancel", 30
+	info.SnapshotStreamDisconnectSettings()
+	assert.Equal(t, "drain", info.StreamDisconnectMode)
+	assert.Equal(t, 25, info.StreamDrainTimeoutSeconds)
+}
+
+func TestStreamDisconnectDoesNotStartAnotherHTTPAttempt(t *testing.T) {
+	service.InitHttpClient()
+	for _, mode := range []string{"cancel", "drain"} {
+		t.Run(mode, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				w.WriteHeader(http.StatusInternalServerError)
+			}))
+			defer server.Close()
+			client, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(client)
+			info := &relaycommon.RelayInfo{IsStream: true, DisablePing: true, StreamDisconnectMode: mode, StreamDrainTimeoutSeconds: 3, ChannelMeta: &relaycommon.ChannelMeta{}}
+			first, err := http.NewRequestWithContext(client, http.MethodPost, server.URL, strings.NewReader("{}"))
+			require.NoError(t, err)
+			resp, err := channel.DoRequest(c, first, info)
+			require.NoError(t, err)
+			require.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+			require.NoError(t, resp.Body.Close())
+			cancel()
+			retry, err := http.NewRequestWithContext(client, http.MethodPost, server.URL, strings.NewReader("{}"))
+			require.NoError(t, err)
+			resp, err = channel.DoRequest(c, retry, info)
+			require.Error(t, err)
+			assert.Nil(t, resp)
+			var apiErr *types.NewAPIError
+			require.ErrorAs(t, err, &apiErr)
+			assert.True(t, types.IsSkipRetryError(apiErr))
+			assert.EqualValues(t, 1, requests.Load(), "client cancellation must not create a fresh upstream request")
+		})
+	}
+	t.Run("header failure after disconnect is not retryable", func(t *testing.T) {
+		client, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			cancel()
+			// Simulate upstream closing before headers, after client cancellation.
+			conn, _, err := w.(http.Hijacker).Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+		}))
+		defer server.Close()
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(client)
+		info := &relaycommon.RelayInfo{IsStream: true, DisablePing: true, StreamDisconnectMode: "drain", StreamDrainTimeoutSeconds: 3, ChannelMeta: &relaycommon.ChannelMeta{}}
+		req, err := http.NewRequestWithContext(client, http.MethodPost, server.URL, strings.NewReader("{}"))
+		require.NoError(t, err)
+		resp, err := channel.DoRequest(c, req, info)
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		var apiErr *types.NewAPIError
+		require.ErrorAs(t, err, &apiErr)
+		assert.True(t, types.IsSkipRetryError(apiErr))
+	})
+}
+
+func TestStreamDrainIdleDoesNotDropQueuedUsage(t *testing.T) {
+	previousIdle := constant.StreamingTimeout
+	constant.StreamingTimeout = 1
+	t.Cleanup(func() { constant.StreamingTimeout = previousIdle })
+	client, cancel := context.WithCancel(context.Background())
+	cancel()
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(client)
+	info := &relaycommon.RelayInfo{DisablePing: true, StreamDisconnectMode: "drain", StreamDrainTimeoutSeconds: 5}
+	readEOF := make(chan struct{})
+	body := &streamEOFReader{Reader: strings.NewReader("data: first\ndata: final_usage\n"), eof: readEOF}
+	resp := &http.Response{Body: io.NopCloser(body)}
+	var received []string
+	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
+		received = append(received, data)
+		if data == "first" {
+			// EOF proves final_usage is already queued. Callback work crosses
+			// the real idle deadline while the handler owns this first event.
+			<-readEOF
+			timer := time.NewTimer(1100 * time.Millisecond)
+			defer timer.Stop()
+			<-timer.C
+		}
+	})
+	assert.Equal(t, []string{"first", "final_usage"}, received)
+	assert.Equal(t, relaycommon.StreamEndReasonClientGone, info.StreamStatus.EndReason)
+	assert.Equal(t, relaycommon.StreamEndReasonEOF, info.StreamStatus.DrainEndReason)
+}
+
+type streamEOFReader struct {
+	io.Reader
+	eof  chan struct{}
+	once sync.Once
+}
+
+func (r *streamEOFReader) Read(data []byte) (int, error) {
+	n, err := r.Reader.Read(data)
+	if err == io.EOF {
+		r.once.Do(func() { close(r.eof) })
+	}
+	return n, err
+}
+
+func TestStreamWriterObservesDisconnectAfterScannerCleanup(t *testing.T) {
+	for _, mode := range []string{"cancel", "drain"} {
+		t.Run(mode, func(t *testing.T) {
+			client, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(client)
+			info := &relaycommon.RelayInfo{DisablePing: true, StreamDisconnectMode: mode, StreamDrainTimeoutSeconds: 3}
+			resp := &http.Response{Body: io.NopCloser(strings.NewReader("data: [DONE]\n"))}
+			helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {})
+			require.ErrorIs(t, info.StreamLifecycle.Context.Err(), context.Canceled, "scanner has already cleaned up")
+			cancel()
+			require.NoError(t, helper.StringData(c, "adapter_final_frame"))
+			assert.Empty(t, recorder.Body.String(), "a late cancellation must suppress adaptor final writes")
+			require.ErrorIs(t, info.StreamLifecycle.ClientError(), context.Canceled)
+			select {
+			case <-info.StreamLifecycle.Gone:
+			default:
+				t.Fatal("late downstream loss was not recorded")
+			}
 		})
 	}
 }

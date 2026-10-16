@@ -12,8 +12,25 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type truncatedErrorResponseBody struct{ closed bool }
+
+func (b *truncatedErrorResponseBody) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+func (b *truncatedErrorResponseBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+func TestRelayErrorHandlerClosesTruncatedBody(t *testing.T) {
+	body := &truncatedErrorResponseBody{}
+	err := RelayErrorHandler(context.Background(), &http.Response{StatusCode: http.StatusServiceUnavailable, Body: body}, false)
+	require.NotNil(t, err)
+	assert.Equal(t, http.StatusServiceUnavailable, err.StatusCode)
+	assert.True(t, body.closed, "failed reads must release the attempt's stream lifecycle")
+}
 
 func TestResetStatusCode(t *testing.T) {
 	t.Parallel()

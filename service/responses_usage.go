@@ -43,7 +43,15 @@ func (a *ResponsesUsageAccumulator) Observe(event *dto.ResponsesStreamResponse, 
 	switch event.Type {
 	case "response.completed", "response.done", "response.failed", "response.incomplete", "response.cancelled", "response.canceled":
 		if event.Response != nil {
-			ApplyResponsesUsage(a.usage, event.Response.Usage)
+			upstream := event.Response.Usage
+			if upstream != nil && upstream.BillingUsage == nil {
+				// Native SSE decoding does not attach a billing sidecar. Capture
+				// its facts before local fallback fills either token count.
+				snapshot := *upstream
+				snapshot.BillingUsage = dto.NewOpenAIResponsesBillingUsage(upstream)
+				upstream = &snapshot
+			}
+			ApplyResponsesUsage(a.usage, upstream)
 			if a.outputText.Len() == 0 {
 				// Some upstreams carry the output only on the terminal event.
 				a.outputText.WriteString(relayconvert.ExtractOutputTextFromResponses(event.Response))
@@ -96,9 +104,20 @@ func (a *ResponsesUsageAccumulator) Finish() *dto.Usage {
 		a.imageCounter.Commit(a.info)
 		a.imageCommitted = true
 	}
+	// Keep the upstream snapshot separate from local estimates. An empty
+	// snapshot records that neither input nor cache facts reached us.
+	if a.usage.BillingUsage == nil {
+		a.usage.BillingUsage = &dto.BillingUsage{
+			Source:      dto.BillingUsageSourceOAIResponses,
+			Semantic:    dto.BillingUsageSemanticOpenAI,
+			OpenAIUsage: &dto.Usage{},
+		}
+	}
+	estimated := false
 	if a.usage.CompletionTokens == 0 {
 		if output := a.outputText.String(); output != "" {
 			a.usage.CompletionTokens = tokenkit.Count(a.info.GetUpstreamModelName(), output)
+			estimated = true
 		}
 	}
 	// Upstream bills the prompt as soon as it starts generating, so a stream
@@ -107,11 +126,13 @@ func (a *ResponsesUsageAccumulator) Finish() *dto.Usage {
 	billsPrompt := a.usage.CompletionTokens != 0 || (a.started && !a.info.StreamStatus.ResponseFailed())
 	if a.usage.PromptTokens == 0 && billsPrompt {
 		a.usage.PromptTokens = a.info.GetEstimatePromptTokens()
+		estimated = true
 	}
 	a.usage.TotalTokens = a.usage.PromptTokens + a.usage.CompletionTokens
-	if a.usage.BillingUsage != nil {
+	if _, ok := a.usage.BillingUsage.CanonicalUsage(); ok {
 		a.usage.BillingUsage = dto.CloneBillingUsageWithEstimatedCompletion(a.usage.BillingUsage, a.usage.CompletionTokens)
 	}
+	a.usage.BillingUsage.Estimated = a.usage.BillingUsage.Estimated || estimated
 	return a.usage
 }
 
@@ -165,6 +186,14 @@ func ApplyResponsesUsage(dst *dto.Usage, src *dto.Usage) {
 	}
 	incoming.PromptCacheHitTokens = src.PromptCacheHitTokens
 	dto.MergeUsageNonZero(dst, incoming)
+	// Non-zero merging otherwise drops a later all-zero details object. Its
+	// presence still matters: it distinguishes known zero cache from unknown.
+	if dst.BillingUsage != nil && dst.BillingUsage.OpenAIUsage != nil && incoming.BillingUsage != nil && incoming.BillingUsage.OpenAIUsage != nil {
+		if details := incoming.BillingUsage.OpenAIUsage.InputTokensDetails; details != nil && dst.BillingUsage.OpenAIUsage.InputTokensDetails == nil {
+			cloned := details.Clone()
+			dst.BillingUsage.OpenAIUsage.InputTokensDetails = &cloned
+		}
+	}
 	outputDetails := dst.CompletionTokenDetails
 	if outputDetails != (dto.OutputTokenDetails{}) {
 		dst.OutputTokensDetails = &outputDetails

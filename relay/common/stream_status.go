@@ -10,15 +10,16 @@ import (
 type StreamEndReason string
 
 const (
-	StreamEndReasonNone        StreamEndReason = ""
-	StreamEndReasonDone        StreamEndReason = "done"
-	StreamEndReasonTimeout     StreamEndReason = "timeout"
-	StreamEndReasonClientGone  StreamEndReason = "client_gone"
-	StreamEndReasonScannerErr  StreamEndReason = "scanner_error"
-	StreamEndReasonHandlerStop StreamEndReason = "handler_stop"
-	StreamEndReasonEOF         StreamEndReason = "eof"
-	StreamEndReasonPanic       StreamEndReason = "panic"
-	StreamEndReasonPingFail    StreamEndReason = "ping_fail"
+	StreamEndReasonNone         StreamEndReason = ""
+	StreamEndReasonDone         StreamEndReason = "done"
+	StreamEndReasonTimeout      StreamEndReason = "timeout"
+	StreamEndReasonClientGone   StreamEndReason = "client_gone"
+	StreamEndReasonScannerErr   StreamEndReason = "scanner_error"
+	StreamEndReasonHandlerStop  StreamEndReason = "handler_stop"
+	StreamEndReasonEOF          StreamEndReason = "eof"
+	StreamEndReasonPanic        StreamEndReason = "panic"
+	StreamEndReasonPingFail     StreamEndReason = "ping_fail"
+	StreamEndReasonDrainTimeout StreamEndReason = "drain_timeout"
 )
 
 // ResponseOutcome is the protocol-level result of one response, independent of
@@ -41,9 +42,11 @@ type StreamErrorEntry struct {
 }
 
 type StreamStatus struct {
-	EndReason StreamEndReason
-	EndError  error
-	endOnce   sync.Once
+	EndReason      StreamEndReason
+	EndError       error
+	ClientGone     bool
+	DrainEndReason StreamEndReason
+	endOnce        sync.Once
 
 	mu         sync.Mutex
 	Errors     []StreamErrorEntry
@@ -61,6 +64,8 @@ type StreamStatus struct {
 // enter it because they may contain credentials or request content.
 type StreamOutcome struct {
 	EndReason        StreamEndReason
+	ClientGone       bool
+	DrainEndReason   StreamEndReason
 	HasErrors        bool
 	ExpectsTerminal  bool
 	Response         ResponseOutcome
@@ -77,6 +82,14 @@ func NewStreamStatus() *StreamStatus {
 func (s *StreamStatus) SetEndReason(reason StreamEndReason, err error) {
 	if s == nil {
 		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if reason == StreamEndReasonClientGone {
+		s.ClientGone = true
+	}
+	if s.EndReason == StreamEndReasonClientGone && reason != StreamEndReasonClientGone && s.DrainEndReason == StreamEndReasonNone {
+		s.DrainEndReason = reason
 	}
 	s.endOnce.Do(func() {
 		s.EndReason = reason
@@ -97,6 +110,23 @@ func (s *StreamStatus) RecordError(msg string) {
 			Timestamp: time.Now(),
 		})
 	}
+}
+
+// MarkClientGone preserves the downstream disconnect independently of the
+// upstream terminal. A write may fail later in the callback that called Done.
+func (s *StreamStatus) MarkClientGone(err error) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.EndReason != StreamEndReasonNone && s.EndReason != StreamEndReasonClientGone && s.DrainEndReason == StreamEndReasonNone {
+		s.DrainEndReason = s.EndReason
+	}
+	s.endOnce.Do(func() {})
+	s.ClientGone = true
+	s.EndReason = StreamEndReasonClientGone
+	s.EndError = err
 }
 
 // RequireTerminal declares that the protocol always ends with an explicit
@@ -178,6 +208,8 @@ func (s *StreamStatus) OutcomeSnapshot() StreamOutcome {
 	defer s.mu.Unlock()
 	return StreamOutcome{
 		EndReason:        s.EndReason,
+		ClientGone:       s.ClientGone,
+		DrainEndReason:   s.DrainEndReason,
 		HasErrors:        s.ErrorCount > 0,
 		ExpectsTerminal:  s.expectsTerminal,
 		Response:         s.response,

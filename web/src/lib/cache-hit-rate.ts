@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 
 interface CacheHitRateUsage {
+  cache_usage_known?: boolean
   cache_tokens?: number
   input_tokens_total?: number
   usage_semantic?: string
@@ -44,6 +45,7 @@ export function getLogCacheHitRate(
   if (
     log.type !== 2 ||
     !other ||
+    other.cache_usage_known === false ||
     typeof cacheRead !== 'number' ||
     !Number.isSafeInteger(cacheRead) ||
     cacheRead < 0

@@ -32,6 +32,8 @@ const defaultBillingSettings: BillingSettings = {
   'quota_setting.enable_free_model_pre_consume': true,
   'quota_setting.trust_quota_usd': 10,
   'quota_setting.pre_consume_multiplier': 1,
+  'quota_setting.stream_disconnect_mode': 'cancel',
+  'quota_setting.stream_drain_timeout_seconds': 300,
   QuotaPerUnit: 500000,
   USDExchangeRate: 7,
   'general_setting.quota_display_type': 'USD',
