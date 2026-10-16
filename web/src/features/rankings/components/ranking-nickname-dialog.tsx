@@ -32,6 +32,7 @@ export function RankingNicknameDialog(props: {
   preference: Participation
   pending: boolean
   error: Error | null
+  initialSetup?: boolean
   onClose: () => void
   onSave: (nickname: string) => void
 }) {
@@ -42,6 +43,10 @@ export function RankingNicknameDialog(props: {
     (props.preference.next_nickname_change_at ?? 0) > Date.now() / 1000
   const tooLong = [...nickname].length > 24
   const unchanged = nickname === (props.preference.nickname ?? '')
+  const canSave =
+    !props.pending &&
+    !tooLong &&
+    ((!locked && !unchanged) || (props.initialSetup && unchanged))
 
   return (
     <Dialog
@@ -66,9 +71,10 @@ export function RankingNicknameDialog(props: {
           <Button
             type='submit'
             form='ranking-nickname-form'
-            disabled={props.pending || locked || tooLong || unchanged}
+            disabled={!canSave}
           >
-            {props.pending ? t('Saving...') : t('Save')}
+            {props.pending && t('Saving...')}
+            {!props.pending && (props.initialSetup ? t('Continue') : t('Save'))}
           </Button>
         </>
       }
@@ -78,7 +84,7 @@ export function RankingNicknameDialog(props: {
         className='flex flex-col gap-3'
         onSubmit={(event) => {
           event.preventDefault()
-          if (!props.pending && !locked && !tooLong && !unchanged) {
+          if (canSave) {
             props.onSave(nickname)
           }
         }}

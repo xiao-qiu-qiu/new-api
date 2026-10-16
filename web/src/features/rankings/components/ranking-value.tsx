@@ -38,7 +38,7 @@ export function RankingValue(props: {
     props.metric === 'spending'
       ? props.entry.total_quota
       : props.entry.total_tokens
-  if (!props.entry.usage_public || value == null) {
+  if (value == null) {
     return (
       <span className='text-muted-foreground inline-flex items-center gap-1.5 text-xs font-normal'>
         <EyeOff className='size-3.5' aria-hidden />

@@ -20,6 +20,7 @@ type UserRankingPreference struct {
 	SpendingParticipating bool   `json:"spending_participating"`
 	TokenUsagePublic      bool   `json:"token_usage_public"`
 	SpendingUsagePublic   bool   `json:"spending_usage_public"`
+	ModelDetailsPublic    bool   `json:"model_details_public" gorm:"-"`
 	Prompted              bool   `json:"prompted"`
 	Nickname              string `json:"nickname" gorm:"size:96"`
 	NicknameChangedAt     int64  `json:"nickname_changed_at"`
@@ -41,6 +42,7 @@ type UserRankingPreferenceUpdate struct {
 	SpendingParticipating *bool `json:"spending_participating"`
 	TokenUsagePublic      *bool `json:"token_usage_public"`
 	SpendingUsagePublic   *bool `json:"spending_usage_public"`
+	ModelDetailsPublic    *bool `json:"model_details_public"`
 }
 
 var ErrRankingNicknameCooldown = errors.New("You can change your ranking nickname once every 30 days")
@@ -62,6 +64,8 @@ func GetUserRankingPreference(ctx context.Context, userID int) (UserRankingPrefe
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		err = nil
 	}
+	// Both legacy choices must allow disclosure before sharing model details.
+	preference.ModelDetailsPublic = preference.TokenUsagePublic && preference.SpendingUsagePublic
 	if preference.NicknameChangedAt > 0 {
 		preference.NextNicknameChangeAt = preference.NicknameChangedAt + int64(RankingNicknameCooldown/time.Second)
 	}
@@ -98,8 +102,8 @@ func SetRankingNickname(ctx context.Context, userID int, nickname string, now ti
 	})
 }
 
-// Additional choices, when supplied, are spending participation, token disclosure,
-// and spending disclosure. Old callers still update token participation only.
+// Additional choices keep the legacy order: spending participation and the two
+// disclosure flags. Disclosure now requires both flags to be explicitly true.
 func SetUserRankingPreference(ctx context.Context, userID int, participating bool, choices ...bool) error {
 	update := UserRankingPreferenceUpdate{Participating: &participating}
 	if len(choices) > 0 {
@@ -125,13 +129,17 @@ func UpdateUserRankingPreference(ctx context.Context, userID int, update UserRan
 		preference.SpendingParticipating = *update.SpendingParticipating
 		columns = append(columns, "spending_participating")
 	}
-	if update.TokenUsagePublic != nil {
-		preference.TokenUsagePublic = *update.TokenUsagePublic
-		columns = append(columns, "token_usage_public")
-	}
-	if update.SpendingUsagePublic != nil {
-		preference.SpendingUsagePublic = *update.SpendingUsagePublic
-		columns = append(columns, "spending_usage_public")
+	if update.ModelDetailsPublic != nil || update.TokenUsagePublic != nil || update.SpendingUsagePublic != nil {
+		// The shared choice takes precedence. Legacy clients must submit both
+		// flags as true together; a partial legacy write can only hide details.
+		public := update.TokenUsagePublic != nil && update.SpendingUsagePublic != nil &&
+			*update.TokenUsagePublic && *update.SpendingUsagePublic
+		if update.ModelDetailsPublic != nil {
+			public = *update.ModelDetailsPublic
+		}
+		preference.TokenUsagePublic = public
+		preference.SpendingUsagePublic = public
+		columns = append(columns, "token_usage_public", "spending_usage_public")
 	}
 	return DB.WithContext(ctx).Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "user_id"}},

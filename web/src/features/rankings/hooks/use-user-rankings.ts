@@ -61,8 +61,7 @@ export type UserRankingSnapshot = {
 export type Participation = {
   participating: boolean
   spending_participating: boolean
-  token_usage_public: boolean
-  spending_usage_public: boolean
+  model_details_public: boolean
   prompted: boolean
   nickname?: string
   nickname_changed_at?: number
@@ -71,10 +70,7 @@ export type Participation = {
 type Response<T> = { success: boolean; message?: string; data: T }
 export type ParticipationChoice = Pick<
   Participation,
-  | 'participating'
-  | 'spending_participating'
-  | 'token_usage_public'
-  | 'spending_usage_public'
+  'participating' | 'spending_participating' | 'model_details_public'
 >
 
 export function useUserRankings(

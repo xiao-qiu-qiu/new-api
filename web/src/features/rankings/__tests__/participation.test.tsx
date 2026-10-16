@@ -37,6 +37,7 @@ import type {
   Participation,
   ParticipationChoice,
   RankedModel,
+  RankedUser,
   RankingMetric,
 } from '../hooks/use-user-rankings'
 
@@ -46,8 +47,7 @@ const clients = new Set<QueryClient>()
 const initialPreference: Participation = {
   participating: false,
   spending_participating: false,
-  token_usage_public: false,
-  spending_usage_public: false,
+  model_details_public: false,
   prompted: false,
 }
 
@@ -80,185 +80,313 @@ function renderRankings(metric: RankingMetric = 'tokens') {
   return client
 }
 
+function mockRankings(preference: Participation, users: RankedUser[] = []) {
+  vi.mocked(api.get).mockImplementation(async (url) => ({
+    data: {
+      success: true,
+      data: url.includes('/self/')
+        ? preference
+        : {
+            users,
+            participants: users.length,
+            total_tokens: 120,
+            total_quota: 500000,
+          },
+    },
+  }))
+  vi.mocked(api.put).mockImplementation(async (_url, body) => {
+    Object.assign(preference, body)
+    if ('participating' in (body as Record<string, unknown>)) {
+      preference.prompted = true
+    }
+    return { data: { success: true, data: { ...preference } } }
+  })
+}
+
 describe('ranking participation', () => {
-  test('a new visitor can decline and still read the leaderboard', async () => {
-    let preference = { ...initialPreference }
-    vi.mocked(api.get).mockImplementation(async (url) => ({
-      data: {
-        success: true,
-        data: url.includes('/self/')
-          ? preference
-          : {
-              users: [
-                {
-                  rank: 1,
-                  name: 'a***e',
-                  total_tokens: 120,
-                  usage_public: true,
-                  is_self: false,
-                },
-              ],
-              participants: 1,
-              total_tokens: 120,
-            },
-      },
-    }))
-    vi.mocked(api.put).mockImplementation(async (_url, body) => {
-      preference = {
-        ...(body as ParticipationChoice),
-        prompted: true,
-      }
-      return { data: { success: true, data: preference } }
+  test('first joining follows rules, nickname and enabled preferences before confirming participation', async () => {
+    mockRankings({ ...initialPreference })
+    renderRankings()
+    const rules = await screen.findByRole('dialog', { name: 'Ranking rules' })
+    const actions = within(rules).getAllByRole('button')
+    expect(actions.map((button) => button.textContent)).toEqual([
+      'Not joining for now',
+      'Join rankings',
+      'Close',
+    ])
+    expect(api.put).not.toHaveBeenCalled()
+    await userEvent.click(
+      within(rules).getByRole('button', { name: 'Join rankings' })
+    )
+    const nickname = await screen.findByRole('dialog', {
+      name: 'Ranking nickname',
     })
-    const client = renderRankings()
-    const dialog = await screen.findByRole('dialog', {
+    await userEvent.type(
+      within(nickname).getByRole('textbox', { name: 'Nickname' }),
+      '星河旅人'
+    )
+    await userEvent.click(
+      within(nickname).getByRole('button', { name: 'Continue' })
+    )
+    const preferences = await screen.findByRole('dialog', {
       name: 'Your ranking preferences',
     })
-    expect(api.put).not.toHaveBeenCalled()
-    expect(
-      within(dialog).getByRole('switch', { name: 'Token leaderboard' })
-    ).not.toBeChecked()
-    expect(
-      within(dialog).getByRole('switch', {
-        name: 'Show token totals and model breakdown',
-      })
-    ).toHaveAttribute('aria-disabled', 'true')
+    expect(api.put).toHaveBeenCalledExactlyOnceWith(
+      '/api/user/self/ranking',
+      { nickname: '星河旅人' },
+      { skipErrorHandler: true }
+    )
+    expect(screen.queryByText('Participating')).not.toBeInTheDocument()
+    const switches = within(preferences).getAllByRole('switch')
+    expect(switches).toHaveLength(3)
+    for (const control of switches) expect(control).toBeChecked()
     await userEvent.click(
-      within(dialog).getByRole('button', { name: 'Not now' })
+      within(preferences).getByRole('button', { name: 'Save preferences' })
     )
     await waitFor(() =>
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     )
-    expect(api.put).toHaveBeenCalledWith('/api/user/self/ranking', {
-      participating: false,
-      spending_participating: false,
-      token_usage_public: false,
-      spending_usage_public: false,
+    expect(api.put).toHaveBeenLastCalledWith('/api/user/self/ranking', {
+      participating: true,
+      spending_participating: true,
+      model_details_public: true,
     })
-    expect(within(screen.getByRole('table')).getByText('a***e')).toBeVisible()
-    expect(screen.getByText('Viewing only')).toBeVisible()
-    client.clear()
+    expect(screen.getByText('Participating')).toBeVisible()
+  })
+
+  test.each(['Not joining for now', 'Close'])(
+    'a first visitor selecting %s records no participation and can read the board',
+    async (action) => {
+      mockRankings({ ...initialPreference }, [
+        {
+          rank: 1,
+          name: 'a***e',
+          total_tokens: 120,
+          usage_public: true,
+          is_self: false,
+        },
+      ])
+      renderRankings()
+      const rules = await screen.findByRole('dialog', { name: 'Ranking rules' })
+      await userEvent.click(within(rules).getByRole('button', { name: action }))
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+      )
+      expect(api.put).toHaveBeenCalledExactlyOnceWith(
+        '/api/user/self/ranking',
+        {
+          participating: false,
+          spending_participating: false,
+          model_details_public: false,
+        }
+      )
+      expect(within(screen.getByRole('table')).getByText('a***e')).toBeVisible()
+      expect(screen.getByText('Viewing only')).toBeVisible()
+    }
+  )
+
+  test.each(['', '星河旅人'])(
+    'an unchanged first nickname %j continues without a write, and canceling preferences declines',
+    async (nickname) => {
+      mockRankings({ ...initialPreference, nickname })
+      renderRankings()
+      const rules = await screen.findByRole('dialog', { name: 'Ranking rules' })
+      await userEvent.click(
+        within(rules).getByRole('button', { name: 'Join rankings' })
+      )
+      const nicknameDialog = await screen.findByRole('dialog', {
+        name: 'Ranking nickname',
+      })
+      expect(
+        within(nicknameDialog).getByRole('textbox', { name: 'Nickname' })
+      ).toHaveValue(nickname)
+      await userEvent.click(
+        within(nicknameDialog).getByRole('button', { name: 'Continue' })
+      )
+      const preferences = await screen.findByRole('dialog', {
+        name: 'Your ranking preferences',
+      })
+      expect(api.put).not.toHaveBeenCalled()
+      await userEvent.click(
+        within(preferences).getByRole('button', { name: 'Not now' })
+      )
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+      )
+      expect(api.put).toHaveBeenCalledExactlyOnceWith(
+        '/api/user/self/ranking',
+        {
+          participating: false,
+          spending_participating: false,
+          model_details_public: false,
+        }
+      )
+    }
+  )
+
+  test('a failed first nickname stays editable and cancel returns to the rules without joining', async () => {
+    mockRankings({ ...initialPreference })
+    vi.mocked(api.put).mockResolvedValue({
+      data: { success: false, message: 'Nickname not saved' },
+    })
+    renderRankings()
+    const rules = await screen.findByRole('dialog', { name: 'Ranking rules' })
+    await userEvent.click(
+      within(rules).getByRole('button', { name: 'Join rankings' })
+    )
+    const nickname = await screen.findByRole('dialog', {
+      name: 'Ranking nickname',
+    })
+    await userEvent.type(
+      within(nickname).getByRole('textbox', { name: 'Nickname' }),
+      '星河旅人'
+    )
+    await userEvent.click(
+      within(nickname).getByRole('button', { name: 'Continue' })
+    )
+    expect(await within(nickname).findByRole('alert')).toHaveTextContent(
+      'Nickname not saved'
+    )
+    expect(
+      within(nickname).getByRole('textbox', { name: 'Nickname' })
+    ).toHaveValue('星河旅人')
+    expect(
+      screen.queryByRole('dialog', { name: 'Your ranking preferences' })
+    ).not.toBeInTheDocument()
+    await userEvent.click(
+      within(nickname).getByRole('button', { name: 'Cancel' })
+    )
+    expect(
+      await screen.findByRole('dialog', { name: 'Ranking rules' })
+    ).toBeVisible()
+    expect(api.put).toHaveBeenCalledExactlyOnceWith(
+      '/api/user/self/ranking',
+      { nickname: '星河旅人' },
+      { skipErrorHandler: true }
+    )
   })
 
   test.each([
     {
       board: 'Token leaderboard',
-      details: 'Show token totals and model breakdown',
       otherBoard: 'Spending leaderboard',
-      otherDetails: 'Show spending totals and model breakdown',
       metric: 'tokens' as const,
       choice: {
         participating: true,
         spending_participating: false,
-        token_usage_public: true,
-        spending_usage_public: false,
+        model_details_public: true,
       },
     },
     {
       board: 'Spending leaderboard',
-      details: 'Show spending totals and model breakdown',
       otherBoard: 'Token leaderboard',
-      otherDetails: 'Show token totals and model breakdown',
       metric: 'spending' as const,
       choice: {
         participating: false,
         spending_participating: true,
-        token_usage_public: false,
-        spending_usage_public: true,
+        model_details_public: true,
       },
     },
   ])(
-    '$board saves participation and disclosure independently',
+    '$board joins independently while one model setting survives leaving both boards',
     async (scenario) => {
-      let preference = { ...initialPreference }
-      vi.mocked(api.get).mockImplementation(async (url) => ({
-        data: {
-          success: true,
-          data: url.includes('/self/')
-            ? preference
-            : { users: [], participants: 0, total_tokens: 0, total_quota: 0 },
-        },
-      }))
-      vi.mocked(api.put).mockImplementation(async (_url, body) => {
-        preference = { ...(body as ParticipationChoice), prompted: true }
-        return { data: { success: true, data: preference } }
-      })
+      mockRankings({ ...initialPreference, prompted: true })
       renderRankings(scenario.metric)
-      const dialog = await screen.findByRole('dialog')
-      const controls = within(dialog)
       await userEvent.click(
-        controls.getByRole('switch', { name: scenario.board })
+        await screen.findByRole('button', { name: 'Ranking preferences' })
+      )
+      const controls = within(
+        screen.getByRole('dialog', { name: 'Your ranking preferences' })
+      )
+      expect(controls.getAllByRole('switch')).toHaveLength(3)
+      for (const control of controls.getAllByRole('switch')) {
+        expect(control).not.toBeChecked()
+      }
+      await userEvent.click(
+        controls.getByRole('switch', { name: /^Share model breakdown/ })
       )
       await userEvent.click(
-        controls.getByRole('switch', { name: scenario.details })
+        controls.getByRole('switch', { name: new RegExp(`^${scenario.board}`) })
       )
       expect(
-        controls.getByRole('switch', { name: scenario.otherBoard })
+        controls.getByRole('switch', {
+          name: new RegExp(`^${scenario.otherBoard}`),
+        })
       ).not.toBeChecked()
-      expect(
-        controls.getByRole('switch', { name: scenario.otherDetails })
-      ).toHaveAttribute('aria-disabled', 'true')
       await userEvent.click(
         controls.getByRole('button', { name: 'Save preferences' })
       )
       await waitFor(() =>
         expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
       )
-      expect(api.put).toHaveBeenCalledWith(
+      expect(api.put).toHaveBeenLastCalledWith(
         '/api/user/self/ranking',
         scenario.choice
       )
       expect(screen.getByText('Participating')).toBeVisible()
-
       await userEvent.click(
         screen.getByRole('button', { name: 'Ranking preferences' })
       )
-      const saved = within(screen.getByRole('dialog'))
-      expect(saved.getByRole('switch', { name: scenario.board })).toBeChecked()
+      const saved = within(
+        screen.getByRole('dialog', { name: 'Your ranking preferences' })
+      )
       expect(
-        saved.getByRole('switch', { name: scenario.details })
+        saved.getByRole('switch', { name: new RegExp(`^${scenario.board}`) })
       ).toBeChecked()
       expect(
-        saved.getByRole('switch', { name: scenario.otherBoard })
+        saved.getByRole('switch', {
+          name: new RegExp(`^${scenario.otherBoard}`),
+        })
       ).not.toBeChecked()
       expect(
-        saved.getByRole('switch', { name: scenario.otherDetails })
-      ).not.toBeChecked()
-      await userEvent.click(saved.getByRole('switch', { name: scenario.board }))
+        saved.getByRole('switch', { name: /^Share model breakdown/ })
+      ).toBeChecked()
+      await userEvent.click(
+        saved.getByRole('switch', { name: new RegExp(`^${scenario.board}`) })
+      )
       expect(
-        saved.getByRole('switch', { name: scenario.details })
-      ).not.toBeChecked()
+        saved.getByRole('switch', { name: /^Share model breakdown/ })
+      ).toBeChecked()
       expect(
-        saved.getByRole('switch', { name: scenario.details })
-      ).toHaveAttribute('aria-disabled', 'true')
+        saved.getByRole('switch', { name: /^Share model breakdown/ })
+      ).not.toHaveAttribute('aria-disabled', 'true')
+      await userEvent.click(
+        saved.getByRole('button', { name: 'Save preferences' })
+      )
+      await waitFor(() =>
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+      )
+      expect(api.put).toHaveBeenLastCalledWith('/api/user/self/ranking', {
+        participating: false,
+        spending_participating: false,
+        model_details_public: true,
+      })
+      expect(screen.getByText('Viewing only')).toBeVisible()
     }
   )
 
-  test('a failed save retains both board choices and disclosure settings for retry', async () => {
-    vi.mocked(api.get).mockImplementation(async (url) => ({
-      data: {
-        success: true,
-        data: url.includes('/self/')
-          ? { ...initialPreference }
-          : { users: [], participants: 0, total_tokens: 0 },
-      },
-    }))
+  test('a failed initial preference save retains the selected boards and shared disclosure for retry', async () => {
+    mockRankings({ ...initialPreference })
     vi.mocked(api.put).mockResolvedValue({
       data: { success: false, message: 'Preference not saved' },
     })
     const client = renderRankings()
-    const dialog = await screen.findByRole('dialog')
+    const rules = await screen.findByRole('dialog', { name: 'Ranking rules' })
+    await userEvent.click(
+      within(rules).getByRole('button', { name: 'Join rankings' })
+    )
+    const nickname = await screen.findByRole('dialog', {
+      name: 'Ranking nickname',
+    })
+    await userEvent.click(
+      within(nickname).getByRole('button', { name: 'Continue' })
+    )
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Your ranking preferences',
+    })
     const controls = within(dialog)
     await userEvent.click(
-      controls.getByRole('switch', { name: 'Token leaderboard' })
-    )
-    await userEvent.click(
-      controls.getByRole('switch', {
-        name: 'Show token totals and model breakdown',
-      })
-    )
-    await userEvent.click(
-      controls.getByRole('switch', { name: 'Spending leaderboard' })
+      controls.getByRole('switch', { name: /^Spending leaderboard/ })
     )
     await userEvent.click(
       controls.getByRole('button', { name: 'Save preferences' })
@@ -268,27 +396,21 @@ describe('ranking participation', () => {
     )
     expect(screen.getByRole('dialog')).toBeVisible()
     expect(
-      controls.getByRole('switch', { name: 'Token leaderboard' })
+      controls.getByRole('switch', { name: /^Token leaderboard/ })
     ).toBeChecked()
     expect(
-      controls.getByRole('switch', { name: 'Spending leaderboard' })
-    ).toBeChecked()
-    expect(
-      controls.getByRole('switch', {
-        name: 'Show token totals and model breakdown',
-      })
-    ).toBeChecked()
-    expect(
-      controls.getByRole('switch', {
-        name: 'Show spending totals and model breakdown',
-      })
+      controls.getByRole('switch', { name: /^Spending leaderboard/ })
     ).not.toBeChecked()
+    expect(
+      controls.getByRole('switch', {
+        name: /^Share model breakdown/,
+      })
+    ).toBeChecked()
     expect(screen.queryByText('Participating')).not.toBeInTheDocument()
     const choice: ParticipationChoice = {
       participating: true,
-      spending_participating: true,
-      token_usage_public: true,
-      spending_usage_public: false,
+      spending_participating: false,
+      model_details_public: true,
     }
     expect(api.put).toHaveBeenLastCalledWith('/api/user/self/ranking', choice)
     vi.mocked(api.put).mockResolvedValue({
@@ -424,7 +546,7 @@ describe('ranking participation', () => {
   })
 
   test.each(['tokens', 'spending'] as const)(
-    '%s board hides sensitive totals and models when disclosure is off',
+    '%s board shares its total while hiding model details when disclosure is off',
     async (metric) => {
       vi.mocked(api.get).mockImplementation(async (url) => ({
         data: {
@@ -438,7 +560,7 @@ describe('ranking participation', () => {
                     name: 'a***e',
                     usage_public: false,
                     total_tokens: 987654,
-                    total_quota: 1234567,
+                    total_quota: 500000,
                     models: [
                       {
                         model_name: 'private-model',
@@ -458,7 +580,10 @@ describe('ranking participation', () => {
       renderRankings(metric)
       const table = await screen.findByRole('table')
       expect(within(table).getByText('a***e')).toBeVisible()
-      expect(within(table).getByText('Usage hidden')).toBeVisible()
+      expect(
+        within(table).getByText(metric === 'tokens' ? '987,654' : '$1')
+      ).toBeVisible()
+      expect(within(table).queryByText('Usage hidden')).not.toBeInTheDocument()
       expect(within(table).getAllByText('Model usage hidden')).toHaveLength(2)
       expect(
         screen.queryByRole('group', { name: 'Model breakdown' })
@@ -467,7 +592,7 @@ describe('ranking participation', () => {
         screen.queryByRole('button', { name: /private-model/, hidden: true })
       ).not.toBeInTheDocument()
       expect(document.body).not.toHaveTextContent(
-        /private-model|987,?654|765,?432|1,?234,?567|654,?321|\$2\.47/
+        /private-model|765,?432|654,?321/
       )
       expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
     }

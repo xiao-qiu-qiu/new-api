@@ -132,6 +132,7 @@ func TestUserRankingsConsentAndTotals(t *testing.T) {
 			assert.False(t, preference.SpendingParticipating)
 			assert.False(t, preference.TokenUsagePublic)
 			assert.False(t, preference.SpendingUsagePublic)
+			assert.False(t, preference.ModelDetailsPublic)
 			require.NoError(t, model.SetUserRankingPreference(ctx, 91001, true))
 			require.NoError(t, model.SetUserRankingPreference(ctx, 91003, true))
 			result, err := GetUserRankings(ctx, "week", 91001)
@@ -139,18 +140,13 @@ func TestUserRankingsConsentAndTotals(t *testing.T) {
 			require.Len(t, result.Users, 1)
 			assert.Equal(t, "a***e", result.Users[0].Name)
 			assert.Equal(t, "a***e", result.Users[0].MaskedUsername)
-			assert.Nil(t, result.Users[0].TotalTokens)
+			assert.Equal(t, int64(260), *result.Users[0].TotalTokens)
 			assert.Nil(t, result.Users[0].TotalQuota)
 			assert.Empty(t, result.Users[0].Models)
 			assert.False(t, result.Users[0].UsagePublic)
-			assert.Zero(t, result.TotalTokens)
-			assert.True(t, result.Users[0].IsSelf)
-			// Explicit disclosure is a new choice, independent of legacy opt-in.
-			public := true
-			require.NoError(t, model.UpdateUserRankingPreference(ctx, 91001, model.UserRankingPreferenceUpdate{TokenUsagePublic: &public}))
-			result, err = GetUserRankings(ctx, "week", 91001)
-			require.NoError(t, err)
 			assert.Equal(t, int64(260), result.TotalTokens)
+			assert.True(t, result.Users[0].IsSelf)
+			public, private := true, false
 			t.Run("nickname_is_public_and_cooldown_survives_consent_changes", func(t *testing.T) {
 				at := time.Unix(now, 0)
 				require.NoError(t, model.SetRankingNickname(ctx, 91001, "  星河旅人  ", at))
@@ -184,98 +180,188 @@ func TestUserRankingsConsentAndTotals(t *testing.T) {
 				assert.False(t, pref.Participating)
 				assert.True(t, pref.Prompted)
 			})
-			// Joining on another instance must also work without invalidation.
+			t.Run("nickname_before_confirmation_keeps_prompt_unanswered", func(t *testing.T) {
+				pref, err := model.GetUserRankingPreference(ctx, 91004)
+				require.NoError(t, err)
+				assert.False(t, pref.Prompted)
+				require.NoError(t, model.SetRankingNickname(ctx, 91004, "初次昵称", time.Unix(now, 0)))
+				pref, err = model.GetUserRankingPreference(ctx, 91004)
+				require.NoError(t, err)
+				assert.False(t, pref.Prompted)
+				assert.False(t, pref.Participating)
+				assert.False(t, pref.SpendingParticipating)
+				assert.False(t, pref.ModelDetailsPublic)
+				require.NoError(t, model.UpdateUserRankingPreference(ctx, 91004, model.UserRankingPreferenceUpdate{
+					Participating: &public, SpendingParticipating: &public, ModelDetailsPublic: &public,
+				}))
+				pref, err = model.GetUserRankingPreference(ctx, 91004)
+				require.NoError(t, err)
+				assert.True(t, pref.Prompted)
+				assert.True(t, pref.Participating)
+				assert.True(t, pref.SpendingParticipating)
+				assert.True(t, pref.ModelDetailsPublic)
+				assert.Equal(t, "初次昵称", pref.Nickname)
+				assert.Equal(t, now, pref.NicknameChangedAt)
+			})
+			t.Run("shared_disclosure_and_legacy_partial_updates", func(t *testing.T) {
+				for _, test := range []struct {
+					name                        string
+					storedToken, storedSpending bool
+					update                      model.UserRankingPreferenceUpdate
+					wantToken, wantSpending     bool
+				}{
+					{"omitted preserves public", true, true, model.UserRankingPreferenceUpdate{Participating: &public}, true, true},
+					{"omitted preserves unequal legacy values", true, false, model.UserRankingPreferenceUpdate{Participating: &public}, true, false},
+					{"shared false", true, true, model.UserRankingPreferenceUpdate{ModelDetailsPublic: &private}, false, false},
+					{"shared true", false, false, model.UserRankingPreferenceUpdate{ModelDetailsPublic: &public}, true, true},
+					{"single legacy token true cannot reveal", false, true, model.UserRankingPreferenceUpdate{TokenUsagePublic: &public}, false, false},
+					{"single legacy spending true cannot reveal", true, false, model.UserRankingPreferenceUpdate{SpendingUsagePublic: &public}, false, false},
+					{"single legacy false hides both", true, true, model.UserRankingPreferenceUpdate{TokenUsagePublic: &private}, false, false},
+					{"both legacy true reveal", false, false, model.UserRankingPreferenceUpdate{TokenUsagePublic: &public, SpendingUsagePublic: &public}, true, true},
+					{"mixed legacy values hide both", true, true, model.UserRankingPreferenceUpdate{TokenUsagePublic: &public, SpendingUsagePublic: &private}, false, false},
+					{"shared false takes precedence", true, true, model.UserRankingPreferenceUpdate{ModelDetailsPublic: &private, TokenUsagePublic: &public, SpendingUsagePublic: &public}, false, false},
+					{"shared true takes precedence", false, false, model.UserRankingPreferenceUpdate{ModelDetailsPublic: &public, TokenUsagePublic: &private, SpendingUsagePublic: &private}, true, true},
+				} {
+					t.Run(test.name, func(t *testing.T) {
+						require.NoError(t, db.Model(&model.UserRankingPreference{}).Where("user_id = ?", 91001).
+							Updates(map[string]any{"token_usage_public": test.storedToken, "spending_usage_public": test.storedSpending}).Error)
+						require.NoError(t, model.UpdateUserRankingPreference(ctx, 91001, test.update))
+						pref, err := model.GetUserRankingPreference(ctx, 91001)
+						require.NoError(t, err)
+						assert.Equal(t, test.wantToken, pref.TokenUsagePublic)
+						assert.Equal(t, test.wantSpending, pref.SpendingUsagePublic)
+						assert.Equal(t, test.wantToken && test.wantSpending, pref.ModelDetailsPublic)
+						assert.True(t, pref.Participating)
+						assert.False(t, pref.SpendingParticipating)
+					})
+				}
+			})
+			t.Run("independent_boards_and_live_disclosure", func(t *testing.T) {
+				// Never invalidate the warm totals cache: every response must use
+				// live participation and shared model-detail choices.
+				for _, test := range []struct {
+					name                      string
+					tokens, spending, details bool
+				}{
+					{"token totals only", true, false, false},
+					{"token details", true, false, true},
+					{"spending totals only", false, true, false},
+					{"spending details", false, true, true},
+					{"both totals only", true, true, false},
+					{"both details", true, true, true},
+				} {
+					t.Run(test.name, func(t *testing.T) {
+						require.NoError(t, model.UpdateUserRankingPreference(ctx, 91001, model.UserRankingPreferenceUpdate{
+							Participating: &test.tokens, SpendingParticipating: &test.spending, ModelDetailsPublic: &test.details,
+						}))
+						for _, metric := range []string{model.RankingMetricTokens, model.RankingMetricSpending} {
+							result, err := GetUserRankings(ctx, "week", 91001, metric)
+							require.NoError(t, err)
+							joined := test.tokens
+							if metric == model.RankingMetricSpending {
+								joined = test.spending
+							}
+							if !joined {
+								assert.Empty(t, result.Users)
+								assert.Nil(t, result.Self)
+								assert.Zero(t, result.TotalTokens)
+								assert.Zero(t, result.TotalQuota)
+								continue
+							}
+							require.Len(t, result.Users, 1)
+							require.NotNil(t, result.Self)
+							row := result.Self
+							assert.Equal(t, 1, row.Rank)
+							assert.Equal(t, test.details, row.UsagePublic)
+							encoded, err := common.Marshal(row)
+							require.NoError(t, err)
+							var payload map[string]any
+							require.NoError(t, common.Unmarshal(encoded, &payload))
+							if test.tokens {
+								require.NotNil(t, row.TotalTokens)
+								assert.Equal(t, int64(260), *row.TotalTokens)
+								assert.Equal(t, int64(260), result.TotalTokens)
+							} else {
+								assert.NotContains(t, payload, "total_tokens")
+								assert.Zero(t, result.TotalTokens)
+							}
+							if test.spending {
+								require.NotNil(t, row.TotalQuota)
+								assert.Equal(t, int64(1000), *row.TotalQuota)
+								assert.Equal(t, int64(1000), result.TotalQuota)
+							} else {
+								assert.NotContains(t, payload, "total_quota")
+								assert.Zero(t, result.TotalQuota)
+							}
+							if !test.details {
+								assert.NotContains(t, payload, "models")
+								continue
+							}
+							require.Len(t, row.Models, 2)
+							assert.Equal(t, "beta", row.Models[0].ModelName)
+							assert.Empty(t, row.Models[1].ModelName)
+							var tokenSum, quotaSum int64
+							for _, detail := range row.Models {
+								if test.tokens {
+									require.NotNil(t, detail.TotalTokens)
+									tokenSum += *detail.TotalTokens
+								} else {
+									assert.Nil(t, detail.TotalTokens)
+								}
+								if test.spending {
+									require.NotNil(t, detail.TotalQuota)
+									quotaSum += *detail.TotalQuota
+								} else {
+									assert.Nil(t, detail.TotalQuota)
+								}
+							}
+							assert.Equal(t, result.TotalTokens, tokenSum)
+							assert.Equal(t, result.TotalQuota, quotaSum)
+						}
+					})
+				}
+			})
+			// Joining on another instance fills the missing user's cached totals.
 			require.NoError(t, model.SetUserRankingPreference(ctx, 91002, true))
-			require.NoError(t, model.UpdateUserRankingPreference(ctx, 91002, model.UserRankingPreferenceUpdate{TokenUsagePublic: &public}))
 			result, err = GetUserRankings(ctx, "week", 91002)
 			require.NoError(t, err)
 			require.Len(t, result.Users, 2)
 			assert.Equal(t, int64(9260), result.TotalTokens)
-			assert.True(t, result.Users[0].IsSelf)
-			t.Run("independent_boards_and_live_disclosure", func(t *testing.T) {
-				private := false
-				// Spending disclosure alone grants neither participation nor access
-				// to prices on the token board. The warm cache is not invalidated.
-				require.NoError(t, model.UpdateUserRankingPreference(ctx, 91001, model.UserRankingPreferenceUpdate{SpendingUsagePublic: &public}))
-				tokens, err := GetUserRankings(ctx, "week", 91001)
-				require.NoError(t, err)
-				require.NotNil(t, tokens.Self)
-				assert.Nil(t, tokens.Self.TotalQuota)
-				require.Len(t, tokens.Self.Models, 2)
-				assert.Equal(t, "beta", tokens.Self.Models[0].ModelName)
-				assert.Equal(t, int64(140), *tokens.Self.Models[0].TotalTokens)
-				assert.Nil(t, tokens.Self.Models[0].TotalQuota)
-				assert.Empty(t, tokens.Self.Models[1].ModelName)
-				assert.Equal(t, int64(120), *tokens.Self.Models[1].TotalTokens)
-				assert.Equal(t, *tokens.Self.TotalTokens, *tokens.Self.Models[0].TotalTokens+*tokens.Self.Models[1].TotalTokens)
-				spending, err := GetUserRankings(ctx, "week", 91001, "spending")
-				require.NoError(t, err)
-				assert.Empty(t, spending.Users)
-				require.NoError(t, model.UpdateUserRankingPreference(ctx, 91001, model.UserRankingPreferenceUpdate{SpendingParticipating: &public}))
-				require.NoError(t, model.SetUserRankingPreference(ctx, 91002, true, true, false, false))
-				spending, err = GetUserRankings(ctx, "week", 91002, "spending")
-				require.NoError(t, err)
-				require.Len(t, spending.Users, 2)
-				assert.Equal(t, "spending", spending.Metric)
-				assert.Equal(t, 1, spending.Users[0].Rank)
-				assert.Equal(t, int64(1000), *spending.Users[0].TotalQuota)
-				assert.Equal(t, int64(260), *spending.Users[0].TotalTokens)
-				require.Len(t, spending.Users[0].Models, 2)
-				assert.Equal(t, "beta", spending.Users[0].Models[0].ModelName)
-				assert.Equal(t, int64(900), *spending.Users[0].Models[0].TotalQuota)
-				assert.Empty(t, spending.Users[0].Models[1].ModelName)
-				assert.Equal(t, int64(100), *spending.Users[0].Models[1].TotalQuota)
-				assert.Equal(t, *spending.Users[0].TotalQuota, *spending.Users[0].Models[0].TotalQuota+*spending.Users[0].Models[1].TotalQuota)
-				assert.Equal(t, int64(1000), spending.TotalQuota)
-				assert.Equal(t, int64(260), spending.TotalTokens)
-				require.NotNil(t, spending.Self)
-				assert.Equal(t, 2, spending.Self.Rank)
-				assert.False(t, spending.Self.UsagePublic)
-				// Check actual serialized output, including self, for hidden fields.
-				encoded, err := common.Marshal(spending.Self)
-				require.NoError(t, err)
-				var payload map[string]any
-				require.NoError(t, common.Unmarshal(encoded, &payload))
-				assert.NotContains(t, payload, "total_tokens")
-				assert.NotContains(t, payload, "total_quota")
-				assert.NotContains(t, payload, "models")
-				// Revoking token disclosure hides token counts even inside a
-				// public spending tooltip, and hides all token-board details.
-				require.NoError(t, model.UpdateUserRankingPreference(ctx, 91001, model.UserRankingPreferenceUpdate{TokenUsagePublic: &private}))
-				spending, err = GetUserRankings(ctx, "week", 91001, "spending")
-				require.NoError(t, err)
-				require.NotNil(t, spending.Self)
-				assert.Nil(t, spending.Self.TotalTokens)
-				assert.NotNil(t, spending.Self.TotalQuota)
-				assert.Nil(t, spending.Self.Models[0].TotalTokens)
-				assert.Zero(t, spending.TotalTokens)
-				tokens, err = GetUserRankings(ctx, "week", 91001)
-				require.NoError(t, err)
-				assert.False(t, tokens.Self.UsagePublic)
-				assert.Nil(t, tokens.Self.TotalQuota)
-				assert.Empty(t, tokens.Self.Models)
-				assert.Zero(t, tokens.TotalTokens)
-				assert.Zero(t, tokens.TotalQuota)
-				// A partial update keeps the other three choices; legacy setters
-				// also keep disclosure preferences while participation gates them.
-				pref, err := model.GetUserRankingPreference(ctx, 91001)
-				require.NoError(t, err)
-				assert.True(t, pref.Participating)
-				assert.True(t, pref.SpendingParticipating)
-				assert.True(t, pref.SpendingUsagePublic)
-				require.NoError(t, model.UpdateUserRankingPreference(ctx, 91001, model.UserRankingPreferenceUpdate{TokenUsagePublic: &public}))
-				require.NoError(t, model.UpdateUserRankingPreference(ctx, 91001, model.UserRankingPreferenceUpdate{SpendingParticipating: &private}))
-				tokens, err = GetUserRankings(ctx, "week", 91001)
-				require.NoError(t, err)
-				assert.Nil(t, tokens.Self.TotalQuota)
-				assert.Nil(t, tokens.Self.Models[0].TotalQuota)
-				spending, err = GetUserRankings(ctx, "week", 91001, "spending")
-				require.NoError(t, err)
-				require.Len(t, spending.Users, 1)
-				assert.Nil(t, spending.Self)
-				assert.Zero(t, spending.TotalQuota)
-				assert.Zero(t, spending.TotalTokens)
-			})
+			require.NotNil(t, result.Self)
+			assert.Equal(t, 1, result.Self.Rank)
+			assert.Nil(t, result.Self.TotalQuota)
+			assert.Empty(t, result.Self.Models)
+			require.NoError(t, model.UpdateUserRankingPreference(ctx, 91002, model.UserRankingPreferenceUpdate{SpendingParticipating: &public}))
+			spending, err := GetUserRankings(ctx, "week", 91002, model.RankingMetricSpending)
+			require.NoError(t, err)
+			require.NotNil(t, spending.Self)
+			assert.Equal(t, 2, spending.Self.Rank)
+			assert.Equal(t, int64(1500), spending.TotalQuota)
+			assert.Equal(t, int64(500), *spending.Self.TotalQuota)
+			assert.False(t, spending.Self.UsagePublic)
+			assert.Empty(t, spending.Self.Models)
+			// Withdrawing from one board removes its dimension even inside a
+			// public model tooltip on the other board and in the viewer's row.
+			require.NoError(t, model.UpdateUserRankingPreference(ctx, 91001, model.UserRankingPreferenceUpdate{Participating: &private}))
+			spending, err = GetUserRankings(ctx, "week", 91001, model.RankingMetricSpending)
+			require.NoError(t, err)
+			require.NotNil(t, spending.Self)
+			assert.True(t, spending.Self.UsagePublic)
+			assert.Nil(t, spending.Self.TotalTokens)
+			assert.Equal(t, int64(1000), *spending.Self.TotalQuota)
+			require.Len(t, spending.Self.Models, 2)
+			for _, detail := range spending.Self.Models {
+				assert.Nil(t, detail.TotalTokens)
+				assert.NotNil(t, detail.TotalQuota)
+			}
+			result, err = GetUserRankings(ctx, "week", 91001)
+			require.NoError(t, err)
+			assert.Nil(t, result.Self)
+			require.Len(t, result.Users, 1)
+			assert.Equal(t, int64(9000), result.TotalTokens)
+			assert.Equal(t, int64(500), result.TotalQuota)
+			require.NoError(t, model.UpdateUserRankingPreference(ctx, 91001, model.UserRankingPreferenceUpdate{SpendingParticipating: &private}))
+			require.NoError(t, model.UpdateUserRankingPreference(ctx, 91002, model.UserRankingPreferenceUpdate{SpendingParticipating: &private}))
 			require.NoError(t, model.SetUserRankingPreference(ctx, 91002, false))
 			require.NoError(t, model.SetUserRankingPreference(ctx, 91001, false))
 			// Do not invalidate the cache: another instance must respect opt-out.

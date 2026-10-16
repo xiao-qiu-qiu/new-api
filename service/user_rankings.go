@@ -18,7 +18,7 @@ type RankedUser struct {
 	MaskedUsername string            `json:"masked_username"`
 	TotalTokens    *int64            `json:"total_tokens,omitempty"`
 	TotalQuota     *int64            `json:"total_quota,omitempty"`
-	UsagePublic    bool              `json:"usage_public"`
+	UsagePublic    bool              `json:"usage_public"` // Model details only; totals follow board participation.
 	Models         []RankedUserModel `json:"models,omitempty"`
 	IsSelf         bool              `json:"is_self"`
 }
@@ -33,7 +33,7 @@ type UserRankingsResponse struct {
 	Metric       string       `json:"metric"`
 	Users        []RankedUser `json:"users"`
 	Participants int          `json:"participants"`
-	// Snapshot totals include only quantities disclosed in this board.
+	// Snapshot totals include only quantities for boards each user has joined.
 	TotalTokens int64       `json:"total_tokens"`
 	TotalQuota  int64       `json:"total_quota"`
 	PeriodStart int64       `json:"period_start"`
@@ -170,23 +170,20 @@ func GetUserRankings(ctx context.Context, period string, viewerID int, metrics .
 			name = maskedUsername
 		}
 		row := RankedUser{Rank: len(result.Users) + 1, Name: name, Nickname: participant.Nickname, MaskedUsername: maskedUsername, IsSelf: participant.ID == viewerID}
-		publicTokens := participant.Participating && participant.TokenUsagePublic
-		publicSpending := participant.SpendingParticipating && participant.SpendingUsagePublic
-		row.UsagePublic = publicTokens
-		if metric == model.RankingMetricSpending {
-			row.UsagePublic = publicSpending
+		publicTokens := participant.Participating
+		publicSpending := participant.SpendingParticipating
+		if publicTokens {
+			row.TotalTokens = &usage.TotalTokens
+			result.TotalTokens += usage.TotalTokens
 		}
-		// The current board's disclosure gates the entire detail payload. A
-		// second quantity additionally requires the other board's live consent.
+		if publicSpending {
+			row.TotalQuota = &usage.TotalQuota
+			result.TotalQuota += usage.TotalQuota
+		}
+		// One shared choice gates model names and per-model quantities on both
+		// boards. Each quantity still requires its own board's live consent.
+		row.UsagePublic = participant.TokenUsagePublic && participant.SpendingUsagePublic
 		if row.UsagePublic {
-			if publicTokens {
-				row.TotalTokens = &usage.TotalTokens
-				result.TotalTokens += usage.TotalTokens
-			}
-			if publicSpending {
-				row.TotalQuota = &usage.TotalQuota
-				result.TotalQuota += usage.TotalQuota
-			}
 			for name, item := range usage.Models {
 				if (metric == model.RankingMetricTokens && item.TotalTokens <= 0) ||
 					(metric == model.RankingMetricSpending && item.TotalQuota <= 0) {

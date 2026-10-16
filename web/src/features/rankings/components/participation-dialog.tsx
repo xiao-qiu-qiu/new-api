@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Coins, Eye, EyeOff, ShieldCheck, Zap } from 'lucide-react'
+import { Coins, Eye, EyeOff, Zap } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -36,15 +36,17 @@ export function ParticipationDialog(props: {
   preference: Participation
   pending: boolean
   error: Error | null
+  initialSetup?: boolean
   onClose: () => void
   onSave: (choice: ParticipationChoice) => void
 }) {
   const { t } = useTranslation()
   const [choice, setChoice] = useState<ParticipationChoice>({
-    participating: props.preference.participating,
-    spending_participating: props.preference.spending_participating ?? false,
-    token_usage_public: props.preference.token_usage_public ?? false,
-    spending_usage_public: props.preference.spending_usage_public ?? false,
+    participating: props.initialSetup || props.preference.participating,
+    spending_participating:
+      props.initialSetup || props.preference.spending_participating || false,
+    model_details_public:
+      props.initialSetup || props.preference.model_details_public || false,
   })
   const boards = [
     {
@@ -52,16 +54,14 @@ export function ParticipationDialog(props: {
       label: t('Token leaderboard'),
       icon: Zap,
       joined: 'participating',
-      visible: 'token_usage_public',
-      help: t('Show token totals and model breakdown'),
+      help: t('Joining shares your token total'),
     },
     {
       id: 'spending',
       label: t('Spending leaderboard'),
       icon: Coins,
       joined: 'spending_participating',
-      visible: 'spending_usage_public',
-      help: t('Show spending totals and model breakdown'),
+      help: t('Joining shares your spending total'),
     },
   ] as const
 
@@ -94,7 +94,6 @@ export function ParticipationDialog(props: {
       <div className='space-y-3'>
         {boards.map((board) => {
           const joined = choice[board.joined]
-          const visible = choice[board.visible]
           return (
             <div
               key={board.id}
@@ -111,49 +110,26 @@ export function ParticipationDialog(props: {
                   <span className='bg-muted text-foreground flex size-9 items-center justify-center rounded-lg'>
                     <board.icon className='size-4' aria-hidden />
                   </span>
-                  <span className='font-semibold'>{board.label}</span>
+                  <span className='space-y-1.5'>
+                    <span className='block font-semibold'>{board.label}</span>
+                    <span
+                      id={`join-${board.id}-help`}
+                      className='text-muted-foreground block text-xs leading-relaxed font-normal'
+                    >
+                      {board.help}
+                    </span>
+                  </span>
                 </Label>
                 <Switch
                   id={`join-${board.id}`}
+                  aria-label={board.label}
+                  aria-describedby={`join-${board.id}-help`}
                   checked={joined}
                   disabled={props.pending}
                   onCheckedChange={(checked) =>
                     setChoice((previous) => ({
                       ...previous,
                       [board.joined]: checked,
-                      [board.visible]: checked && previous[board.visible],
-                    }))
-                  }
-                />
-              </div>
-              <div
-                className={cn(
-                  'flex items-center justify-between gap-4 border-t px-4 py-3',
-                  !joined && 'opacity-50'
-                )}
-              >
-                <Label
-                  htmlFor={`usage-${board.id}`}
-                  className='flex cursor-pointer items-center gap-2 text-sm font-normal'
-                >
-                  {visible && joined ? (
-                    <Eye className='text-primary size-4' aria-hidden />
-                  ) : (
-                    <EyeOff
-                      className='text-muted-foreground size-4'
-                      aria-hidden
-                    />
-                  )}
-                  {board.help}
-                </Label>
-                <Switch
-                  id={`usage-${board.id}`}
-                  checked={visible && joined}
-                  disabled={!joined || props.pending}
-                  onCheckedChange={(checked) =>
-                    setChoice((previous) => ({
-                      ...previous,
-                      [board.visible]: checked,
                     }))
                   }
                 />
@@ -161,12 +137,44 @@ export function ParticipationDialog(props: {
             </div>
           )
         })}
-        <p className='text-muted-foreground flex items-start gap-2 px-1 pt-1 text-xs leading-relaxed'>
-          <ShieldCheck className='mt-0.5 size-4 shrink-0' aria-hidden />
-          {t(
-            'With details hidden, only your name and rank are public. Spending is shared only when you join the spending board and enable its details.'
-          )}
-        </p>
+        <div className='flex items-center justify-between gap-4 rounded-xl border p-4'>
+          <Label
+            htmlFor='model-details'
+            className='flex cursor-pointer items-center gap-3'
+          >
+            <span className='bg-muted text-muted-foreground flex size-9 shrink-0 items-center justify-center rounded-lg'>
+              {choice.model_details_public ? (
+                <Eye className='size-4' aria-hidden />
+              ) : (
+                <EyeOff className='size-4' aria-hidden />
+              )}
+            </span>
+            <span className='space-y-1.5'>
+              <span className='block font-semibold'>
+                {t('Share model breakdown')}
+              </span>
+              <span
+                id='model-details-help'
+                className='text-muted-foreground block text-xs leading-relaxed font-normal'
+              >
+                {t('Applies to both leaderboards')}
+              </span>
+            </span>
+          </Label>
+          <Switch
+            id='model-details'
+            aria-label={t('Share model breakdown')}
+            aria-describedby='model-details-help'
+            checked={choice.model_details_public}
+            disabled={props.pending}
+            onCheckedChange={(checked) =>
+              setChoice((previous) => ({
+                ...previous,
+                model_details_public: checked,
+              }))
+            }
+          />
+        </div>
         {props.error && (
           <p role='alert' className='text-destructive text-sm'>
             {getServerErrorMessage(

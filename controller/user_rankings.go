@@ -48,7 +48,7 @@ func UpdateRankingParticipation(c *gin.Context) {
 		Nickname *string `json:"nickname"`
 	}
 	bindErr := common.DecodeJson(c.Request.Body, &request)
-	hasChoice := request.Participating != nil || request.SpendingParticipating != nil || request.TokenUsagePublic != nil || request.SpendingUsagePublic != nil
+	hasChoice := request.Participating != nil || request.SpendingParticipating != nil || request.ModelDetailsPublic != nil || request.TokenUsagePublic != nil || request.SpendingUsagePublic != nil
 	if bindErr != nil || hasChoice == (request.Nickname != nil) {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Provide either a participation choice or a nickname"})
 		return

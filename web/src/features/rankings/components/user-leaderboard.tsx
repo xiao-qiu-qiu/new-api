@@ -52,6 +52,7 @@ import {
 import { toIntlLocale } from '@/i18n/languages'
 import { formatBillingCurrencyFromUSD } from '@/lib/currency'
 import { formatCompactNumber, formatNumber } from '@/lib/format'
+import { getServerErrorMessage } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
@@ -82,20 +83,43 @@ export function UserLeaderboard(props: {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [rulesOpen, setRulesOpen] = useState(false)
   const [nicknameOpen, setNicknameOpen] = useState(false)
+  const [onboardingStep, setOnboardingStep] = useState<
+    'nickname' | 'preferences' | null
+  >(null)
   const optedIn =
     (spending
       ? preference.data?.spending_participating
       : preference.data?.participating) ?? false
-  const publicUsage = spending
-    ? preference.data?.spending_usage_public
-    : preference.data?.token_usage_public
+  const publicModels = preference.data?.model_details_public
   const needsChoice = Boolean(
     user && preference.data && !preference.data.prompted
   )
+  const initialRulesOpen = needsChoice && onboardingStep === null
+  const initialNicknameOpen = needsChoice && onboardingStep === 'nickname'
+  const initialPreferencesOpen = needsChoice && onboardingStep === 'preferences'
   const snapshot = rankings.data
+  let sharingStatus = t('Join a leaderboard to share your totals.')
+  if (optedIn) {
+    sharingStatus = publicModels
+      ? t('Your totals and model details are public.')
+      : t('Your totals are public. Model details are hidden.')
+  }
 
   const saveChoice = (choice: ParticipationChoice) => {
-    participation.mutate(choice, { onSuccess: () => setSettingsOpen(false) })
+    participation.mutate(choice, {
+      onSuccess: () => {
+        setSettingsOpen(false)
+        setOnboardingStep(null)
+      },
+    })
+  }
+
+  const declineParticipation = () => {
+    saveChoice({
+      participating: false,
+      spending_participating: false,
+      model_details_public: false,
+    })
   }
 
   return (
@@ -117,11 +141,7 @@ export function UserLeaderboard(props: {
               )}
             </div>
             <p className='text-muted-foreground mt-1 text-xs sm:text-sm'>
-              {optedIn && publicUsage
-                ? t('Your usage details are public on this board.')
-                : t(
-                    'Your model usage stays private until you choose to share it.'
-                  )}
+              {sharingStatus}
             </p>
           </div>
         </div>
@@ -202,7 +222,7 @@ export function UserLeaderboard(props: {
                   <Sparkles className='size-4' />
                 )
               }
-              label={spending ? t('Public spending') : t('Public tokens')}
+              label={spending ? t('Spending') : t('Total tokens')}
               value={
                 spending
                   ? formatBillingCurrencyFromUSD(
@@ -211,9 +231,6 @@ export function UserLeaderboard(props: {
                     )
                   : formatCompactNumber(snapshot.total_tokens, locale)
               }
-              help={t(
-                'Includes only users who share usage details on this board. Hidden usage still counts toward ranking.'
-              )}
             />
             <RankingMetricCard
               icon={<Trophy className='size-4' />}
@@ -340,31 +357,54 @@ export function UserLeaderboard(props: {
           </div>
         </>
       )}
-      {(settingsOpen || needsChoice) && preference.data && (
+      {(settingsOpen || initialPreferencesOpen) && preference.data && (
         <ParticipationDialog
           preference={preference.data}
+          initialSetup={initialPreferencesOpen}
           pending={participation.isPending}
           error={participation.error}
           onClose={() => {
             if (needsChoice) {
-              saveChoice({
-                participating: false,
-                spending_participating: false,
-                token_usage_public: false,
-                spending_usage_public: false,
-              })
+              declineParticipation()
             } else setSettingsOpen(false)
           }}
           onSave={saveChoice}
         />
       )}
       <Dialog
-        open={rulesOpen}
-        onOpenChange={setRulesOpen}
+        open={rulesOpen || initialRulesOpen}
+        onOpenChange={(open) => {
+          if (initialRulesOpen) {
+            if (!open && !participation.isPending) declineParticipation()
+          } else setRulesOpen(open)
+        }}
         title={t('Ranking rules')}
         contentClassName='sm:max-w-lg'
+        footerClassName={initialRulesOpen ? 'flex-row justify-end' : undefined}
         footer={
-          <Button onClick={() => setRulesOpen(false)}>{t('Got it')}</Button>
+          initialRulesOpen ? (
+            <>
+              <Button
+                variant='outline'
+                disabled={participation.isPending}
+                onClick={declineParticipation}
+              >
+                {t('Not joining for now')}
+              </Button>
+              <Button
+                disabled={participation.isPending}
+                onClick={() => {
+                  participation.reset()
+                  nickname.reset()
+                  setOnboardingStep('nickname')
+                }}
+              >
+                {t('Join rankings')}
+              </Button>
+            </>
+          ) : (
+            <Button onClick={() => setRulesOpen(false)}>{t('Got it')}</Button>
+          )
         }
       >
         <ul className='text-muted-foreground list-disc space-y-3 pl-5 text-sm leading-relaxed'>
@@ -385,7 +425,7 @@ export function UserLeaderboard(props: {
           </li>
           <li>
             {t(
-              'With details hidden, only your name and rank are public. Spending is shared only when you join the spending board and enable its details.'
+              'Joining a leaderboard makes its total public. One setting controls model details on both boards.'
             )}
           </li>
           <li>
@@ -399,16 +439,40 @@ export function UserLeaderboard(props: {
             )}
           </li>
         </ul>
+        {initialRulesOpen && participation.error && (
+          <p role='alert' className='text-destructive mt-3 text-sm'>
+            {getServerErrorMessage(
+              participation.error,
+              t('Could not save ranking preference')
+            )}
+          </p>
+        )}
       </Dialog>
-      {nicknameOpen && preference.data && (
+      {(nicknameOpen || initialNicknameOpen) && preference.data && (
         <RankingNicknameDialog
           preference={preference.data}
+          initialSetup={initialNicknameOpen}
           pending={nickname.isPending}
           error={nickname.error}
-          onClose={() => setNicknameOpen(false)}
-          onSave={(value) =>
-            nickname.mutate(value, { onSuccess: () => setNicknameOpen(false) })
-          }
+          onClose={() => {
+            if (initialNicknameOpen) setOnboardingStep(null)
+            else setNicknameOpen(false)
+          }}
+          onSave={(value) => {
+            if (
+              initialNicknameOpen &&
+              value === (preference.data?.nickname ?? '')
+            ) {
+              setOnboardingStep('preferences')
+              return
+            }
+            nickname.mutate(value, {
+              onSuccess: () => {
+                if (initialNicknameOpen) setOnboardingStep('preferences')
+                else setNicknameOpen(false)
+              },
+            })
+          }}
         />
       )}
     </section>
@@ -419,29 +483,14 @@ function RankingMetricCard(props: {
   icon: React.ReactNode
   label: string
   value: string
-  help?: string
 }) {
-  const label = (
-    <span className='flex min-w-0 items-center gap-1.5'>
-      {props.icon}
-      <span className='truncate'>{props.label}</span>
-    </span>
-  )
   return (
     <div className='bg-card rounded-2xl border px-3 py-3 sm:px-5'>
       <div className='text-muted-foreground text-[11px] sm:text-xs'>
-        {props.help ? (
-          <Tooltip>
-            <TooltipTrigger
-              render={<span tabIndex={0} className='cursor-help' />}
-            >
-              {label}
-            </TooltipTrigger>
-            <TooltipContent>{props.help}</TooltipContent>
-          </Tooltip>
-        ) : (
-          label
-        )}
+        <span className='flex min-w-0 items-center gap-1.5'>
+          {props.icon}
+          <span className='truncate'>{props.label}</span>
+        </span>
       </div>
       <div className='mt-2 truncate text-xl font-semibold tracking-tight tabular-nums sm:text-2xl'>
         {props.value}
