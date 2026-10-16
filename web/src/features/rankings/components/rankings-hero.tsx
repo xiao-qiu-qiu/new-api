@@ -36,9 +36,7 @@ export function RankingsHero(props: RankingsHeroProps) {
         </h1>
         <p className='text-muted-foreground/80 max-w-2xl text-sm'>
           {props.board === 'users'
-            ? t(
-                'Explore community token usage. Participation is always your choice.'
-              )
+            ? t('Explore community usage and spending. Choose what you share.')
             : t(
                 'Discover the most-used models and rising vendors on the platform, updated from live usage data.'
               )}

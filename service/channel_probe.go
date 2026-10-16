@@ -26,20 +26,21 @@ type ChannelProbeView struct {
 // would publish channel IDs and future internal configuration by accident.
 type PublicChannelProbeView struct {
 	model.ChannelProbeUsageStats
-	PublicName   string                       `json:"public_name"`
-	Scope        string                       `json:"scope"`
-	WindowStart  int64                        `json:"window_start"`
-	WindowEnd    int64                        `json:"window_end"`
-	SampleCount  int64                        `json:"sample_count"`
-	SuccessCount int64                        `json:"success_count"`
-	Timeline     []ChannelProbeTimelineBucket `json:"timeline"`
-	Model        string                       `json:"model"`
-	GreenMS      int64                        `json:"green_ms"`
-	YellowMS     int64                        `json:"yellow_ms"`
-	Latest       *model.ChannelProbeResult    `json:"latest"`
-	History      []model.ChannelProbeResult   `json:"history"`
-	Status       string                       `json:"status"`
-	Stale        bool                         `json:"stale"`
+	PublicName          string                       `json:"public_name"`
+	Scope               string                       `json:"scope"`
+	WindowStart         int64                        `json:"window_start"`
+	WindowEnd           int64                        `json:"window_end"`
+	SampleCount         int64                        `json:"sample_count"`
+	SuccessCount        int64                        `json:"success_count"`
+	Timeline            []ChannelProbeTimelineBucket `json:"timeline"`
+	Model               string                       `json:"model"`
+	GreenMS             int64                        `json:"green_ms"`
+	YellowMS            int64                        `json:"yellow_ms"`
+	Latest              *model.ChannelProbeResult    `json:"latest"`
+	History             []model.ChannelProbeResult   `json:"history"`
+	RecentAverageTTFTMS *float64                     `json:"recent_average_ttft_ms"`
+	Status              string                       `json:"status"`
+	Stale               bool                         `json:"stale"`
 }
 
 func ValidateChannelProbe(probe *model.ChannelProbe) error {
@@ -158,6 +159,7 @@ func BuildPublicChannelProbeModel(probe model.ChannelProbe, name string, now tim
 	if err != nil {
 		return view, err
 	}
+	view.RecentAverageTTFTMS = recentChannelProbeAverageTTFT(history)
 	view.History = make([]model.ChannelProbeResult, 0, len(history))
 	for _, r := range history {
 		r.Status = ChannelProbeResultStatus(r, probe)
@@ -225,11 +227,30 @@ func BuildPublicChannelProbeModel(probe model.ChannelProbe, name string, now tim
 	return view, nil
 }
 
+// History is ordered newest first by completion time, then ID. Missing TTFT
+// still occupies a request slot; older samples never fill those slots.
+func recentChannelProbeAverageTTFT(history []model.ChannelProbeResult) *float64 {
+	var sum float64
+	var count int
+	for _, result := range history[:min(5, len(history))] {
+		if result.TTFTMS == nil || *result.TTFTMS < 0 {
+			continue
+		}
+		sum += float64(*result.TTFTMS)
+		count++
+	}
+	if count == 0 {
+		return nil
+	}
+	average := sum / float64(count)
+	return &average
+}
+
 func PublicChannelProbe(view ChannelProbeView) PublicChannelProbeView {
 	if len(view.ModelStatuses) > 0 {
 		return view.ModelStatuses[0]
 	}
-	return PublicChannelProbeView{PublicName: view.PublicName, Scope: view.Scope, Model: view.Model, GreenMS: view.GreenMS, YellowMS: view.YellowMS, Latest: view.Latest, History: view.History, Status: view.Status, Stale: view.Stale}
+	return PublicChannelProbeView{PublicName: view.PublicName, Scope: view.Scope, Model: view.Model, GreenMS: view.GreenMS, YellowMS: view.YellowMS, Latest: view.Latest, History: view.History, RecentAverageTTFTMS: recentChannelProbeAverageTTFT(view.History), Status: view.Status, Stale: view.Stale}
 }
 
 var channelProbeRuntime = struct {

@@ -25,6 +25,7 @@ import { useAuthStore } from '@/stores/auth-store'
 
 const rankingsSearchSchema = z.object({
   board: z.enum(['users', 'models']).optional().catch(undefined),
+  metric: z.enum(['tokens', 'spending']).optional().catch(undefined),
 })
 
 export const Route = createFileRoute('/rankings/')({

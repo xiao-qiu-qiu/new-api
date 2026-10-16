@@ -48,6 +48,7 @@ export type PublicChannelStatus = {
   status: ProbeStatus
   stale: boolean
   latest: ProbeResult | null
+  recent_average_ttft_ms?: number | null
   history: ProbeResult[]
   window_start: number
   window_end: number

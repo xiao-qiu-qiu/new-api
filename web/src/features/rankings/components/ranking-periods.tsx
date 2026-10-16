@@ -24,11 +24,12 @@ import type { RankingPeriod } from '../types'
 
 export function RankingPeriods(props: {
   period: RankingPeriod
+  daily?: boolean
   onChange: (period: RankingPeriod) => void
 }) {
   const { t } = useTranslation()
   const periods = [
-    { id: 'today', label: t('24 hours') },
+    { id: 'today', label: props.daily ? t('Today') : t('24 hours') },
     { id: 'week', label: t('Week') },
     { id: 'month', label: t('Month') },
     { id: 'year', label: t('Year') },

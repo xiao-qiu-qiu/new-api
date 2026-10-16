@@ -20,20 +20,16 @@ import { Medal, Trophy } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import { Badge } from '@/components/ui/badge'
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from '@/components/ui/tooltip'
-import { toIntlLocale } from '@/i18n/languages'
-import { formatCompactNumber, formatNumber } from '@/lib/format'
 
-import type { RankedUser } from '../hooks/use-user-rankings'
+import type { RankedUser, RankingMetric } from '../hooks/use-user-rankings'
 import { RankingUserName } from './ranking-user-name'
+import { RankingValue } from './ranking-value'
 
-export function UserPodium(props: { users: RankedUser[] }) {
-  const { t, i18n } = useTranslation()
-  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
+export function UserPodium(props: {
+  users: RankedUser[]
+  metric?: RankingMetric
+}) {
+  const { t } = useTranslation()
   const winners = props.users.filter(
     (entry) => entry.rank >= 1 && entry.rank <= 3
   )
@@ -73,24 +69,13 @@ export function UserPodium(props: { users: RankedUser[] }) {
                 </Badge>
               )}
             </div>
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <span
-                    className='cursor-help text-base font-semibold tabular-nums sm:text-xl'
-                    tabIndex={0}
-                  />
-                }
-              >
-                {formatCompactNumber(entry.total_tokens, locale)}
-                <span className='text-muted-foreground ml-1 text-[10px] font-normal sm:text-xs'>
-                  Tokens
-                </span>
-              </TooltipTrigger>
-              <TooltipContent>
-                {t('Total tokens')}: {formatNumber(entry.total_tokens, locale)}
-              </TooltipContent>
-            </Tooltip>
+            <div className='text-base font-semibold tabular-nums sm:text-xl'>
+              <RankingValue
+                entry={entry}
+                metric={props.metric ?? 'tokens'}
+                compact
+              />
+            </div>
           </div>
           <div className='user-podium-step'>
             <span className='text-[10px] font-medium tracking-wide sm:text-xs'>

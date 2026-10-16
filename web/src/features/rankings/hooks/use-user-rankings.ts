@@ -16,7 +16,12 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import {
+  useMutation,
+  useQueries,
+  useQuery,
+  useQueryClient,
+} from '@tanstack/react-query'
 
 import { api } from '@/lib/api'
 import { requireServerSuccess } from '@/lib/server-error-message'
@@ -24,12 +29,21 @@ import { useAuthStore } from '@/stores/auth-store'
 
 import type { RankingPeriod } from '../types'
 
+export type RankingMetric = 'tokens' | 'spending'
+export type RankedModel = {
+  model_name: string
+  total_tokens?: number
+  total_quota?: number
+}
 export type RankedUser = {
   rank: number
   name: string
   nickname?: string
   masked_username?: string
-  total_tokens: number
+  total_tokens?: number
+  total_quota?: number
+  usage_public: boolean
+  models?: RankedModel[]
   is_self: boolean
 }
 
@@ -37,6 +51,7 @@ export type UserRankingSnapshot = {
   users: RankedUser[]
   participants: number
   total_tokens: number
+  total_quota: number
   period_start: number
   period_end: number
   updated_at: number
@@ -45,29 +60,46 @@ export type UserRankingSnapshot = {
 
 export type Participation = {
   participating: boolean
+  spending_participating: boolean
+  token_usage_public: boolean
+  spending_usage_public: boolean
   prompted: boolean
   nickname?: string
   nickname_changed_at?: number
   next_nickname_change_at?: number
 }
 type Response<T> = { success: boolean; message?: string; data: T }
+export type ParticipationChoice = Pick<
+  Participation,
+  | 'participating'
+  | 'spending_participating'
+  | 'token_usage_public'
+  | 'spending_usage_public'
+>
 
-export function useUserRankings(period: RankingPeriod) {
+export function useUserRankings(
+  period: RankingPeriod,
+  metric: RankingMetric = 'tokens'
+) {
   const user = useAuthStore((state) => state.auth.user)
   const queryClient = useQueryClient()
   const preferenceKey = ['ranking-participation', user?.id]
-  const rankings = useQuery({
-    queryKey: ['user-rankings', period, user?.id],
-    queryFn: async () => {
-      const response = await api.get<Response<UserRankingSnapshot>>(
-        '/api/rankings/users',
-        { params: { period } }
-      )
-      return requireServerSuccess(response.data).data
-    },
-    staleTime: 0,
-    refetchInterval: 30_000,
+  // Warm both boards together so switching never resets the page to a loading skeleton.
+  const boards = useQueries({
+    queries: (['tokens', 'spending'] as const).map((boardMetric) => ({
+      queryKey: ['user-rankings', period, user?.id, boardMetric],
+      queryFn: async () => {
+        const response = await api.get<Response<UserRankingSnapshot>>(
+          '/api/rankings/users',
+          { params: { period, metric: boardMetric } }
+        )
+        return requireServerSuccess(response.data).data
+      },
+      staleTime: 0,
+      refetchInterval: 30_000,
+    })),
   })
+  const rankings = boards[metric === 'tokens' ? 0 : 1]
   const preference = useQuery({
     queryKey: preferenceKey,
     queryFn: async () => {
@@ -80,36 +112,17 @@ export function useUserRankings(period: RankingPeriod) {
     staleTime: 0,
   })
   const participation = useMutation({
-    mutationFn: async (participating: boolean) => {
+    mutationFn: async (choice: ParticipationChoice) => {
       const response = await api.put<Response<Participation>>(
         '/api/user/self/ranking',
-        { participating }
+        choice
       )
       return requireServerSuccess(response.data).data
     },
-    onSuccess: (data) => {
+    onSuccess: async (data) => {
       queryClient.setQueryData(preferenceKey, data)
-      // Remove the current user's row immediately while a fresh ranking is fetched.
-      if (!data.participating) {
-        queryClient.setQueriesData<UserRankingSnapshot>(
-          { queryKey: ['user-rankings'] },
-          (previous) => {
-            if (!previous) return previous
-            return {
-              ...previous,
-              self: undefined,
-              users: previous.users
-                .filter((entry) => !entry.is_self)
-                .map((entry, index) => ({ ...entry, rank: index + 1 })),
-              total_tokens: Math.max(
-                0,
-                previous.total_tokens - (previous.self?.total_tokens ?? 0)
-              ),
-            }
-          }
-        )
-      }
-      void queryClient.invalidateQueries({ queryKey: ['user-rankings'] })
+      // Drop every personalized snapshot: a privacy change affects cross-board tooltips too.
+      await queryClient.resetQueries({ queryKey: ['user-rankings'] })
     },
   })
   const nickname = useMutation({

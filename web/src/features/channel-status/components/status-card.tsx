@@ -47,7 +47,7 @@ export function StatusCard(props: { probe: PublicChannelStatus }) {
   const probe = props.probe
   const status = getProbeStatus(probe)
   const availability = getWindowAvailability(probe)
-  const ttft = probe.latest?.ttft_ms
+  const ttft = probe.recent_average_ttft_ms
   const cacheRate = probe.average_cache_hit_rate
   const estimatedPrice = probe.estimated_price_per_100m_tokens
   const showCacheRate =
@@ -137,16 +137,12 @@ export function StatusCard(props: { probe: PublicChannelStatus }) {
                   )}
                 </dd>
                 <dt className='text-muted-foreground mt-1.5 text-[11px]'>
-                  {t('First-token latency')}
+                  {t('Average first-token latency')}
                 </dt>
               </TooltipTrigger>
               <TooltipContent>
                 {t(
-                  'Green below {{green}} s; yellow below {{yellow}} s; red above. Timeouts are dark red.',
-                  {
-                    green: probe.green_ms / 1000,
-                    yellow: probe.yellow_ms / 1000,
-                  }
+                  'Average first-token latency of the latest 5 requests. Requests without a measured latency are excluded.'
                 )}
               </TooltipContent>
             </Tooltip>

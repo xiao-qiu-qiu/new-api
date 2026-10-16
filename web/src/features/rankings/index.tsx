@@ -17,6 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useNavigate, useSearch } from '@tanstack/react-router'
+import { useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { PublicLayout } from '@/components/layout'
@@ -30,6 +31,7 @@ import {
   PulseSection,
   RankingsHero,
 } from './components'
+import { RankingMetricSwitch } from './components/ranking-metric-switch'
 import { RankingPeriods } from './components/ranking-periods'
 import { UserLeaderboard } from './components/user-leaderboard'
 import { useRankingPeriods } from './hooks/use-ranking-periods'
@@ -41,6 +43,9 @@ export function Rankings() {
   const navigate = useNavigate()
 
   const board = search.board ?? 'users'
+  const metric = search.metric ?? 'tokens'
+  const leaderboard = useRef<HTMLDivElement>(null)
+  const [boardHeight, setBoardHeight] = useState(0)
   const period = useRankingPeriods((state) => state[board])
   const setPeriod = useRankingPeriods((state) => state.setPeriod)
   const rankingsQuery = useRankings(period, board === 'models')
@@ -48,7 +53,11 @@ export function Rankings() {
 
   let content
   if (board === 'users') {
-    content = <UserLeaderboard period={period} />
+    content = (
+      <div ref={leaderboard} style={{ minHeight: boardHeight }}>
+        <UserLeaderboard period={period} metric={metric} />
+      </div>
+    )
   } else if (rankingsQuery.isLoading) {
     content = <RankingsLoading />
   } else if (!snapshot) {
@@ -126,10 +135,32 @@ export function Rankings() {
             </TabsList>
           </Tabs>
 
-          <RankingPeriods
-            period={period}
-            onChange={(next) => setPeriod(board, next)}
-          />
+          <div className='flex flex-wrap items-center justify-between gap-3'>
+            <RankingPeriods
+              period={period}
+              daily={board === 'users' && metric === 'spending'}
+              onChange={(next) => {
+                setBoardHeight(0)
+                setPeriod(board, next)
+              }}
+            />
+            {board === 'users' && (
+              <RankingMetricSwitch
+                metric={metric}
+                onChange={(next) => {
+                  setBoardHeight(
+                    leaderboard.current?.getBoundingClientRect().height ?? 0
+                  )
+                  void navigate({
+                    to: '/rankings',
+                    search: { board, metric: next },
+                    resetScroll: false,
+                    replace: true,
+                  })
+                }}
+              />
+            )}
+          </div>
 
           {content}
         </PageTransition>

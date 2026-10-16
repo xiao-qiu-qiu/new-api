@@ -41,6 +41,7 @@ const probe: PublicChannelStatus = {
   status: 'green',
   stale: false,
   latest: sample,
+  recent_average_ttft_ms: 250,
   history: [sample],
   window_start: 1699996400,
   window_end: 1700000000,
@@ -67,6 +68,25 @@ const probe: PublicChannelStatus = {
 }
 
 describe('model status measurements', () => {
+  it('shows the recent request average instead of the latest request latency', () => {
+    render(
+      <StatusCard
+        probe={{
+          ...probe,
+          recent_average_ttft_ms: 3000,
+          latest: { ...sample, ttft_ms: 15000 },
+        }}
+      />
+    )
+    expect(screen.getByText('3')).toBeVisible()
+    expect(screen.queryByText('15')).not.toBeInTheDocument()
+    expect(screen.getByText('Average first-token latency')).toBeVisible()
+  })
+  it('shows no average when recent requests have no measured latency', () => {
+    render(<StatusCard probe={{ ...probe, recent_average_ttft_ms: null }} />)
+    expect(screen.getByText('—')).toBeVisible()
+    expect(screen.queryByText('0.25')).not.toBeInTheDocument()
+  })
   it('hides cache rate and price when the API has insufficient samples', () => {
     render(
       <StatusCard
@@ -122,6 +142,7 @@ describe('model status measurements', () => {
         probe={{
           ...probe,
           latest: null,
+          recent_average_ttft_ms: null,
           history: [],
           sample_count: 0,
           success_count: 0,

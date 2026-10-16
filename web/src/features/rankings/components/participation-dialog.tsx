@@ -16,79 +16,166 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { Coins, Eye, EyeOff, ShieldCheck, Zap } from 'lucide-react'
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
-import { ConfirmDialog } from '@/components/confirm-dialog'
+import { Dialog } from '@/components/dialog'
+import { Button } from '@/components/ui/button'
+import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
+import { getServerErrorMessage } from '@/lib/server-error-message'
+import { cn } from '@/lib/utils'
+
+import type {
+  Participation,
+  ParticipationChoice,
+} from '../hooks/use-user-rankings'
 
 export function ParticipationDialog(props: {
-  open: boolean
-  leaving: boolean
-  participating: boolean
+  preference: Participation
   pending: boolean
+  error: Error | null
   onClose: () => void
-  onConfirm: () => void
+  onSave: (choice: ParticipationChoice) => void
 }) {
   const { t } = useTranslation()
-  let confirmText = t('Join rankings')
-  if (props.leaving) confirmText = t('Leave rankings')
-  else if (props.participating) confirmText = t('Got it')
+  const [choice, setChoice] = useState<ParticipationChoice>({
+    participating: props.preference.participating,
+    spending_participating: props.preference.spending_participating ?? false,
+    token_usage_public: props.preference.token_usage_public ?? false,
+    spending_usage_public: props.preference.spending_usage_public ?? false,
+  })
+  const boards = [
+    {
+      id: 'tokens',
+      label: t('Token leaderboard'),
+      icon: Zap,
+      joined: 'participating',
+      visible: 'token_usage_public',
+      help: t('Show token totals and model breakdown'),
+    },
+    {
+      id: 'spending',
+      label: t('Spending leaderboard'),
+      icon: Coins,
+      joined: 'spending_participating',
+      visible: 'spending_usage_public',
+      help: t('Show spending totals and model breakdown'),
+    },
+  ] as const
 
   return (
-    <ConfirmDialog
-      open={props.open}
+    <Dialog
+      open
       onOpenChange={(open) => {
         if (!open && !props.pending) props.onClose()
       }}
-      title={
-        props.leaving
-          ? t('Leave the usage rankings?')
-          : t('Participate in usage rankings?')
+      title={t('Your ranking preferences')}
+      description={t(
+        'Choose your boards and what you share. You can change these settings at any time.'
+      )}
+      contentClassName='sm:max-w-lg'
+      footer={
+        <>
+          <Button
+            variant='outline'
+            disabled={props.pending}
+            onClick={props.onClose}
+          >
+            {props.preference.prompted ? t('Cancel') : t('Not now')}
+          </Button>
+          <Button disabled={props.pending} onClick={() => props.onSave(choice)}>
+            {props.pending ? t('Saving...') : t('Save preferences')}
+          </Button>
+        </>
       }
-      confirmText={confirmText}
-      cancelBtnText={
-        props.leaving || props.participating ? t('Cancel') : t('Not now')
-      }
-      destructive={props.leaving}
-      isLoading={props.pending}
-      handleConfirm={props.onConfirm}
-      className='sm:max-w-lg'
-      desc={
-        props.leaving ? (
-          t(
-            'Your entry will be removed immediately. You can join again at any time.'
-          )
-        ) : (
-          <div className='space-y-4 leading-relaxed'>
-            <p>
-              {t(
-                'After joining, your usage will appear on the public leaderboard. Here is how it works:'
+    >
+      <div className='space-y-3'>
+        {boards.map((board) => {
+          const joined = choice[board.joined]
+          const visible = choice[board.visible]
+          return (
+            <div
+              key={board.id}
+              className={cn(
+                'overflow-hidden rounded-xl border transition-colors',
+                joined && 'border-primary/30 bg-primary/[0.025]'
               )}
-            </p>
-            <ul className='list-disc space-y-3 pl-5'>
-              <li>
-                {t(
-                  'Only token usage is shown. The models you use are never displayed.'
+            >
+              <div className='flex items-center justify-between gap-4 p-4'>
+                <Label
+                  htmlFor={`join-${board.id}`}
+                  className='flex cursor-pointer items-center gap-3'
+                >
+                  <span className='bg-muted text-foreground flex size-9 items-center justify-center rounded-lg'>
+                    <board.icon className='size-4' aria-hidden />
+                  </span>
+                  <span className='font-semibold'>{board.label}</span>
+                </Label>
+                <Switch
+                  id={`join-${board.id}`}
+                  checked={joined}
+                  disabled={props.pending}
+                  onCheckedChange={(checked) =>
+                    setChoice((previous) => ({
+                      ...previous,
+                      [board.joined]: checked,
+                      [board.visible]: checked && previous[board.visible],
+                    }))
+                  }
+                />
+              </div>
+              <div
+                className={cn(
+                  'flex items-center justify-between gap-4 border-t px-4 py-3',
+                  !joined && 'opacity-50'
                 )}
-              </li>
-              <li>
-                {t(
-                  'Rankings use total tokens in the selected period, including input and output. Cache hits count as input.'
-                )}
-              </li>
-              <li>
-                {t(
-                  'Your nickname is shown publicly. Without one, your username is masked. Hover over a nickname to see the masked username.'
-                )}
-              </li>
-              <li>
-                {t(
-                  'You can leave at any time and your entry will be removed immediately.'
-                )}
-              </li>
-            </ul>
-          </div>
-        )
-      }
-    />
+              >
+                <Label
+                  htmlFor={`usage-${board.id}`}
+                  className='flex cursor-pointer items-center gap-2 text-sm font-normal'
+                >
+                  {visible && joined ? (
+                    <Eye className='text-primary size-4' aria-hidden />
+                  ) : (
+                    <EyeOff
+                      className='text-muted-foreground size-4'
+                      aria-hidden
+                    />
+                  )}
+                  {board.help}
+                </Label>
+                <Switch
+                  id={`usage-${board.id}`}
+                  checked={visible && joined}
+                  disabled={!joined || props.pending}
+                  onCheckedChange={(checked) =>
+                    setChoice((previous) => ({
+                      ...previous,
+                      [board.visible]: checked,
+                    }))
+                  }
+                />
+              </div>
+            </div>
+          )
+        })}
+        <p className='text-muted-foreground flex items-start gap-2 px-1 pt-1 text-xs leading-relaxed'>
+          <ShieldCheck className='mt-0.5 size-4 shrink-0' aria-hidden />
+          {t(
+            'With details hidden, only your name and rank are public. Spending is shared only when you join the spending board and enable its details.'
+          )}
+        </p>
+        {props.error && (
+          <p role='alert' className='text-destructive text-sm'>
+            {getServerErrorMessage(
+              props.error,
+              t('Could not save ranking preference')
+            )}
+          </p>
+        )}
+      </div>
+    </Dialog>
   )
 }
