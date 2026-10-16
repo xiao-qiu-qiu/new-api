@@ -9,7 +9,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 )
 
-const DefaultMaxTokenAutoGroups = 5
+const DefaultMaxTokenAutoGroups = 20
 
 var autoGroups = []string{
 	"default",

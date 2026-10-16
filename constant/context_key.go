@@ -40,6 +40,11 @@ const (
 	ContextKeyChannelMultiKeyIndex     ContextKey = "channel_multi_key_index"
 	ContextKeyChannelKey               ContextKey = "channel_key"
 
+	// ContextKeyUpstreamRequestOrigin is the scheme and host of the last upstream
+	// request, which differs from the base URL for absolute Advanced Custom routes
+	// and for adaptors that build official endpoints themselves.
+	ContextKeyUpstreamRequestOrigin ContextKey = "upstream_request_origin"
+
 	ContextKeyAutoGroup           ContextKey = "auto_group"
 	ContextKeyAutoGroupIndex      ContextKey = "auto_group_index"
 	ContextKeyAutoGroupRetryIndex ContextKey = "auto_group_retry_index"
@@ -68,6 +73,7 @@ const (
 	// ContextKeyLanguage stores the user's language preference for i18n
 	ContextKeyLanguage             ContextKey = "language"
 	ContextKeyIsStream             ContextKey = "is_stream"
+	ContextKeyIsPlayground         ContextKey = "is_playground"
 	ContextKeyResponseStreamStatus ContextKey = "response_stream_status"
 
 	// ContextKeyAuditLogged marks that the current request has already recorded

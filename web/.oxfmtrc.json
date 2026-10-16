@@ -19,6 +19,8 @@
     "dist",
     "build",
     "coverage",
+    "canvas/**",
+    "public/canvas-app/**",
     ".tanstack",
     ".eslintrc.cjs",
     "**/routeTree.gen.ts",

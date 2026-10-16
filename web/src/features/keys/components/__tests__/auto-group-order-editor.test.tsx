@@ -32,27 +32,25 @@ await i18n.use(initReactI18next).init({
       translation: {
         '{{count}} / {{max}} groups selected':
           '{{count}} / {{max}} groups selected',
-        'Add Auto group': 'Add Auto group',
-        'Auto group order': 'Auto group order',
+        'Add group': 'Add group',
+        'Selected groups': 'Selected groups',
         'Drag {{group}} to reorder': 'Drag {{group}} to reorder',
-        'Inherit global Auto order': 'Inherit global Auto order',
         'Maximum {{max}} groups selected': 'Maximum {{max}} groups selected',
         'Move {{group}} down': 'Move {{group}} down',
         'Move {{group}} up': 'Move {{group}} up',
-        'No available groups in the global Auto order.':
-          'No available groups in the global Auto order.',
-        'No valid custom Auto groups remain. Add a group or restore global Auto.':
-          'No valid custom Auto groups remain. Add a group or restore global Auto.',
+        'No available global groups.': 'No available global groups.',
+        'No groups selected. Add a group or use global groups.':
+          'No groups selected. Add a group or use global groups.',
         'No custom groups. Saving will inherit the complete global Auto order.':
           'No custom groups. Saving will inherit the complete global Auto order.',
         'Remove {{group}}': 'Remove {{group}}',
-        'Restore global Auto': 'Restore global Auto',
+        'Use global groups': 'Use global groups',
         Ratio: 'Ratio',
         'Search...': 'Search...',
         'No group found.': 'No group found.',
         'Select a group': 'Select a group',
-        'Using the complete global Auto order ({{count}} groups)':
-          'Using the complete global Auto order ({{count}} groups)',
+        'Using global groups ({{count}} groups)':
+          'Using global groups ({{count}} groups)',
       },
     },
   },
@@ -153,7 +151,7 @@ function getCommandItem(label: string): HTMLElement {
   return item
 }
 
-describe('Auto group order editor', () => {
+describe('Selected groups editor', () => {
   test('enforces the limit and exposes accessible reorder controls', () => {
     const { container } = render(<Harness />)
 
@@ -161,7 +159,7 @@ describe('Auto group order editor', () => {
     expect(addButton).toBeDisabled()
     expect(container).toHaveTextContent('2 / 2 groups selected')
     expect(
-      within(container).getByRole('group', { name: 'Auto group order' })
+      within(container).getByRole('group', { name: 'Selected groups' })
     ).toBeInTheDocument()
     expect(findButton(container, 'Drag default to reorder').type).toBe('button')
 
@@ -194,14 +192,12 @@ describe('Auto group order editor', () => {
     expect(addButton).toBeDisabled()
 
     fireEvent.click(
-      within(container).getByRole('button', { name: 'Restore global Auto' })
+      within(container).getByRole('button', { name: 'Use global groups' })
     )
 
     expect(within(container).getByTestId('order')).toBeEmptyDOMElement()
     expect(within(container).getByTestId('mode')).toHaveTextContent('inherit')
-    expect(container).toHaveTextContent(
-      'Using the complete global Auto order (3 groups)'
-    )
+    expect(container).toHaveTextContent('Using global groups (3 groups)')
 
     const inheritedItems = container.querySelectorAll(
       '[data-slot="global-auto-order"] > li'
@@ -218,16 +214,14 @@ describe('Auto group order editor', () => {
   test('shows the complete inherited order with metadata beyond the custom limit', () => {
     const { container } = render(<InheritanceHarness />)
 
-    expect(container).toHaveTextContent(
-      'Using the complete global Auto order (3 groups)'
-    )
+    expect(container).toHaveTextContent('Using global groups (3 groups)')
     expect(container).not.toHaveTextContent('0 / 2 groups selected')
 
     const order = container.querySelector<HTMLOListElement>(
       '[data-slot="global-auto-order"]'
     )
     if (!order) {
-      throw new Error('Expected inherited Auto group order')
+      throw new Error('Expected inherited Selected groups')
     }
     expect(order).toHaveClass('overflow-y-auto', 'flex-wrap')
 
@@ -298,19 +292,15 @@ describe('Auto group order editor', () => {
     expect(container.querySelector('[aria-label^="Remove "]')).toBe(null)
 
     expect(
-      within(container).getByRole('button', { name: 'Restore global Auto' })
+      within(container).getByRole('button', { name: 'Use global groups' })
     ).toBeDisabled()
   })
 
   test('shows an explicit empty state when the global Auto order has no groups', () => {
     const { container } = render(<InheritanceHarness globalOptions={[]} />)
 
-    expect(container).toHaveTextContent(
-      'Using the complete global Auto order (0 groups)'
-    )
-    expect(container).toHaveTextContent(
-      'No available groups in the global Auto order.'
-    )
+    expect(container).toHaveTextContent('Using global groups (0 groups)')
+    expect(container).toHaveTextContent('No available global groups.')
     expect(container.querySelector('[data-slot="global-auto-order"]')).toBe(
       null
     )
@@ -321,14 +311,14 @@ describe('Auto group order editor', () => {
 
     expect(within(container).getByTestId('mode')).toHaveTextContent('custom')
     expect(container).toHaveTextContent(
-      'No valid custom Auto groups remain. Add a group or restore global Auto.'
+      'No groups selected. Add a group or use global groups.'
     )
     expect(container.querySelector('[data-slot="global-auto-order"]')).toBe(
       null
     )
 
     const restoreButton = within(container).getByRole('button', {
-      name: 'Restore global Auto',
+      name: 'Use global groups',
     })
     expect(restoreButton).toBeEnabled()
     fireEvent.click(restoreButton)
@@ -359,7 +349,7 @@ describe('Auto group order editor', () => {
     expect(within(container).getByTestId('order')).toBeEmptyDOMElement()
     expect(within(container).getByTestId('mode')).toHaveTextContent('custom')
     expect(container).toHaveTextContent(
-      'No valid custom Auto groups remain. Add a group or restore global Auto.'
+      'No groups selected. Add a group or use global groups.'
     )
   })
 })

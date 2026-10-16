@@ -32,6 +32,7 @@ interface CacheHitRateUsage {
 export function getCacheHitRateColor(rate: number): string {
   if (rate > 85) return 'text-emerald-700 dark:text-emerald-400'
   if (rate >= 75) return 'text-amber-700 dark:text-amber-400'
+  if (rate < 30) return 'text-red-900 dark:text-red-300'
   return 'text-red-700 dark:text-red-400'
 }
 

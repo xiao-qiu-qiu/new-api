@@ -18,7 +18,13 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useQuery } from '@tanstack/react-query'
-import { ChevronDown, KeyRound, Settings2, WalletCards } from 'lucide-react'
+import {
+  ChevronDown,
+  Info,
+  KeyRound,
+  Settings2,
+  WalletCards,
+} from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { useForm, type SubmitErrorHandler } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
@@ -62,6 +68,12 @@ import {
 } from '@/components/ui/sheet'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
 import { RelatedPolicyLink } from '@/features/system-settings/request-policies/related-policy-link'
 import { useStatus } from '@/hooks/use-status'
 import { getUserModels, getUserGroups } from '@/lib/api'
@@ -194,7 +206,7 @@ export function ApiKeysMutateDrawer({
     Number.isInteger(autoGroupsData?.data?.max_count) &&
     Number(autoGroupsData?.data?.max_count) > 0
       ? Number(autoGroupsData?.data?.max_count)
-      : 5
+      : 20
   const schema = useMemo(
     () => getApiKeyFormSchema(t, maxAutoGroups),
     [t, maxAutoGroups]
@@ -419,35 +431,101 @@ export function ApiKeysMutateDrawer({
                 )}
               />
 
-              <FormField
-                control={form.control}
-                name='group'
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>{t('Group')}</FormLabel>
-                    <FormControl>
-                      <ApiKeyGroupCombobox
-                        options={groups}
-                        value={field.value}
-                        onValueChange={(group) => {
-                          field.onChange(group)
-                          if (group === 'auto') {
-                            form.setValue('cross_group_retry', true, {
+              {backendHasAuto && (
+                <FormField
+                  control={form.control}
+                  name='group'
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>{t('Group mode')}</FormLabel>
+                      <FormControl>
+                        <ToggleGroup
+                          aria-label={t('Group mode')}
+                          value={[
+                            field.value === 'auto' ? 'multiple' : 'single',
+                          ]}
+                          onValueChange={(values) => {
+                            const mode = values[0]
+                            if (!mode) return
+                            if (mode === 'multiple') {
+                              if (field.value === 'auto') return
+                              if (form.getValues('auto_groups').length === 0) {
+                                form.setValue(
+                                  'auto_groups',
+                                  field.value ? [field.value] : [],
+                                  { shouldDirty: true }
+                                )
+                                form.setValue('auto_groups_mode', 'custom', {
+                                  shouldDirty: true,
+                                })
+                              }
+                              field.onChange('auto')
+                              form.setValue('cross_group_retry', true, {
+                                shouldDirty: true,
+                              })
+                            } else {
+                              if (field.value !== 'auto') return
+                              field.onChange(
+                                form
+                                  .getValues('auto_groups')
+                                  .find((group) =>
+                                    availableAutoGroupNames.includes(group)
+                                  ) ??
+                                  availableAutoGroupNames.find(
+                                    (group) => group === 'default'
+                                  ) ??
+                                  availableAutoGroupNames[0] ??
+                                  ''
+                              )
+                              form.setValue('cross_group_retry', false, {
+                                shouldDirty: true,
+                              })
+                            }
+                          }}
+                          variant='outline'
+                          className='w-full'
+                        >
+                          <ToggleGroupItem value='single' className='flex-1'>
+                            {t('Single group')}
+                          </ToggleGroupItem>
+                          <ToggleGroupItem value='multiple' className='flex-1'>
+                            {t('Multiple groups')}
+                          </ToggleGroupItem>
+                        </ToggleGroup>
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              )}
+
+              {selectedGroup !== 'auto' && (
+                <FormField
+                  control={form.control}
+                  name='group'
+                  render={({ field }) => (
+                    <FormItem>
+                      <FormLabel>{t('Group')}</FormLabel>
+                      <FormControl>
+                        <ApiKeyGroupCombobox
+                          options={groups.filter(
+                            (group) => group.value !== 'auto'
+                          )}
+                          value={field.value}
+                          onValueChange={(group) => {
+                            field.onChange(group)
+                            form.setValue('cross_group_retry', false, {
                               shouldDirty: true,
                             })
-                            return
-                          }
-                          form.setValue('cross_group_retry', false, {
-                            shouldDirty: true,
-                          })
-                        }}
-                        placeholder={t('Select a group')}
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
+                          }}
+                          placeholder={t('Select a group')}
+                        />
+                      </FormControl>
+                      <FormMessage />
+                    </FormItem>
+                  )}
+                />
+              )}
 
               {selectedGroup === 'auto' && (
                 <FormField
@@ -455,12 +533,36 @@ export function ApiKeysMutateDrawer({
                   name='auto_groups'
                   render={({ field }) => (
                     <FormItem>
-                      <FormLabel>{t('Auto group order')}</FormLabel>
-                      <FormDescription>
-                        {t(
-                          'Choose and order the groups this API key will try.'
-                        )}
-                      </FormDescription>
+                      <div className='flex items-center gap-1'>
+                        <FormLabel>{t('Selected groups')}</FormLabel>
+                        <Tooltip>
+                          <TooltipTrigger
+                            render={
+                              <Button
+                                type='button'
+                                variant='ghost'
+                                size='icon'
+                                className='size-6'
+                                aria-label={t('Group priority')}
+                              />
+                            }
+                          >
+                            <Info className='size-3.5' aria-hidden='true' />
+                          </TooltipTrigger>
+                          <TooltipContent className='max-w-72 flex-col items-start'>
+                            <p>
+                              {t(
+                                'Choose and order the groups this API key will try.'
+                              )}
+                            </p>
+                            <p>
+                              {t(
+                                'Billed at the rate of the group used for each request.'
+                              )}
+                            </p>
+                          </TooltipContent>
+                        </Tooltip>
+                      </div>
                       <FormControl>
                         <AutoGroupOrderEditor
                           value={field.value}
@@ -749,6 +851,31 @@ export function ApiKeysMutateDrawer({
                             )}
                           </FormDescription>
                           <FormMessage />
+                        </FormItem>
+                      )}
+                    />
+
+                    <FormField
+                      control={form.control}
+                      name='allow_user_quota_query'
+                      render={({ field }) => (
+                        <FormItem className={sideDrawerSwitchItemClassName()}>
+                          <div className='flex flex-col gap-0.5'>
+                            <FormLabel className='text-sm'>
+                              {t('Allow querying user quota')}
+                            </FormLabel>
+                            <FormDescription className='text-xs'>
+                              {t(
+                                "When enabled, this API key can be used to check your account's remaining and used quota."
+                              )}
+                            </FormDescription>
+                          </div>
+                          <FormControl>
+                            <Switch
+                              checked={field.value}
+                              onCheckedChange={field.onChange}
+                            />
+                          </FormControl>
                         </FormItem>
                       )}
                     />

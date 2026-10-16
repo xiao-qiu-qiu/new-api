@@ -310,6 +310,16 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 
 	// router/relay-router.go
 	"POST /pg/chat/completions": accessTokenSessionRule,
+	// router/playground-router.go
+	"POST /pg/images/generations":      accessTokenSessionRule,
+	"POST /pg/images/edits":            accessTokenSessionRule,
+	"POST /pg/videos":                  accessTokenSessionRule,
+	"GET /pg/videos/:task_id":          accessTokenSessionRule,
+	"GET /pg/videos/:task_id/content":  accessTokenSessionRule,
+	"HEAD /pg/videos/:task_id/content": accessTokenSessionRule,
+	"POST /pg/audio/speech":            accessTokenSessionRule,
+	"POST /pg/responses":               accessTokenSessionRule,
+	"GET /pg/responses/:response_id":   accessTokenSessionRule,
 }
 
 var (

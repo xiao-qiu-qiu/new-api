@@ -4,10 +4,10 @@
   "private": false,
   "type": "module",
   "scripts": {
-    "dev": "rsbuild dev",
-    "build": "rsbuild build",
-    "build:check": "tsgo -b && rsbuild build",
-    "typecheck": "tsgo -b",
+    "dev": "bun run canvas:build && rsbuild dev",
+    "build": "bun run canvas:build && rsbuild build",
+    "build:check": "bun run typecheck && bun run build",
+    "typecheck": "tsgo -b && bun run --cwd canvas typecheck",
     "lint": "oxlint -c .oxlintrc.json .",
     "lint:fix": "oxlint -c .oxlintrc.json . --fix",
     "lint:plugins": "cd ../plugins && oxlint -c .oxlintrc.json .",
@@ -21,7 +21,10 @@
     "copyright:check": "node scripts/add-copyright.mjs --check",
     "copyright": "node scripts/add-copyright.mjs",
     "i18n:sync": "node scripts/sync-i18n.mjs",
-    "knip": "knip"
+    "knip": "knip",
+    "canvas:install": "bun install --cwd canvas --frozen-lockfile",
+    "canvas:build": "bun run canvas:install && bun run --cwd canvas build",
+    "canvas:test": "bun test --cwd canvas ./tests && vitest run --config canvas/vitest.config.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",

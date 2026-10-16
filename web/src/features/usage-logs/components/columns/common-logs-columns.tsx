@@ -742,6 +742,8 @@ export function useCommonLogsColumns(
           }
 
           const cacheReadTokens = other?.cache_tokens || 0
+          const showCacheRead =
+            cacheReadTokens > 0 || (log.type === 2 && cacheReadTokens === 0)
           const cacheWrite5m = other?.cache_creation_tokens_5m || 0
           const cacheWrite1h = other?.cache_creation_tokens_1h || 0
           const hasSplitCache = cacheWrite5m > 0 || cacheWrite1h > 0
@@ -755,9 +757,9 @@ export function useCommonLogsColumns(
                 {promptTokens.toLocaleString()} /{' '}
                 {completionTokens.toLocaleString()}
               </span>
-              {(cacheReadTokens > 0 || cacheWriteTokens > 0) && (
+              {(showCacheRead || cacheWriteTokens > 0) && (
                 <div className='flex items-center gap-1 text-[11px]'>
-                  {cacheReadTokens > 0 && (
+                  {showCacheRead && (
                     <span className='text-muted-foreground/60'>
                       {t('Cache')}↓ {cacheReadTokens.toLocaleString()}{' '}
                       <LogCacheHitRate rate={cacheHitRate} />
