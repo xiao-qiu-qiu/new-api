@@ -158,7 +158,9 @@ func appendStreamStatus(relayInfo *relaycommon.RelayInfo, other *model.LogOther)
 	}
 	ss := relayInfo.StreamStatus
 	if lifecycle := relayInfo.StreamLifecycle; lifecycle != nil {
-		lifecycle.ObserveClient()
+		// Keep disconnects observed while delivering the response, including
+		// adaptor final writes. A client closing during settlement must not
+		// turn an already completed response into a failed stream.
 		if err := lifecycle.ClientError(); err != nil {
 			ss.MarkClientGone(err)
 		}

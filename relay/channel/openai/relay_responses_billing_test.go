@@ -540,6 +540,12 @@ func TestResponsesStreamDisconnectTransport(t *testing.T) {
 			}
 			assert.NotContains(t, writer.Body.String(), "response.completed", "no terminal write after downstream loss")
 			assert.Equal(t, writer.writesAtDisconnect, writer.writes, "drain must suppress every later write")
+			other := service.GenerateTextOtherInfo(c, info, 1, 1, 1, 0, 1, 0, 1)
+			streamStatus, ok := other.Snapshot()["stream_status"].(map[string]any)
+			require.True(t, ok)
+			assert.Equal(t, "client_gone", streamStatus["end_reason"])
+			assert.Equal(t, true, streamStatus["client_gone"])
+			assert.Equal(t, tc.mode, streamStatus["disconnect_mode"])
 		})
 	}
 }
@@ -844,5 +850,62 @@ func TestStreamWriterObservesDisconnectAfterScannerCleanup(t *testing.T) {
 				t.Fatal("late downstream loss was not recorded")
 			}
 		})
+	}
+}
+
+func TestResponsesStreamLogDisconnectAfterCompletion(t *testing.T) {
+	for _, mode := range []string{"cancel", "drain"} {
+		for _, tc := range []struct {
+			name                 string
+			writeFail, flushFail bool
+		}{
+			{name: "client closes during settlement"},
+			{name: "adaptor final write fails", writeFail: true},
+			{name: "adaptor final flush fails", flushFail: true},
+		} {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				client, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				writer := &disconnectTestWriter{ResponseRecorder: httptest.NewRecorder(), disconnect: func() {}}
+				c, _ := gin.CreateTestContext(writer)
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil).WithContext(client)
+				info := &relaycommon.RelayInfo{
+					IsStream: true, DisablePing: true, StreamDisconnectMode: mode, StreamDrainTimeoutSeconds: 3,
+					OriginModelName: "gpt-4o", ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-4o"},
+				}
+				body := "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"input_tokens\":100,\"output_tokens\":7,\"total_tokens\":107}}}\n\n"
+				usage, apiErr := OaiResponsesStreamHandler(c, info, &http.Response{Body: io.NopCloser(strings.NewReader(body))})
+				require.Nil(t, apiErr)
+				require.NotNil(t, usage)
+				require.Contains(t, writer.Body.String(), "response.completed")
+				require.Equal(t, relaycommon.StreamEndReasonDone, info.StreamStatus.EndReason)
+				require.NoError(t, info.StreamLifecycle.ClientError())
+
+				if tc.writeFail || tc.flushFail {
+					writer.writeFail, writer.flushFail = tc.writeFail, tc.flushFail
+					_ = helper.StringData(c, "adaptor_final_frame")
+					require.Error(t, info.StreamLifecycle.ClientError())
+					require.NoError(t, client.Err(), "the failure comes from the final write or flush")
+				} else {
+					// The final event was delivered. Settlement runs before log
+					// generation, and the client may close during that interval.
+					cancel()
+				}
+
+				other := service.GenerateTextOtherInfo(c, info, 1, 1, 1, 0, 1, 0, 1)
+				streamStatus, ok := other.Snapshot()["stream_status"].(map[string]any)
+				require.True(t, ok)
+				assert.Equal(t, "completed", streamStatus["response_status"])
+				if tc.writeFail || tc.flushFail {
+					assert.Equal(t, "error", streamStatus["status"])
+					assert.Equal(t, "client_gone", streamStatus["end_reason"])
+					assert.Equal(t, true, streamStatus["client_gone"])
+					assert.Equal(t, mode, streamStatus["disconnect_mode"])
+					assert.Equal(t, "done", streamStatus["drain_end_reason"])
+				} else {
+					assert.Equal(t, map[string]any{"status": "ok", "end_reason": "done", "response_status": "completed"}, streamStatus)
+				}
+			})
+		}
 	}
 }
