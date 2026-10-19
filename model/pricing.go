@@ -25,6 +25,7 @@ type PricingPluginVariant struct {
 }
 
 type Pricing struct {
+	VideoCapabilities      *VideoModelCapabilities              `json:"video_capabilities,omitempty"`
 	BillingPluginVariants  []PricingPluginVariant               `json:"billing_plugin_variants,omitempty"`
 	ModelName              string                               `json:"model_name"`
 	Description            string                               `json:"description,omitempty"`
@@ -190,6 +191,13 @@ func appendPricingEndpoint(endpoints []string, endpoint string) []string {
 }
 
 func updatePricing() {
+	common.OptionMapRWMutex.RLock()
+	videoCapabilitiesJSON := common.OptionMap[VideoModelCapabilitiesOptionKey]
+	common.OptionMapRWMutex.RUnlock()
+	videoCapabilities, err := parseVideoModelCapabilities(videoCapabilitiesJSON)
+	if err != nil {
+		common.SysError(common.LogText("invalid video model capabilities: %v", err))
+	}
 	//modelRatios := common.GetModelRatios()
 	enableAbilities, err := GetAllEnableAbilityWithChannels()
 	if err != nil {
@@ -330,6 +338,9 @@ func updatePricing() {
 			ModelName:              model,
 			EnableGroup:            groups.Items(),
 			SupportedEndpointTypes: modelSupportEndpointTypes[model],
+		}
+		if capabilities, configured := videoCapabilities[model]; configured {
+			pricing.VideoCapabilities = &capabilities
 		}
 
 		// 补充模型元数据（描述、标签、供应商、状态）

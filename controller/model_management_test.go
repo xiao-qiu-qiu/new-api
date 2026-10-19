@@ -109,6 +109,103 @@ func modelManagementRequest(t *testing.T, handler gin.HandlerFunc, method, path 
 	return recorder
 }
 
+func TestVideoModelCapabilitiesDatabaseMatrix(t *testing.T) {
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			if dialect.env != "" && os.Getenv(dialect.env) == "" {
+				t.Skip("set " + dialect.env + " to run this database")
+			}
+			db := modelManagementDB(t, dialect.kind, os.Getenv(dialect.env))
+			t.Cleanup(model.InvalidatePricingCache)
+			const name = "video-capabilities-model"
+			channel := model.Channel{Type: constant.ChannelTypeOpenAI, Key: "fixture", Name: "video-fixture", Status: common.ChannelStatusEnabled, Models: name}
+			require.NoError(t, db.Create(&channel).Error)
+			require.NoError(t, db.Create(&model.Ability{Group: "default", Model: name, ChannelId: channel.Id, Enabled: true}).Error)
+			var response struct {
+				Success bool
+				Data    model.VideoModelCapabilitiesSnapshot
+			}
+			modelManagementRequest(t, GetVideoModelCapabilities, http.MethodGet, "/api/option/video_model_capabilities?model="+name, nil, &response)
+			require.True(t, response.Success)
+			assert.Nil(t, response.Data.VideoCapabilities)
+			initialVersion := response.Data.Version
+			require.NotEmpty(t, initialVersion)
+			capabilities := map[string]any{
+				"resolutions": []string{"720", "1080P"}, "aspect_ratios": []string{"16:9", "2:3", "auto"}, "durations": []int{5, 10},
+				"max_duration_seconds": 10, "max_reference_images": 3, "max_reference_audio": 0, "max_reference_videos": 1,
+			}
+			body := map[string]any{"model_name": name, "video_capabilities": capabilities, "expected_version": initialVersion}
+			recorder := modelManagementRequest(t, UpdateVideoModelCapabilities, http.MethodPatch, "/api/option/video_model_capabilities", body, &response)
+			require.Equal(t, http.StatusOK, recorder.Code)
+			require.True(t, response.Success)
+			require.NotNil(t, response.Data.VideoCapabilities)
+			require.NotNil(t, response.Data.VideoCapabilities.MaxReferenceAudio)
+			assert.Equal(t, []string{"720p", "1080p"}, response.Data.VideoCapabilities.Resolutions)
+			assert.Zero(t, *response.Data.VideoCapabilities.MaxReferenceAudio)
+			assert.NotEqual(t, initialVersion, response.Data.Version)
+			saved := response.Data
+			loaded, err := model.GetVideoModelCapabilities(name)
+			require.NoError(t, err)
+			assert.Equal(t, saved, loaded)
+			var persisted model.Option
+			require.NoError(t, db.Where(&model.Option{Key: model.VideoModelCapabilitiesOptionKey}).Take(&persisted).Error)
+			assert.Contains(t, persisted.Value, `"max_reference_audio":0`)
+			var public *model.VideoModelCapabilities
+			for _, pricing := range model.GetPricing() {
+				if pricing.ModelName == name {
+					public = pricing.VideoCapabilities
+				}
+			}
+			assert.Equal(t, saved.VideoCapabilities, public)
+			recorder = modelManagementRequest(t, UpdateVideoModelCapabilities, http.MethodPatch, "/api/option/video_model_capabilities", body, nil)
+			assert.Equal(t, http.StatusConflict, recorder.Code)
+			for _, invalid := range []map[string]any{
+				{"max_reference_images": -1}, {"max_reference_audio": 101}, {"max_duration_seconds": 3601},
+				{"durations": []int{5, 5}}, {"durations": []int{10}, "max_duration_seconds": 5},
+				{"resolutions": []string{"720p", "720"}}, {"resolutions": []string{"4k"}}, {"resolutions": []string{"16385"}},
+				{"aspect_ratios": []string{"16:0"}},
+			} {
+				recorder = modelManagementRequest(t, UpdateVideoModelCapabilities, http.MethodPatch, "/api/option/video_model_capabilities", map[string]any{"model_name": name, "video_capabilities": invalid, "expected_version": saved.Version}, nil)
+				assert.Equal(t, http.StatusBadRequest, recorder.Code)
+			}
+			recorder = modelManagementRequest(t, UpdateVideoModelCapabilities, http.MethodPatch, "/api/option/video_model_capabilities", map[string]any{"model_name": name, "expected_version": saved.Version}, nil)
+			assert.Equal(t, http.StatusBadRequest, recorder.Code, "an omitted field must not reset stored capabilities")
+
+			// Independent edits merge with the persisted map rather than replacing it.
+			other, err := model.GetVideoModelCapabilities("another-video-model")
+			require.NoError(t, err)
+			_, err = model.UpdateVideoModelCapabilities(other.ModelName, &model.VideoModelCapabilities{Resolutions: []string{"2160p"}}, other.Version)
+			require.NoError(t, err)
+			loaded, err = model.GetVideoModelCapabilities(name)
+			require.NoError(t, err)
+			assert.Equal(t, saved, loaded)
+
+			const callback = "test:video-capabilities-write-failure"
+			require.NoError(t, db.Callback().Update().Before("gorm:update").Register(callback, func(tx *gorm.DB) {
+				if tx.Statement.Table == "options" {
+					tx.AddError(errors.New("injected video capability write failure"))
+				}
+			}))
+			_, err = model.UpdateVideoModelCapabilities(name, nil, saved.Version)
+			require.Error(t, err)
+			require.NoError(t, db.Callback().Update().Remove(callback))
+			loaded, err = model.GetVideoModelCapabilities(name)
+			require.NoError(t, err)
+			assert.Equal(t, saved, loaded, "failed writes leave persisted capabilities unchanged")
+			_, err = model.UpdateVideoModelCapabilities(name, nil, saved.Version)
+			require.NoError(t, err)
+			loaded, err = model.GetVideoModelCapabilities(name)
+			require.NoError(t, err)
+			assert.Nil(t, loaded.VideoCapabilities)
+			assert.Equal(t, initialVersion, loaded.Version)
+			other, err = model.GetVideoModelCapabilities(other.ModelName)
+			require.NoError(t, err)
+			require.NotNil(t, other.VideoCapabilities)
+			assert.Equal(t, []string{"2160p"}, other.VideoCapabilities.Resolutions)
+		})
+	}
+}
+
 func TestModelPricingConversionDatabaseMatrix(t *testing.T) {
 	previousQuota := common.QuotaPerUnit
 	common.QuotaPerUnit = 500000
