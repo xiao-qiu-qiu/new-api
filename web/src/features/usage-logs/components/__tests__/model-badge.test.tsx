@@ -327,7 +327,7 @@ it('keeps reasoning effort and the service tier inline while copying only the mo
   expect(screen.getByLabelText('Reasoning Effort: xhigh')).toHaveTextContent(
     'xhigh'
   )
-  expect(screen.getByLabelText('Service Tier: ultrafast')).toHaveTextContent(
+  expect(screen.getByLabelText('Speed Tier: ultrafast')).toHaveTextContent(
     'ultrafast'
   )
   expect(container.firstElementChild).toHaveClass('h-6', 'whitespace-nowrap')
@@ -335,18 +335,33 @@ it('keeps reasoning effort and the service tier inline while copying only the mo
   expect(copy).toHaveBeenCalledWith('gpt-6-astra')
 })
 
-it('shows a downgraded service tier with the requested tier in its tooltip', () => {
+it('hides the default speed tier while keeping reasoning effort visible', () => {
   render(
     <ModelBadge
       modelName='gpt-6-astra'
+      reasoningEffort='low'
       serviceTier='default'
       requestedServiceTier='priority'
     />
   )
 
-  expect(screen.getByLabelText('Service Tier: default')).toHaveAttribute(
+  expect(screen.queryByText('default')).not.toBeInTheDocument()
+  expect(screen.queryByLabelText(/Speed Tier:/)).not.toBeInTheDocument()
+  expect(screen.getByLabelText('Reasoning Effort: low')).toBeVisible()
+})
+
+it('shows a non-default speed tier with the requested tier in its tooltip', () => {
+  render(
+    <ModelBadge
+      modelName='gpt-6-astra'
+      serviceTier='flex'
+      requestedServiceTier='priority'
+    />
+  )
+
+  expect(screen.getByLabelText('Speed Tier: flex')).toHaveAttribute(
     'title',
-    'Service Tier: default · Requested Service Tier: fast'
+    'Speed Tier: flex · Requested Speed Tier: fast'
   )
 })
 

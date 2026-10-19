@@ -145,7 +145,7 @@ function describeBillingCondition(
   ) {
     const tier = node.right.value === 'priority' ? 'fast' : node.right.value
     return {
-      text: `${t('Service Tier')} ${node.operator} ${tier}`,
+      text: `${t('Speed Tier')} ${node.operator} ${tier}`,
       kind: 'combined',
       timezone: '',
     }

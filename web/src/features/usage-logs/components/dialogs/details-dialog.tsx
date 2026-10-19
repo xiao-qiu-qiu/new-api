@@ -1133,7 +1133,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
 
         {other?.service_tier && (
           <DetailRow
-            label={t('Service Tier')}
+            label={t('Speed Tier')}
             value={
               other.service_tier === 'priority' ? 'fast' : other.service_tier
             }
@@ -1142,7 +1142,7 @@ export function DetailsDialog(props: DetailsDialogProps) {
         {other?.requested_service_tier &&
           other.requested_service_tier !== other.service_tier && (
             <DetailRow
-              label={t('Requested Service Tier')}
+              label={t('Requested Speed Tier')}
               value={
                 other.requested_service_tier === 'priority'
                   ? 'fast'

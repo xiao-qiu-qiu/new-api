@@ -57,10 +57,10 @@ function ModelBadgeContent(props: ModelBadgeProps & { copyable: boolean }) {
   const requestedTier = props.requestedServiceTier?.trim().toLowerCase()
   const requestedServiceTier =
     requestedTier === 'priority' ? 'fast' : requestedTier
-  const tierLabel = `${t('Service Tier')}: ${serviceTier}`
+  const tierLabel = `${t('Speed Tier')}: ${serviceTier}`
   const tierTitle =
     requestedServiceTier && requestedServiceTier !== serviceTier
-      ? `${tierLabel} · ${t('Requested Service Tier')}: ${requestedServiceTier}`
+      ? `${tierLabel} · ${t('Requested Speed Tier')}: ${requestedServiceTier}`
       : tierLabel
 
   return (
@@ -113,12 +113,12 @@ function ModelBadgeContent(props: ModelBadgeProps & { copyable: boolean }) {
             className='border-border/60 h-4 shrink-0 border-l pl-1.5 text-xs [&>svg]:size-3'
           />
         )}
-        {serviceTier && (
+        {serviceTier && serviceTier !== 'default' && (
           <StatusBadge
             type='text'
-            icon={serviceTier === 'default' ? undefined : Zap}
+            icon={Zap}
             label={serviceTier}
-            variant={serviceTier === 'default' ? 'neutral' : 'info'}
+            variant='info'
             copyable={false}
             aria-label={tierLabel}
             title={tierTitle}

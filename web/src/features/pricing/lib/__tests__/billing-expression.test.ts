@@ -160,7 +160,7 @@ describe('local billing expression evaluation', () => {
     })
     expect(
       formatBillingCondition('service_tier == "priority"', translations.t)
-    ).toBe('Service Tier == fast')
+    ).toBe('Speed Tier == fast')
     expect(compileBillingExpression('service_tier * 2').status).toBe('invalid')
     const compiled = compileBillingExpression('tier("base", service_tier * 2)')
     expect(compiled.status).toBe('invalid')

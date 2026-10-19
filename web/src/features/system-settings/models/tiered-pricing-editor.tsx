@@ -391,7 +391,7 @@ function RuleConditionRow({
   } else if (condition.source === SOURCE_HEADER) {
     sourceLabel = t('Header')
   } else if (condition.source === SOURCE_SERVICE_TIER) {
-    sourceLabel = t('Service Tier')
+    sourceLabel = t('Speed Tier')
   }
 
   const handleSourceChange = (source: string) => {
@@ -518,7 +518,7 @@ function RuleConditionRow({
           { value: SOURCE_PARAM, label: t('Body param') },
           { value: SOURCE_HEADER, label: t('Header') },
           { value: SOURCE_TIME, label: t('Time') },
-          { value: SOURCE_SERVICE_TIER, label: t('Service Tier') },
+          { value: SOURCE_SERVICE_TIER, label: t('Speed Tier') },
         ]}
         value={condition.source}
         onValueChange={(v) => v !== null && handleSourceChange(v)}
@@ -532,7 +532,7 @@ function RuleConditionRow({
             <SelectItem value={SOURCE_HEADER}>{t('Header')}</SelectItem>
             <SelectItem value={SOURCE_TIME}>{t('Time')}</SelectItem>
             <SelectItem value={SOURCE_SERVICE_TIER}>
-              {t('Service Tier')}
+              {t('Speed Tier')}
             </SelectItem>
           </SelectGroup>
         </SelectContent>
@@ -551,7 +551,7 @@ function RuleConditionRow({
           }))}
         >
           <SelectTrigger
-            aria-label={t('Service Tier')}
+            aria-label={t('Speed Tier')}
             className='w-44'
             size='sm'
           >
@@ -961,7 +961,7 @@ p and c are fallback variables representing all tokens not separately priced in 
 
 Important: len is NOT affected by auto-exclusion. Tier conditions should use len instead of p to prevent cache hits from lowering p and misidentifying the tier.
 
-### Service Tier
+### Speed Tier
 
 service_tier is the effective outbound/settlement tier: default, priority (fast), ultrafast, or flex. Use it for tier price multipliers, e.g. (service_tier == "priority" ? 2 : 1). param("service_tier") still reads the original request body and can differ from the effective tier.
 

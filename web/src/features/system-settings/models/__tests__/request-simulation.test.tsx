@@ -49,12 +49,12 @@ describe('request simulation', () => {
     expect(screen.getByRole('status')).toHaveTextContent(
       'Simulated request cost: $2'
     )
-    await user.click(screen.getByRole('combobox', { name: 'Service Tier' }))
+    await user.click(screen.getByRole('combobox', { name: 'Speed Tier' }))
     await user.click(screen.getByRole('option', { name: /^fast$/ }))
     expect(screen.getByRole('status')).toHaveTextContent(
       'Simulated request cost: $4'
     )
-    await user.click(screen.getByRole('combobox', { name: 'Service Tier' }))
+    await user.click(screen.getByRole('combobox', { name: 'Speed Tier' }))
     await user.click(screen.getByRole('option', { name: /^flex$/ }))
     expect(screen.getByRole('status')).toHaveTextContent(
       'Simulated request cost: $1'

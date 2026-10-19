@@ -231,7 +231,7 @@ export function RequestSimulation(props: RequestSimulationProps) {
       <CollapsibleContent className='mt-3 space-y-4'>
         {usesServiceTier && (
           <Field>
-            <FieldLabel htmlFor={serviceTierId}>{t('Service Tier')}</FieldLabel>
+            <FieldLabel htmlFor={serviceTierId}>{t('Speed Tier')}</FieldLabel>
             <Select
               value={serviceTier}
               onValueChange={(value) => value && setServiceTier(value)}
