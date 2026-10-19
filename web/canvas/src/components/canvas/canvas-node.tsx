@@ -1,5 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import type { ReactNode } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import { ChevronRight, Copy, Download, Group, Image as ImageIcon, Music2, Puzzle, RefreshCw, Star, Trash2, Video } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
@@ -135,7 +134,9 @@ export const CanvasNode = React.memo(function CanvasNode({
     const hasVideoContent = data.type === CanvasNodeType.Video && Boolean(data.metadata?.content);
     const hasAudioContent = data.type === CanvasNodeType.Audio && Boolean(data.metadata?.content);
     const isGroup = data.type === CanvasNodeType.Group;
-    const batchCount = data.type === CanvasNodeType.Image ? data.metadata?.images?.length || 0 : data.type === CanvasNodeType.Text ? data.metadata?.texts?.length || 0 : 0;
+    let batchCount = 0;
+    if (data.type === CanvasNodeType.Image) batchCount = data.metadata?.images?.length || 0;
+    else if (data.type === CanvasNodeType.Text) batchCount = data.metadata?.texts?.length || 0;
     const isBatchRoot = batchCount > 1;
     // Nodes with the interaction/move toggle ignore content pointer events in move mode and allow interaction in interactive mode.
     // forceInteractive states such as editing stay interactive, as do empty nodes so their upload and generation actions remain usable.
@@ -145,7 +146,29 @@ export const CanvasNode = React.memo(function CanvasNode({
     // Transparent nodes such as SVGs blend into the canvas while retaining outlines for selected or related states.
     const transparentBg = Boolean(definition?.transparentBackground);
     const isActive = isConnectionTarget || isSelected || isFocusRelated;
-    const imageBorderColor = isActive ? selectionBlue : isRelated ? theme.node.muted : "transparent";
+    let imageBorderColor = "transparent";
+    if (isActive) imageBorderColor = selectionBlue;
+    else if (isRelated) imageBorderColor = theme.node.muted;
+    let nodeLayerClass = "z-10";
+    if (isGroup) nodeLayerClass = "z-[5]";
+    else if (isSelected) nodeLayerClass = "z-50";
+    let referenceCursorClass = "";
+    if (referenceSelectionState === "available") referenceCursorClass = "cursor-pointer";
+    else if (referenceSelectionState) referenceCursorClass = "cursor-not-allowed";
+    const nodeBackground = isGroup || hasImageContent || hasVideoContent || transparentBg ? "transparent" : theme.node.fill;
+    let nodeBorderColor: string = theme.node.stroke;
+    if (isGroup) nodeBorderColor = isGroupDropTarget || isActive ? selectionBlue : theme.node.stroke;
+    else if (hasImageContent) nodeBorderColor = imageBorderColor;
+    else if (isActive) nodeBorderColor = selectionBlue;
+    else if (isRelated) nodeBorderColor = theme.node.muted;
+    else if (transparentBg) nodeBorderColor = "transparent";
+    let nodeShadow: string | undefined;
+    if (isGroupDropTarget) nodeShadow = `0 0 0 2px ${selectionBlue}66, inset 0 0 0 999px ${selectionBlue}10`;
+    else if (isActive) nodeShadow = `0 0 0 1px ${selectionBlue}55`;
+    else if (isRelated) nodeShadow = `0 0 0 1px ${theme.node.muted}55, 0 18px 48px rgba(0,0,0,.14)`;
+    let referenceOverlayOpacity = 34;
+    if (referenceSelectionState === "target") referenceOverlayOpacity = 78;
+    else if (referenceSelectionState === "disabled") referenceOverlayOpacity = 60;
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const titleInputRef = useRef<HTMLInputElement>(null);
     const resizeRef = useRef({
@@ -298,7 +321,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     return (
         <div
             data-node-id={data.id}
-            className={`node-element group/node absolute flex select-none flex-col transition-shadow duration-200 ${isGroup ? "z-[5]" : isSelected ? "z-50" : "z-10"} ${referenceSelectionState === "available" ? "cursor-pointer" : referenceSelectionState ? "cursor-not-allowed" : ""}`}
+            className={`node-element group/node absolute flex select-none flex-col transition-shadow duration-200 ${nodeLayerClass} ${referenceCursorClass}`}
             style={{
                 transform: `translate(${data.position.x}px, ${data.position.y}px)`,
                 width: data.width,
@@ -361,10 +384,10 @@ export const CanvasNode = React.memo(function CanvasNode({
             <div
                 className="relative h-full w-full overflow-visible rounded-3xl border-2"
                 style={{
-                    background: isGroup ? "transparent" : hasImageContent || hasVideoContent || transparentBg ? "transparent" : theme.node.fill,
-                    borderColor: isGroup ? (isGroupDropTarget || isActive ? selectionBlue : theme.node.stroke) : hasImageContent ? imageBorderColor : isActive ? selectionBlue : isRelated ? theme.node.muted : transparentBg ? "transparent" : theme.node.stroke,
+                    background: nodeBackground,
+                    borderColor: nodeBorderColor,
                     borderStyle: isGroup ? "dashed" : "solid",
-                    boxShadow: isGroupDropTarget ? `0 0 0 2px ${selectionBlue}66, inset 0 0 0 999px ${selectionBlue}10` : isActive ? `0 0 0 1px ${selectionBlue}55` : isRelated ? `0 0 0 1px ${theme.node.muted}55, 0 18px 48px rgba(0,0,0,.14)` : undefined,
+                    boxShadow: nodeShadow,
                 }}
                 onMouseDown={(event) => {
                     if (!referenceSelectionState) onMouseDown(event, data.id);
@@ -396,7 +419,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                     className={`relative flex h-full w-full items-center justify-center rounded-[inherit] ${isBatchRoot ? "overflow-visible" : "overflow-hidden"}`}
                     style={
                         {
-                            background: isGroup ? "transparent" : hasImageContent || hasVideoContent || transparentBg ? "transparent" : theme.node.fill,
+                            background: nodeBackground,
                             pointerEvents: contentInteractive ? undefined : "none",
                         } as React.CSSProperties
                     }
@@ -432,7 +455,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                 {!isGroup && !hasImageContent && !hasVideoContent && !hasAudioContent ? <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12" style={{ background: `linear-gradient(to top, ${theme.canvas.background}66, transparent)` }} /> : null}
 
                 {referenceSelectionState && (referenceSelectionState !== "available" || hovered) ? (
-                    <div className="pointer-events-none absolute inset-0 z-[60] grid place-items-center rounded-[inherit]" style={{ background: `color-mix(in srgb, ${theme.canvas.background} ${referenceSelectionState === "target" ? 78 : referenceSelectionState === "disabled" ? 60 : 34}%, transparent)`, boxShadow: referenceSelectionState === "available" ? `inset 0 0 0 2px ${selectionBlue}` : undefined }}>
+                    <div className="pointer-events-none absolute inset-0 z-[60] grid place-items-center rounded-[inherit]" style={{ background: `color-mix(in srgb, ${theme.canvas.background} ${referenceOverlayOpacity}%, transparent)`, boxShadow: referenceSelectionState === "available" ? `inset 0 0 0 2px ${selectionBlue}` : undefined }}>
                         {referenceSelectionState !== "disabled" ? <span className="rounded-lg px-3 py-2 text-sm font-medium shadow-sm" style={{ background: theme.toolbar.panel, color: theme.node.text }}>{t(referenceSelectionState === "target" ? "canvas.references.selecting" : "canvas.references.choose")}</span> : null}
                     </div>
                 ) : null}
@@ -460,7 +483,7 @@ function NodeContent(props: NodeContentRendererProps) {
     if (props.node.type === CanvasNodeType.Config && props.renderNodeContent) return props.renderNodeContent(props.node);
     if (props.isBatchRoot && props.node.type === CanvasNodeType.Image) return <ImageNodeContent {...props} />;
     if (props.node.type === CanvasNodeType.Text && props.node.metadata?.texts?.length && (props.node.metadata.status !== "error" || props.node.metadata.texts.some((text) => text.content))) return <TextContent {...props} />;
-    if (props.node.metadata?.status === "loading") return <LoadingContent theme={props.theme} />;
+    if (props.node.metadata?.status === "loading") return <LoadingContent theme={props.theme} node={props.node} />;
     if (props.node.metadata?.status === "error") return <ErrorContent node={props.node} theme={props.theme} onRetry={props.onRetry} />;
 
     const Renderer = nodeContentRenderers[props.node.type as CanvasNodeType];
@@ -499,18 +522,25 @@ function GroupNodeContent({ node, theme, groupChildCount }: NodeContentRendererP
     );
 }
 
-function LoadingContent({ theme }: Pick<NodeContentRendererProps, "theme">) {
+function LoadingContent({ theme, node }: Pick<NodeContentRendererProps, "theme" | "node">) {
     const { t } = useTranslation();
+    let label = t("canvas.node.generating");
+    if (node.type === CanvasNodeType.Video && node.metadata?.videoTaskStatus === "completed") label = t("Video generated. Retrieving the file...");
+    if (node.type === CanvasNodeType.Video && node.metadata?.errorDetails) label = node.metadata.errorDetails;
     return (
         <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.activeStroke }}>
             <div className="size-10 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} />
-            <span className="text-[10px] tracking-[0.2em]">{t("canvas.node.generating")}</span>
+            <span className="px-4 text-center text-[10px] tracking-[0.2em]">{label}</span>
         </div>
     );
 }
 
 function ErrorContent({ node, theme, onRetry }: Pick<NodeContentRendererProps, "node" | "theme" | "onRetry">) {
     const { t } = useTranslation();
+    let retryLabel = t("canvas.node.retry");
+    if (node.type === CanvasNodeType.Video && node.metadata?.videoTaskId) {
+        retryLabel = node.metadata.videoTaskStatus === "completed" ? t("Retrieve video") : t("Check task status");
+    }
     return (
         <div className="flex max-w-[260px] flex-col items-center gap-3 px-5 text-center">
             <div className="text-xs leading-5 text-red-300">{node.metadata?.errorDetails || t("canvas.node.failed")}</div>
@@ -525,7 +555,7 @@ function ErrorContent({ node, theme, onRetry }: Pick<NodeContentRendererProps, "
                 onMouseDown={(event) => event.stopPropagation()}
             >
                 <RefreshCw className="size-3.5" />
-                {t("canvas.node.retry")}
+                {retryLabel}
             </button>
         </div>
     );
@@ -553,6 +583,41 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
     const primaryText = texts.find((text) => text.id === primaryTextId);
     const content = primaryText?.content || node.metadata?.content || "";
     const paddingClass = isBatchRoot ? "px-4 pb-4 pt-14" : "p-4";
+    let textContent: ReactNode;
+    if (isEditingContent) {
+        textContent = (
+            <CanvasResourceMentionTextarea
+                ref={textareaRef}
+                className={`thin-scrollbar block h-full w-full resize-none overflow-y-auto whitespace-pre-wrap break-words border-none bg-transparent m-0 font-mono outline-none select-text appearance-none ${paddingClass}`}
+                style={textStyle}
+                value={content}
+                references={mentionReferences}
+                highlightLabels={false}
+                onChange={(value) => onContentChange(node.id, value)}
+                onBlur={onStopEditing}
+                onKeyDown={(event) => {
+                    if (event.key === "Escape") onStopEditing();
+                }}
+                onMouseDown={(event) => event.stopPropagation()}
+                onPointerDown={(event) => event.stopPropagation()}
+                onWheel={(event) => event.stopPropagation()}
+            />
+        );
+    } else if (content) {
+        textContent = (
+            <div className={`thin-scrollbar block h-full w-full overflow-y-auto whitespace-pre-wrap break-words bg-transparent font-mono ${paddingClass}`} style={textStyle} onWheel={(event) => event.stopPropagation()}>
+                {content}
+            </div>
+        );
+    } else if (primaryText) {
+        textContent = <TextSlotStatus text={primaryText} />;
+    } else {
+        textContent = (
+            <div className="p-4 font-mono" style={{ color: theme.node.placeholder }}>
+                {t("canvas.node.editText")}
+            </div>
+        );
+    }
 
     return (
         <BatchFrame batchCount={batchCount} batchExpanded={batchExpanded}>
@@ -562,34 +627,7 @@ function TextContent({ node, theme, isEditingContent, textareaRef, mentionRefere
                       .map((text, index) => <ExpandedTextCard key={text.id} node={node} text={text} index={index} onSetPrimary={() => onSetBatchPrimary?.(text.id)} />)
                 : null}
             <div className="flex h-full w-full flex-col overflow-hidden rounded-3xl">
-                {isEditingContent ? (
-                    <CanvasResourceMentionTextarea
-                        ref={textareaRef}
-                        className={`thin-scrollbar block h-full w-full resize-none overflow-y-auto whitespace-pre-wrap break-words border-none bg-transparent m-0 font-mono outline-none select-text appearance-none ${paddingClass}`}
-                        style={textStyle}
-                        value={content}
-                        references={mentionReferences}
-                        highlightLabels={false}
-                        onChange={(value) => onContentChange(node.id, value)}
-                        onBlur={onStopEditing}
-                        onKeyDown={(event) => {
-                            if (event.key === "Escape") onStopEditing();
-                        }}
-                        onMouseDown={(event) => event.stopPropagation()}
-                        onPointerDown={(event) => event.stopPropagation()}
-                        onWheel={(event) => event.stopPropagation()}
-                    />
-                ) : content ? (
-                    <div className={`thin-scrollbar block h-full w-full overflow-y-auto whitespace-pre-wrap break-words bg-transparent font-mono ${paddingClass}`} style={textStyle} onWheel={(event) => event.stopPropagation()}>
-                        {content}
-                    </div>
-                ) : primaryText ? (
-                    <TextSlotStatus text={primaryText} />
-                ) : (
-                    <div className="p-4 font-mono" style={{ color: theme.node.placeholder }}>
-                        {t("canvas.node.editText")}
-                    </div>
-                )}
+                {textContent}
             </div>
             {isBatchRoot ? (
                 <button
@@ -665,9 +703,12 @@ function TextSlotStatus({ text }: { text: CanvasNodeText }) {
     const { t } = useTranslation();
     const failed = text.status === "error";
     const loading = text.status === "loading";
+    let statusContent = <span className="text-xs">{t("apiErrors.noContent")}</span>;
+    if (failed) statusContent = <span className="text-xs leading-5">{text.errorDetails || t("canvas.node.failed")}</span>;
+    else if (loading) statusContent = <div className="size-10 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} />;
     return (
         <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-6 text-center" style={{ background: theme.node.fill, color: failed ? theme.node.text : theme.node.activeStroke }}>
-            {failed ? <span className="text-xs leading-5">{text.errorDetails || t("canvas.node.failed")}</span> : loading ? <div className="size-10 animate-spin rounded-full border-2" style={{ borderColor: theme.node.stroke, borderTopColor: theme.node.activeStroke }} /> : <span className="text-xs">{t("apiErrors.noContent")}</span>}
+            {statusContent}
             {loading ? <span className="text-[10px] tracking-[0.2em]">{t("canvas.node.generating")}</span> : null}
         </div>
     );
@@ -706,25 +747,27 @@ function EmptyImageContent({ theme }: NodeContentRendererProps) {
 
 function VideoNodeContent({ node, theme }: NodeContentRendererProps) {
     const { t } = useTranslation();
-    if (!node.metadata?.content)
+    if (!node.metadata?.content) {
         return (
             <div className="flex h-full w-full flex-col items-center justify-center gap-3" style={{ color: theme.node.placeholder }}>
                 <Video className="size-7 opacity-35" />
                 <span className="text-sm">{t("canvas.node.emptyVideo")}</span>
             </div>
         );
+    }
     return <video src={node.metadata.content} controls className="h-full w-full rounded-[18px] bg-black object-contain" data-canvas-video={node.id} data-canvas-no-zoom />;
 }
 
 function AudioNodeContent({ node, theme }: NodeContentRendererProps) {
     const { t } = useTranslation();
-    if (!node.metadata?.content)
+    if (!node.metadata?.content) {
         return (
             <div className="flex h-full w-full flex-col items-center justify-center gap-2" style={{ color: theme.node.placeholder }}>
                 <Music2 className="size-7 opacity-35" />
                 <span className="text-sm">{t("canvas.node.emptyAudio")}</span>
             </div>
         );
+    }
     return (
         <div className="flex h-full w-full flex-col justify-center gap-3 px-4" style={{ background: theme.node.fill, color: theme.node.text }}>
             <div className="flex min-w-0 items-center gap-2 text-sm opacity-70">
@@ -950,9 +993,9 @@ function BatchFrame({ batchCount, batchExpanded, children }: { batchCount: numbe
         <div className="group/batch relative h-full w-full overflow-visible">
             {isBatchRoot ? (
                 <div className="pointer-events-none absolute inset-0 overflow-visible">
-                    {Array.from({ length: Math.min(batchCount - 1, 3) }).map((_, index) => (
+                    {["near", "middle", "far"].slice(0, Math.min(batchCount - 1, 3)).map((layer, index) => (
                         <div
-                            key={index}
+                            key={layer}
                             className="absolute rounded-[inherit] border shadow-[0_10px_24px_rgba(68,64,60,.12)] transition-all duration-300 group-hover/batch:translate-x-1"
                             style={{
                                 inset: 0,

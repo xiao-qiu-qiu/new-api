@@ -3,13 +3,14 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,type
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
+import i18n from "@/i18n";
 
 import { requestEdit, requestGeneration, requestImageQuestion } from "@/services/api/image";
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
-import { createVideoGenerationTask, isVideoTaskFailed, storeGeneratedVideo, waitForVideoGenerationTask } from "@/services/api/video";
+import { createVideoGenerationTask, isVideoTaskDownloadFailed, isVideoTaskFailed, storeGeneratedVideo, VideoTaskDownloadError, waitForVideoGenerationTask } from "@/services/api/video";
 import { defaultConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { ensureImagePreview, uploadImage } from "@/services/image-storage";
-import { uploadMediaFile, type UploadedFile } from "@/services/file-storage";
+import { deleteStoredMedia, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
@@ -93,6 +94,11 @@ import type { ReferenceAudio, ReferenceVideo } from "@/types/media";
 
 // Register built-in nodes in the shared registry once when the module loads.
 registerBuiltinNodes();
+
+function generationErrorDetails(error: unknown, fallback: string): string {
+    if (isVideoTaskDownloadFailed(error)) return i18n.t("Video generated, but retrieval failed. Retrieve the video again.");
+    return error instanceof Error ? error.message : fallback;
+}
 
 type CanvasClipboard = {
     nodes: CanvasNodeData[];
@@ -281,6 +287,17 @@ function InfiniteCanvasPage() {
     const generationRequestsRef = useRef(new Map<string, CanvasGenerationRequest>());
     const videoPollIdsRef = useRef(new Set<string>());
 
+    useEffect(() => {
+        const requests = generationRequestsRef.current;
+        const videoPolls = videoPollIdsRef.current;
+        setRunningNodeId(null);
+        return () => {
+            requests.forEach((request) => request.controller.abort());
+            requests.clear();
+            videoPolls.clear();
+        };
+    }, [projectId]);
+
     const createHistoryEntry = useCallback(
         (): CanvasHistoryEntry => ({
             nodes: nodesRef.current,
@@ -316,9 +333,16 @@ function InfiniteCanvasPage() {
         async (nodeId: string, config: Parameters<typeof buildGenerationConfig>[0], prompt: string, images: Parameters<typeof createVideoGenerationTask>[2], signal: AbortSignal, extra: CanvasNodeData["metadata"] = {}, videos: ReferenceVideo[] = [], audios: ReferenceAudio[] = []) => {
             const task = await createVideoGenerationTask(config, prompt, images, { signal, videos, audios });
             if (task.provider !== "plugin") {
-                setNodes((prev) => prev.map((item) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, videoTaskId: task.id, videoTaskProvider: task.provider === "gemini" ? "gemini" : "openai", model: config.model } } : item)));
+                setNodes((prev) => prev.map((item) => (item.id === nodeId ? { ...item, metadata: { ...item.metadata, videoTaskId: task.id, videoTaskProvider: task.provider === "gemini" ? "gemini" : "openai", videoTaskGroup: task.group, videoTaskStatus: "pending", model: config.model } } : item)));
             }
-            const video = await storeGeneratedVideo(await waitForVideoGenerationTask(config, task, { signal }));
+            const result = await waitForVideoGenerationTask(config, task, {
+                signal,
+                onTaskStateChange: (status) => setNodes((prev) => prev.map((item) => item.id === nodeId ? { ...item, metadata: { ...item.metadata, videoTaskStatus: status, errorDetails: undefined } } : item)),
+                onQueryError: () => setNodes((prev) => prev.map((item) => item.id === nodeId ? { ...item, metadata: { ...item.metadata, errorDetails: i18n.t("Status check interrupted. The task continues in the background.") } } : item)),
+            });
+            const video = await storeGeneratedVideo(result).catch((error: unknown) => { throw new VideoTaskDownloadError(error); });
+            if (signal.aborted && video.storageKey) await deleteStoredMedia([video.storageKey]);
+            signal.throwIfAborted();
             setNodes((prev) => prev.map((item) => (item.id === nodeId ? applyGeneratedVideo(item, video, { prompt, model: config.model, ...extra }) : item)));
         },
         [],
@@ -332,7 +356,7 @@ function InfiniteCanvasPage() {
             let controller: AbortController | undefined;
             try {
                 const generationConfig = buildGenerationConfig(effectiveConfig, node, "video");
-                if (!isAiConfigReady(generationConfig, generationConfig.model)) {
+                if (!node.metadata?.videoTaskGroup && !isAiConfigReady(generationConfig, generationConfig.model)) {
                     if (silent) {
                         setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails: t("workbench.configFirst") } } : item)));
                         return;
@@ -343,7 +367,14 @@ function InfiniteCanvasPage() {
                 setRunningNodeId(node.id);
                 setNodes((prev) => prev.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_LOADING, errorDetails: undefined } } : item)));
                 controller = startGenerationRequest(node.id, node.id, node.id);
-                const video = await storeGeneratedVideo(await waitForVideoGenerationTask(generationConfig, { id: taskId, provider: node.metadata?.videoTaskProvider === "gemini" ? "gemini" : "openai", model: generationConfig.model }, { signal: controller.signal }));
+                const result = await waitForVideoGenerationTask(generationConfig, { id: taskId, provider: node.metadata?.videoTaskProvider === "gemini" ? "gemini" : "openai", model: generationConfig.model, group: node.metadata?.videoTaskGroup }, {
+                    signal: controller.signal,
+                    onTaskStateChange: (status) => setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, videoTaskStatus: status, errorDetails: undefined } } : item)),
+                    onQueryError: () => setNodes((prev) => prev.map((item) => item.id === node.id ? { ...item, metadata: { ...item.metadata, errorDetails: t("Status check interrupted. The task continues in the background.") } } : item)),
+                });
+                const video = await storeGeneratedVideo(result).catch((error: unknown) => { throw new VideoTaskDownloadError(error); });
+                if (controller.signal.aborted && video.storageKey) await deleteStoredMedia([video.storageKey]);
+                controller.signal.throwIfAborted();
                 setNodes((prev) =>
                     prev.map((item) =>
                         item.id === node.id
@@ -362,7 +393,7 @@ function InfiniteCanvasPage() {
                 );
             } catch (error) {
                 if (isGenerationCanceled(error)) return;
-                const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
+                const errorDetails = generationErrorDetails(error, t("canvas.projectPage.generationFailed"));
                 message.error(errorDetails);
                 setNodes((prev) =>
                     prev.map((item) =>
@@ -383,7 +414,7 @@ function InfiniteCanvasPage() {
                 videoPollIdsRef.current.delete(node.id);
                 if (controller) {
                     finishGenerationRequest(node.id, controller);
-                    setRunningNodeId((current) => (current === node.id ? null : current));
+                    if (!controller.signal.aborted) setRunningNodeId((current) => (current === node.id ? null : current));
                 }
             }
         },
@@ -864,6 +895,12 @@ function InfiniteCanvasPage() {
         (ids: Set<string>) => {
             if (!ids.size) return;
             const allIds = new Set(ids);
+            for (const [nodeId, request] of generationRequestsRef.current) {
+                if (!allIds.has(nodeId)) continue;
+                request.controller.abort();
+                generationRequestsRef.current.delete(nodeId);
+                videoPollIdsRef.current.delete(nodeId);
+            }
             setNodes((prev) => {
                 const next = prev.filter((node) => !allIds.has(node.id));
                 return next.map((node) => {
@@ -976,6 +1013,9 @@ function InfiniteCanvasPage() {
     }, [cancelPendingConnectionCreate]);
 
     const clearCanvas = useCallback(() => {
+        generationRequestsRef.current.forEach((request) => request.controller.abort());
+        generationRequestsRef.current.clear();
+        videoPollIdsRef.current.clear();
         setNodes([]);
         setConnections([]);
         setInfoNodeId(null);
@@ -2728,7 +2768,7 @@ function InfiniteCanvasPage() {
                 );
             } catch (error) {
                 if (isGenerationCanceled(error)) return;
-                const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
+                const errorDetails = generationErrorDetails(error, t("canvas.projectPage.generationFailed"));
                 message.error(errorDetails);
                 setNodes((prev) =>
                     prev.map((node) => {
@@ -2891,7 +2931,7 @@ function InfiniteCanvasPage() {
                 );
             } catch (error) {
                 if (isGenerationCanceled(error)) return;
-                const errorDetails = error instanceof Error ? error.message : t("canvas.projectPage.generationFailed");
+                const errorDetails = generationErrorDetails(error, t("canvas.projectPage.generationFailed"));
                 message.error(errorDetails);
                 setNodes((prev) =>
                     prev.map((item) =>

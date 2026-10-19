@@ -22,6 +22,7 @@ import {
   requestSiteMediaBlob,
   requestSiteMediaJson,
   resolveSiteMediaModel,
+  SiteMediaHttpError,
   type MediaRequestOptions,
 } from "./site-media";
 
@@ -59,11 +60,26 @@ export type VideoGenerationTask = {
   id: string;
   provider: "openai" | "gemini" | "plugin";
   model: string;
+  group?: string;
 };
 export type VideoGenerationTaskState =
   | { status: "pending" }
   | { status: "completed"; result: VideoGenerationResult }
   | { status: "failed"; error: string };
+export type VideoGenerationTaskQueryState =
+  | { status: "pending" | "completed" }
+  | { status: "failed"; error: string };
+export type VideoTaskWaitOptions = MediaRequestOptions & {
+  onTaskStateChange?: (state: "pending" | "completed") => void | Promise<void>;
+  onQueryError?: (error: unknown) => void;
+};
+
+export class VideoTaskDownloadError extends Error {
+  constructor(cause: unknown) {
+    super(apiText("videoDownloadFailed"), { cause });
+    this.name = "VideoTaskDownloadError";
+  }
+}
 
 export async function requestVideoGeneration(
   config: AiConfig,
@@ -81,25 +97,75 @@ export async function requestVideoGeneration(
 export async function waitForVideoGenerationTask(
   config: AiConfig,
   task: VideoGenerationTask,
-  options?: MediaRequestOptions,
+  options?: VideoTaskWaitOptions,
 ): Promise<VideoGenerationResult> {
-  for (let attempt = 0; attempt < 120; attempt += 1) {
+  let interval = 2500;
+  let previousStatus: "pending" | "completed" | undefined;
+  for (;;) {
     options?.signal?.throwIfAborted();
-    const state = await pollVideoGenerationTask(config, task, options);
-    if (state.status === "completed") return state.result;
+    let state: VideoGenerationTaskQueryState;
+    try {
+      state = await queryVideoGenerationTask(config, task, options);
+    } catch (error) {
+      options?.signal?.throwIfAborted();
+      previousStatus = undefined;
+      options?.onQueryError?.(error);
+      if (!isTransientVideoQueryError(error)) throw error;
+      await delay(interval, options?.signal);
+      interval = Math.min(interval * 1.25, 10_000);
+      continue;
+    }
     if (state.status === "failed") {
       const error = new Error(state.error);
       error.name = "VideoTaskFailed";
       throw error;
     }
-    if (attempt === 119) break;
-    await delay(2500, options?.signal);
+    if (state.status !== previousStatus) {
+      await options?.onTaskStateChange?.(state.status);
+      previousStatus = state.status;
+    }
+    options?.signal?.throwIfAborted();
+    if (state.status === "completed") {
+      return downloadVideoGenerationTask(config, task, options);
+    }
+    await delay(interval, options?.signal);
+    interval = Math.min(interval * 1.25, 10_000);
   }
-  throw new Error(apiText("videoTimeout", { provider: "" }));
 }
 
 export function isVideoTaskFailed(error: unknown): boolean {
-  return error instanceof Error && error.name === "VideoTaskFailed";
+  return hasVideoTaskError(error, "VideoTaskFailed");
+}
+
+export function isVideoTaskDownloadFailed(error: unknown): boolean {
+  return hasVideoTaskError(error, "VideoTaskDownloadError");
+}
+
+function hasVideoTaskError(error: unknown, name: string): boolean {
+  const seen = new Set<unknown>();
+  while (error && typeof error === "object" && !seen.has(error)) {
+    if ("name" in error && error.name === name) return true;
+    seen.add(error);
+    error = "cause" in error ? error.cause : undefined;
+  }
+  return false;
+}
+
+function isTransientVideoQueryError(error: unknown): boolean {
+  if (error instanceof SiteMediaHttpError) {
+    return (
+      error.status === 408 ||
+      error.status === 425 ||
+      error.status === 429 ||
+      error.status >= 500
+    );
+  }
+  // The host fetch runs in the parent frame, so native errors can cross realms.
+  return (
+    hasVideoTaskError(error, "TypeError") ||
+    hasVideoTaskError(error, "TimeoutError") ||
+    hasVideoTaskError(error, "SyntaxError")
+  );
 }
 
 export async function createVideoGenerationTask(
@@ -169,6 +235,7 @@ export async function createVideoGenerationTask(
     id: created.id,
     provider: "openai",
     model: `${selection.group}::${selection.model}`,
+    group: selection.group,
   };
 }
 
@@ -315,6 +382,22 @@ export async function pollVideoGenerationTask(
   task: VideoGenerationTask,
   options?: MediaRequestOptions,
 ): Promise<VideoGenerationTaskState> {
+  const state = await queryVideoGenerationTask(config, task, options);
+  if (state.status === "completed") {
+    return {
+      status: "completed",
+      result: await downloadVideoGenerationTask(config, task, options),
+    };
+  }
+  if (state.status === "failed") return state;
+  return { status: "pending" };
+}
+
+export async function queryVideoGenerationTask(
+  config: AiConfig,
+  task: VideoGenerationTask,
+  options?: MediaRequestOptions,
+): Promise<VideoGenerationTaskQueryState> {
   if (task.provider !== "openai") {
     return {
       status: "failed",
@@ -323,9 +406,10 @@ export async function pollVideoGenerationTask(
       ),
     };
   }
-  const selection = resolveSiteMediaModel(config, task.model, "video");
+  const group =
+    task.group ?? resolveSiteMediaModel(config, task.model, "video").group;
   const path = `/pg/videos/${encodeURIComponent(task.id)}`;
-  const groupQuery = `?group=${encodeURIComponent(selection.group)}`;
+  const groupQuery = `?group=${encodeURIComponent(group)}`;
   const video = await requestSiteMedia(
     path + groupQuery,
     { method: "GET" },
@@ -354,13 +438,29 @@ export async function pollVideoGenerationTask(
   if (video.status !== "completed" && !(hasResultUrl && !video.status)) {
     return { status: "pending" };
   }
-  const blob = await requestSiteMediaBlob(
-    `${path}/content${groupQuery}`,
-    { method: "GET" },
-    apiText("videoDownloadFailed"),
-    options,
-  );
-  return { status: "completed", result: { blob } };
+  return { status: "completed" };
+}
+
+export async function downloadVideoGenerationTask(
+  config: AiConfig,
+  task: VideoGenerationTask,
+  options?: MediaRequestOptions,
+): Promise<VideoGenerationResult> {
+  try {
+    const group =
+      task.group ?? resolveSiteMediaModel(config, task.model, "video").group;
+    const path = `/pg/videos/${encodeURIComponent(task.id)}/content?group=${encodeURIComponent(group)}`;
+    const blob = await requestSiteMediaBlob(
+      path,
+      { method: "GET" },
+      apiText("videoDownloadFailed"),
+      options,
+    );
+    return { blob };
+  } catch (error) {
+    options?.signal?.throwIfAborted();
+    throw new VideoTaskDownloadError(error);
+  }
 }
 
 export async function storeGeneratedVideo(
@@ -443,14 +543,31 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
       reject(new DOMException("Aborted", "AbortError"));
       return;
     }
-    const onAbort = () => {
+    const page = typeof document === "undefined" ? undefined : document;
+    const browser = typeof window === "undefined" ? undefined : window;
+    const background =
+      page?.visibilityState === "hidden" ||
+      (typeof navigator !== "undefined" && navigator.onLine === false);
+    const cleanup = () => {
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      browser?.removeEventListener("online", onWake);
+      page?.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+    const onAbort = () => {
+      cleanup();
       reject(new DOMException("Aborted", "AbortError"));
     };
-    const timer = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
+    const onWake = () => {
+      cleanup();
       resolve();
-    }, ms);
+    };
+    const onVisibilityChange = () => {
+      if (page?.visibilityState === "visible") onWake();
+    };
+    const timer = setTimeout(onWake, background ? 30_000 : ms);
     signal?.addEventListener("abort", onAbort, { once: true });
+    browser?.addEventListener("online", onWake);
+    page?.addEventListener("visibilitychange", onVisibilityChange);
   });
 }

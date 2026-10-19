@@ -11,6 +11,16 @@ import {
 export type MediaRequestOptions = { signal?: AbortSignal };
 export type SiteMediaModel = { model: string; group: string };
 
+export class SiteMediaHttpError extends Error {
+  constructor(
+    public readonly status: number,
+    message: string,
+  ) {
+    super(message);
+    this.name = "SiteMediaHttpError";
+  }
+}
+
 /** Channel IDs are site group names; never let the upstream resolver replace a stale selection. */
 export function resolveSiteMediaModel(
   config: AiConfig,
@@ -110,19 +120,29 @@ export async function requestSiteMedia<T>(
     const response = await siteFetch(path, { ...init, signal });
     if (!response.ok) {
       const message = mediaErrorMessage(await response.text());
-      if (message) throw new Error(i18n.t(message));
+      if (message) {
+        throw new SiteMediaHttpError(response.status, i18n.t(message));
+      }
       if (response.status === 401) {
-        throw new Error(i18n.t("Your session has expired. Sign in again."));
+        throw new SiteMediaHttpError(
+          response.status,
+          i18n.t("Your session has expired. Sign in again."),
+        );
       }
       if (response.status === 403) {
-        throw new Error(
+        throw new SiteMediaHttpError(
+          response.status,
           i18n.t("You do not have access to this model or group."),
         );
       }
       if (response.status === 429) {
-        throw new Error(i18n.t("apiErrors.rateLimited"));
+        throw new SiteMediaHttpError(
+          response.status,
+          i18n.t("apiErrors.rateLimited"),
+        );
       }
-      throw new Error(
+      throw new SiteMediaHttpError(
+        response.status,
         i18n.t("Media request failed (HTTP {{status}}).", {
           status: response.status,
         }),
@@ -136,7 +156,9 @@ export async function requestSiteMedia<T>(
       throw new DOMException("Aborted", "AbortError");
     }
     if (controller.signal.aborted) {
-      throw new Error(i18n.t("Media request timed out. Try again."));
+      throw new Error(i18n.t("Media request timed out. Try again."), {
+        cause: controller.signal.reason,
+      });
     }
     throw error;
   } finally {

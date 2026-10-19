@@ -1,4 +1,4 @@
-import { afterAll, beforeEach, expect, test, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { SiteContext } from "@/integration/site-context";
 import type { AiConfig } from "@/stores/use-config-store";
 
@@ -40,10 +40,27 @@ const storage = {
   removeItem: (key: string) => values.delete(key),
 };
 // Bun's Vitest compatibility supports test/mock, but does not implement stubGlobal.
+const windowEvents = new EventTarget();
+const documentEvents = new EventTarget();
 const globals: Record<string, unknown> = {
   window: {
     __newApiCanvasHost: { context, fetch: siteFetch, selectModel: vi.fn() },
     localStorage: storage,
+    addEventListener: vi.fn(windowEvents.addEventListener.bind(windowEvents)),
+    removeEventListener: vi.fn(
+      windowEvents.removeEventListener.bind(windowEvents),
+    ),
+    dispatchEvent: windowEvents.dispatchEvent.bind(windowEvents),
+  },
+  document: {
+    visibilityState: "visible",
+    addEventListener: vi.fn(
+      documentEvents.addEventListener.bind(documentEvents),
+    ),
+    removeEventListener: vi.fn(
+      documentEvents.removeEventListener.bind(documentEvents),
+    ),
+    dispatchEvent: documentEvents.dispatchEvent.bind(documentEvents),
   },
   localStorage: storage,
   fetch: vi.fn(() => {
@@ -70,9 +87,11 @@ const {
   pollVideoGenerationTask,
   waitForVideoGenerationTask,
   isVideoTaskFailed,
+  isVideoTaskDownloadFailed,
 } = await import("../video");
 const { requestAudioGeneration } = await import("../audio");
-const { requestSiteMediaJson } = await import("../site-media");
+const { requestSiteMediaJson, SiteMediaHttpError } =
+  await import("../site-media");
 const config: AiConfig = {
   ...defaultConfig,
   channels,
@@ -115,6 +134,10 @@ function videoContractConfig(
 beforeEach(() => {
   siteFetch.mockReset();
   values.clear();
+});
+afterEach(() => {
+  vi.useRealTimers();
+  Object.assign(document, { visibilityState: "visible" });
 });
 afterAll(() => {
   for (const original of originals) {
@@ -234,6 +257,7 @@ test("a saved site video resumes using its original group and downloads content 
     id: "video/id",
     provider: "openai",
     model: "media group::sora-2",
+    group: "media group",
   });
   siteFetch.mockResolvedValueOnce(json({ id: task.id, status: "in_progress" }));
   expect(await pollVideoGenerationTask(config, task)).toEqual({
@@ -282,6 +306,239 @@ test("a terminal video error remains a failed task instead of a transient pollin
     (error: unknown) => error,
   );
   expect(isVideoTaskFailed(failure)).toBe(true);
+});
+
+test("a video still pending after 120 queries waits for backend completion and only reports state changes", async () => {
+  vi.useFakeTimers();
+  let queries = 0;
+  const onTaskStateChange = vi.fn();
+  siteFetch.mockImplementation(async (path) => {
+    if (path.includes("/content")) {
+      return new Response("long-running video", {
+        headers: { "Content-Type": "video/mp4" },
+      });
+    }
+    queries += 1;
+    return json({
+      id: "slow",
+      status: queries > 130 ? "completed" : "in_progress",
+    });
+  });
+  const outcome = waitForVideoGenerationTask(
+    config,
+    { id: "slow", provider: "openai", model: "media group::sora-2" },
+    { onTaskStateChange },
+  ).then(
+    (result) => ({ result }),
+    (error: unknown) => ({ error }),
+  );
+
+  await vi.runAllTimersAsync();
+  const completed = await outcome;
+  expect(completed).not.toHaveProperty("error");
+  expect("result" in completed && (await completed.result.blob?.text())).toBe(
+    "long-running video",
+  );
+  expect(queries).toBe(131);
+  expect(onTaskStateChange.mock.calls).toEqual([["pending"], ["completed"]]);
+});
+
+test("a transient network interruption retries the same task and resumes immediately when the network returns", async () => {
+  vi.useFakeTimers();
+  const interruption = new TypeError("Failed to fetch");
+  const onQueryError = vi.fn();
+  siteFetch.mockRejectedValueOnce(interruption);
+  siteFetch.mockResolvedValueOnce(json({ id: "recover", status: "completed" }));
+  siteFetch.mockResolvedValueOnce(
+    new Response("recovered video", {
+      headers: { "Content-Type": "video/mp4" },
+    }),
+  );
+  const outcome = waitForVideoGenerationTask(
+    config,
+    { id: "recover", provider: "openai", model: "media group::sora-2" },
+    { onQueryError },
+  ).then(
+    (result) => ({ result }),
+    (error: unknown) => ({ error }),
+  );
+  await vi.advanceTimersByTimeAsync(0);
+  expect(onQueryError).toHaveBeenCalledWith(interruption);
+  window.dispatchEvent(new Event("online"));
+  await vi.advanceTimersByTimeAsync(0);
+
+  const completed = await outcome;
+  expect(completed).not.toHaveProperty("error");
+  expect("result" in completed && (await completed.result.blob?.text())).toBe(
+    "recovered video",
+  );
+  expect(siteFetch.mock.calls.map(([path]) => path)).toEqual([
+    "/pg/videos/recover?group=media%20group",
+    "/pg/videos/recover?group=media%20group",
+    "/pg/videos/recover/content?group=media%20group",
+  ]);
+});
+
+test("a completed video persists completion before download and classifies download failure without losing its original group", async () => {
+  let completionSaved = false;
+  siteFetch.mockImplementation(async (path) => {
+    if (path.includes("/content")) {
+      expect(completionSaved).toBe(true);
+      return json(
+        { message: "Video download is temporarily unavailable" },
+        503,
+      );
+    }
+    return json({ id: "ready", status: "completed" });
+  });
+  const error = await waitForVideoGenerationTask(
+    { ...config, model: "media group::sora-2" },
+    {
+      id: "ready",
+      provider: "openai",
+      model: "sora-2",
+      group: "original group",
+    },
+    {
+      onTaskStateChange: async (status) => {
+        if (status === "completed") {
+          await Promise.resolve();
+          completionSaved = true;
+        }
+      },
+    },
+  ).catch((cause: unknown) => cause);
+
+  expect(completionSaved).toBe(true);
+  expect(isVideoTaskDownloadFailed(error)).toBe(true);
+  expect(
+    isVideoTaskDownloadFailed(new Error("Storage wrapper", { cause: error })),
+  ).toBe(true);
+  expect(isVideoTaskFailed(error)).toBe(false);
+  expect(siteFetch.mock.calls.map(([path]) => path)).toEqual([
+    "/pg/videos/ready?group=original%20group",
+    "/pg/videos/ready/content?group=original%20group",
+  ]);
+});
+
+test.each([429, 503])(
+  "HTTP %i query interruptions resume the same pending video and report recovery before completion",
+  async (status) => {
+    vi.useFakeTimers();
+    const onTaskStateChange = vi.fn();
+    const onQueryError = vi.fn();
+    siteFetch.mockResolvedValueOnce(
+      json({ id: "retry", status: "in_progress" }),
+    );
+    siteFetch.mockResolvedValueOnce(
+      json({ message: "Try again shortly" }, status),
+    );
+    siteFetch.mockResolvedValueOnce(
+      json({ id: "retry", status: "in_progress" }),
+    );
+    siteFetch.mockResolvedValueOnce(json({ id: "retry", status: "completed" }));
+    siteFetch.mockResolvedValueOnce(
+      new Response("video", {
+        headers: { "Content-Type": "video/mp4" },
+      }),
+    );
+    const outcome = waitForVideoGenerationTask(
+      config,
+      { id: "retry", provider: "openai", model: "media group::sora-2" },
+      { onTaskStateChange, onQueryError },
+    );
+    await vi.runAllTimersAsync();
+    expect(await (await outcome).blob?.text()).toBe("video");
+    expect(onQueryError).toHaveBeenCalledWith(
+      expect.objectContaining({ status }),
+    );
+    expect(onTaskStateChange.mock.calls).toEqual([
+      ["pending"],
+      ["pending"],
+      ["completed"],
+    ]);
+  },
+);
+
+test.each([401, 403, 404])(
+  "HTTP %i stops automatic video queries without claiming backend generation failure",
+  async (status) => {
+    siteFetch.mockResolvedValueOnce(
+      json({ message: "Query access interrupted" }, status),
+    );
+    const error = await waitForVideoGenerationTask(config, {
+      id: "saved",
+      provider: "openai",
+      model: "media group::sora-2",
+    }).catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(SiteMediaHttpError);
+    expect(error).toMatchObject({
+      status,
+      message: "Query access interrupted",
+    });
+    expect(isVideoTaskFailed(error)).toBe(false);
+    expect(isVideoTaskDownloadFailed(error)).toBe(false);
+    expect(siteFetch).toHaveBeenCalledTimes(1);
+  },
+);
+
+test("a hidden page polls less frequently and resumes querying when it becomes visible", async () => {
+  vi.useFakeTimers();
+  Object.assign(document, { visibilityState: "hidden" });
+  siteFetch.mockResolvedValueOnce(
+    json({ id: "hidden", status: "in_progress" }),
+  );
+  siteFetch.mockResolvedValueOnce(json({ id: "hidden", status: "completed" }));
+  siteFetch.mockResolvedValueOnce(
+    new Response("video", {
+      headers: { "Content-Type": "video/mp4" },
+    }),
+  );
+  const outcome = waitForVideoGenerationTask(config, {
+    id: "hidden",
+    provider: "openai",
+    model: "media group::sora-2",
+  });
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(siteFetch).toHaveBeenCalledTimes(1);
+  Object.assign(document, { visibilityState: "visible" });
+  document.dispatchEvent(new Event("visibilitychange"));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(await (await outcome).blob?.text()).toBe("video");
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+test("aborting a waiting video removes timers and browser wake listeners before any extra query", async () => {
+  vi.useFakeTimers();
+  siteFetch.mockImplementation(async () =>
+    json({ id: "cancel", status: "in_progress" }),
+  );
+  const controller = new AbortController();
+  const windowAdds = vi.mocked(window.addEventListener).mock.calls.length;
+  const documentAdds = vi.mocked(document.addEventListener).mock.calls.length;
+  const outcome = waitForVideoGenerationTask(
+    config,
+    { id: "cancel", provider: "openai", model: "media group::sora-2" },
+    { signal: controller.signal },
+  ).catch((error: unknown) => error);
+  await vi.advanceTimersByTimeAsync(0);
+  controller.abort();
+  expect(await outcome).toMatchObject({ name: "AbortError" });
+  expect(vi.getTimerCount()).toBe(0);
+  for (const args of vi
+    .mocked(window.addEventListener)
+    .mock.calls.slice(windowAdds)) {
+    expect(window.removeEventListener).toHaveBeenCalledWith(args[0], args[1]);
+  }
+  for (const args of vi
+    .mocked(document.addEventListener)
+    .mock.calls.slice(documentAdds)) {
+    expect(document.removeEventListener).toHaveBeenCalledWith(args[0], args[1]);
+  }
+  window.dispatchEvent(new Event("online"));
+  document.dispatchEvent(new Event("visibilitychange"));
+  await vi.runAllTimersAsync();
+  expect(siteFetch).toHaveBeenCalledTimes(1);
 });
 
 test("multiple video reference images retain frame metadata in the gateway task extension", async () => {
