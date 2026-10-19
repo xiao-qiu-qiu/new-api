@@ -81,6 +81,7 @@ import {
 } from '../../lib/model-form'
 import type { Model } from '../../types'
 import { ModelConnections } from '../model-connections'
+import { ModelVideoCapabilities } from '../model-video-capabilities'
 
 export function ModelMutateDrawer(props: {
   open: boolean
@@ -108,6 +109,8 @@ export function ModelMutateDrawer(props: {
     props.initialSection === 'pricing'
   )
   const [pricingDirty, setPricingDirty] = useState(false)
+  const [videoVisited, setVideoVisited] = useState(false)
+  const [videoDirty, setVideoDirty] = useState(false)
   const [pendingPricingName, setPendingPricingName] = useState<string | null>(
     null
   )
@@ -152,6 +155,8 @@ export function ModelMutateDrawer(props: {
     setPricingVisited(props.initialSection === 'pricing')
     setPricingName('')
     setPricingDirty(false)
+    setVideoVisited(false)
+    setVideoDirty(false)
     setPendingPricingName(null)
     setCloseConfirm(false)
   }, [
@@ -190,9 +195,19 @@ export function ModelMutateDrawer(props: {
     meta: { errorToast: false },
     onMutate: () => form.clearErrors('root.server'),
     mutationFn: async (values: ModelFormValues) => {
-      if (pricingDirty && values.model_name !== currentRow?.model_name) {
+      if (videoDirty && values.name_rule !== currentRow?.name_rule) {
         throw new Error(
-          t('Save or discard pricing changes before renaming metadata.')
+          t(
+            'Save or discard video capabilities before changing metadata matching.'
+          )
+        )
+      }
+      if (
+        (pricingDirty || videoDirty) &&
+        values.model_name !== currentRow?.model_name
+      ) {
+        throw new Error(
+          t('Save or discard model settings before renaming metadata.')
         )
       }
       const payload = transformFormDataToModelPayload(values)
@@ -221,7 +236,7 @@ export function ModelMutateDrawer(props: {
         queryClient.invalidateQueries({ queryKey: vendorsQueryKeys.all }),
       ])
       toast.success(t('Model metadata saved'))
-      if (!pricingDirty) props.onOpenChange(false)
+      if (!pricingDirty && !videoDirty) props.onOpenChange(false)
     },
     onError: (error) => {
       form.setError('root.server', {
@@ -241,7 +256,7 @@ export function ModelMutateDrawer(props: {
   const metadataDirty = form.formState.isDirty
   const close = (open: boolean) => {
     if (!open && isSubmitting) return
-    if (!open && (metadataDirty || pricingDirty)) {
+    if (!open && (metadataDirty || pricingDirty || videoDirty)) {
       setCloseConfirm(true)
       return
     }
@@ -269,10 +284,11 @@ export function ModelMutateDrawer(props: {
             onValueChange={(value) => {
               setSection(value)
               if (value === 'pricing') setPricingVisited(true)
+              if (value === 'video') setVideoVisited(true)
             }}
             className='shrink-0 px-4'
           >
-            <TabsList className='grid w-full grid-cols-3 group-data-horizontal/tabs:h-auto'>
+            <TabsList className='grid w-full grid-cols-4 group-data-horizontal/tabs:h-auto'>
               <TabsTrigger
                 value='metadata'
                 className='h-auto min-w-0 whitespace-normal'
@@ -285,6 +301,13 @@ export function ModelMutateDrawer(props: {
                 className='h-auto min-w-0 whitespace-normal'
               >
                 {t('Pricing')}
+              </TabsTrigger>
+              <TabsTrigger
+                value='video'
+                disabled={!hasModelName || currentRow?.name_rule !== 0}
+                className='h-auto min-w-0 whitespace-normal'
+              >
+                {t('Video capabilities')}
               </TabsTrigger>
               <TabsTrigger
                 value='connections'
@@ -682,6 +705,23 @@ export function ModelMutateDrawer(props: {
           {props.open && section === 'connections' && savedModel && (
             <ModelConnections model={savedModel} />
           )}
+          {props.open &&
+            videoVisited &&
+            savedModel &&
+            savedModel.name_rule === 0 && (
+              <div
+                className={
+                  section === 'video'
+                    ? 'flex min-h-0 flex-1 flex-col'
+                    : 'hidden'
+                }
+              >
+                <ModelVideoCapabilities
+                  modelName={savedModel.model_name}
+                  onDirtyChange={setVideoDirty}
+                />
+              </div>
+            )}
         </SheetContent>
       </Sheet>
       <ConfirmDialog

@@ -19,6 +19,23 @@ For commercial licensing, please contact support@quantumnous.com
 // Static translation keys that don't get picked up by the t('...') regex.
 // These cover dynamic labels (e.g. constants, configs) that are passed into t at runtime.
 export const STATIC_I18N_KEYS = [
+  // Video capability validation and API errors rendered through FormMessage.
+  'Enter a whole number between 0 and 100.',
+  'Use resolutions such as 480p, 720p or 1080p.',
+  'Use aspect ratios such as 16:9 or 9:16.',
+  'Enter whole seconds between 1 and 3600.',
+  'Allowed durations must not exceed the maximum duration.',
+  'Video model capabilities changed. Reload before saving.',
+  'Video capability lists support at most 64 options.',
+  'Video capability options must be unique, non-empty strings of at most 64 characters.',
+  'Video duration must be between 1 and 3600 seconds.',
+  'Video durations must be unique positive seconds within the configured maximum.',
+  'Video reference limits must be between 0 and 100.',
+  'Video model capabilities must be a JSON object.',
+  'A model name of at most 128 characters is required.',
+  'Use the video model capabilities API to update one model at a time.',
+  'Video resolutions must be whole numbers between 1 and 16384, optionally followed by p.',
+  'Video aspect ratios must be auto or positive whole numbers in W:H format.',
   // Ranking chart descriptions follow the selected calendar period.
   'Hourly token usage by model today',
   'Daily token usage by model this week',
