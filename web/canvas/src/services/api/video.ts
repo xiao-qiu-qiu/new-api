@@ -1,10 +1,10 @@
 import i18n from "@/i18n";
 import { dataUrlToFile, readFileAsDataUrl } from "@/lib/image-utils";
 import {
-  clampVideoSeconds,
   computeVideoSize,
   inferVideoRatio,
 } from "@/lib/media-size";
+import { getVideoConfigAspectRatio, normalizeVideoConfig, validateVideoReferenceCounts } from "@/lib/video-model-constraints";
 import {
   getMediaBlob,
   resolveMediaUrl,
@@ -108,6 +108,8 @@ export async function createVideoGenerationTask(
   references: ReferenceImage[] = [],
   options?: VideoMediaOptions,
 ): Promise<VideoGenerationTask> {
+  config = normalizeVideoConfig(config);
+  validateVideoReferenceCounts(config, { images: references.length, videos: options?.videos?.length || 0, audios: options?.audios?.length || 0 });
   const selection = resolveSiteMediaModel(
     config,
     config.model || config.videoModel,
@@ -129,7 +131,7 @@ export async function createVideoGenerationTask(
   const parameters = {
     ...selection,
     prompt,
-    seconds: clampVideoSeconds(config.videoSeconds),
+    seconds: config.videoSeconds,
     size: normalizeVideoSize(config.size, config.vquality) || "1280x720",
   };
   let init: RequestInit;
@@ -188,7 +190,7 @@ function videoReferenceRequest(
     images.length <= 2 &&
     !videos.length &&
     !audios.length;
-  const ratio = inferVideoRatio(config.size || "16:9");
+  const ratio = getVideoConfigAspectRatio(config);
   const resolution = normalizeVideoResolution(config.vquality);
   const generateAudio = boolConfig(config.videoGenerateAudio, true);
   const watermark = boolConfig(config.videoWatermark, false);

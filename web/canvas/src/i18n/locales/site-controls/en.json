@@ -31,7 +31,20 @@
   "agent.site.placeholder": "Describe a task, or type @ to reference canvas assets",
   "agent.site.requestFailed": "Request failed ({{status}})",
   "agent.site.truncatedResponse": "The model response was truncated. Shorten the request and try again.",
+  "Failed to upload audio": "Failed to upload audio",
   "Model groups": "Model groups",
   "No matching models": "No matching models",
-  "Search models...": "Search models..."
+  "No reference audio": "No reference audio",
+  "No reference images. Drop files here (maximum {{max}}).": "No reference images. Drop files here (maximum {{max}}).",
+  "Only audio files are supported": "Only audio files are supported",
+  "Preview audio: {{name}}": "Preview audio: {{name}}",
+  "Remove audio": "Remove audio",
+  "Search models...": "Search models...",
+  "This model does not support reference audio": "This model does not support reference audio",
+  "This model supports up to {{max}} reference audio files.": "This model supports up to {{max}} reference audio files.",
+  "This model supports up to {{max}} reference images.": "This model supports up to {{max}} reference images.",
+  "This model supports up to {{max}} reference videos.": "This model supports up to {{max}} reference videos.",
+  "Upload audio": "Upload audio",
+  "Video height": "Video height",
+  "Video width": "Video width"
 }

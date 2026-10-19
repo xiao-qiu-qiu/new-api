@@ -31,7 +31,20 @@
   "agent.site.placeholder": "Décrivez une tâche ou tapez @ pour référencer des ressources du canevas",
   "agent.site.requestFailed": "Échec de la requête ({{status}})",
   "agent.site.truncatedResponse": "La réponse du modèle a été tronquée. Raccourcissez la requête et réessayez.",
+  "Failed to upload audio": "Échec de l’importation du fichier audio",
   "Model groups": "Groupes de modèles",
   "No matching models": "Aucun modèle correspondant",
-  "Search models...": "Rechercher un modèle…"
+  "No reference audio": "Aucun fichier audio de référence",
+  "No reference images. Drop files here (maximum {{max}}).": "Aucune image de référence. Déposez les fichiers ici (maximum {{max}}).",
+  "Only audio files are supported": "Seuls les fichiers audio sont acceptés",
+  "Preview audio: {{name}}": "Écouter le fichier audio : {{name}}",
+  "Remove audio": "Retirer le fichier audio",
+  "Search models...": "Rechercher un modèle…",
+  "This model does not support reference audio": "Ce modèle ne prend pas en charge l’audio de référence",
+  "This model supports up to {{max}} reference audio files.": "Ce modèle accepte jusqu’à {{max}} fichiers audio de référence.",
+  "This model supports up to {{max}} reference images.": "Ce modèle accepte jusqu’à {{max}} images de référence.",
+  "This model supports up to {{max}} reference videos.": "Ce modèle accepte jusqu’à {{max}} vidéos de référence.",
+  "Upload audio": "Importer un fichier audio",
+  "Video height": "Hauteur de la vidéo",
+  "Video width": "Largeur de la vidéo"
 }

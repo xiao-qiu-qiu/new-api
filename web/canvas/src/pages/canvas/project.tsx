@@ -29,7 +29,7 @@ import { CanvasNodeCropDialog, type CanvasImageCropRect } from "@/components/can
 import { CanvasNodeMaskEditDialog, type CanvasImageMaskEditPayload } from "@/components/canvas/canvas-node-mask-edit-dialog";
 import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components/canvas/canvas-node-split-dialog";
 import { CanvasNodeUpscaleDialog, type CanvasImageUpscaleParams } from "@/components/canvas/canvas-node-upscale-dialog";
-import { buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, hydrateNodeGenerationContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
+import { buildNodeGenerationContext, buildNodeGenerationInputs, buildNodeResponseMessages, getVideoReferenceSelectionDisabledNodes, hydrateNodeGenerationContext, type NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
 import { CanvasSelectionToolbar } from "@/components/canvas/canvas-selection-toolbar";
 import { InfiniteCanvas } from "@/components/canvas/infinite-canvas";
@@ -794,6 +794,11 @@ function InfiniteCanvasPage() {
         return map;
     }, [connections, nodeById]);
     const referenceConnectedNodeIds = useMemo(() => new Set([referencePickerNodeId, ...(referencePickerNodeId ? connectedNodesByNodeId.get(referencePickerNodeId)?.flatMap((node) => node.type === CanvasNodeType.Group ? [node.id, ...getGroupResourceNodes(node.id, nodes).map((child) => child.id)] : [node.id]) || [] : [])].filter((id): id is string => Boolean(id))), [connectedNodesByNodeId, nodes, referencePickerNodeId]);
+    const referenceLimitDisabledNodeIds = useMemo(() => {
+        const target = referencePickerNodeId ? nodeById.get(referencePickerNodeId) : undefined;
+        if (!target || (target.type !== CanvasNodeType.Video && target.metadata?.generationMode !== "video")) return new Set<string>();
+        return getVideoReferenceSelectionDisabledNodes(buildGenerationConfig(effectiveConfig, target, "video"), target.id, nodes, connections);
+    }, [connections, effectiveConfig, nodeById, nodes, referencePickerNodeId]);
     const { applyAgentOps } = useAgentBridge({
         projectId,
         title: currentProject?.title,
@@ -941,11 +946,11 @@ function InfiniteCanvasPage() {
     }, [referencePickerNodeId]);
 
     const selectNodeReference = useCallback((fromNodeId: string) => {
-        if (!referencePickerNodeId || referenceConnectedNodeIds.has(fromNodeId)) return;
+        if (!referencePickerNodeId || referenceConnectedNodeIds.has(fromNodeId) || referenceLimitDisabledNodeIds.has(fromNodeId)) return;
         const source = nodesRef.current.find((node) => node.id === fromNodeId);
         if (!source || !isCanvasReferenceNode(source, nodesRef.current)) return;
         setConnections((prev) => [...prev, { id: nanoid(), fromNodeId, toNodeId: referencePickerNodeId }]);
-    }, [referenceConnectedNodeIds, referencePickerNodeId]);
+    }, [referenceConnectedNodeIds, referenceLimitDisabledNodeIds, referencePickerNodeId]);
 
     useEffect(() => {
         if (!referencePickerNodeId) return;
@@ -3223,7 +3228,7 @@ function InfiniteCanvasPage() {
                         let referenceSelectionState: "target" | "disabled" | "available" | undefined;
                         if (referencePickerNodeId) {
                             if (node.id === referencePickerNodeId) referenceSelectionState = "target";
-                            else referenceSelectionState = referenceConnectedNodeIds.has(node.id) || !isCanvasReferenceNode(node, nodes) ? "disabled" : "available";
+                            else referenceSelectionState = referenceConnectedNodeIds.has(node.id) || referenceLimitDisabledNodeIds.has(node.id) || !isCanvasReferenceNode(node, nodes) ? "disabled" : "available";
                         }
                         return (
                         <CanvasNode

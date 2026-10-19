@@ -3,10 +3,12 @@ import { createPortal } from "react-dom";
 import { Settings2 } from "lucide-react";
 import { Button } from "antd";
 
-import { VideoSettingsPanel, videoModeLabel, videoResolutionLabel, videoSecondsLabel, videoSizeLabel } from "@/components/video-settings-panel";
+import { VideoSettingsPanel } from "@/components/video-settings-panel";
+import { videoModeLabel, videoResolutionLabel, videoSecondsLabel, videoSizeLabel } from "@/lib/video-settings";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { AiConfig } from "@/stores/use-config-store";
+import { normalizeVideoConfig } from "@/lib/video-model-constraints";
 
 type CanvasVideoSettingsPopoverProps = {
     config: AiConfig;
@@ -16,6 +18,7 @@ type CanvasVideoSettingsPopoverProps = {
 };
 
 export function CanvasVideoSettingsPopover({ config, onConfigChange, buttonClassName, placement = "topLeft" }: CanvasVideoSettingsPopoverProps) {
+    const normalizedConfig = normalizeVideoConfig(config);
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const buttonRef = useRef<HTMLSpanElement>(null);
     const panelRef = useRef<HTMLDivElement>(null);
@@ -43,14 +46,14 @@ export function CanvasVideoSettingsPopover({ config, onConfigChange, buttonClass
         };
     }, [open]);
 
-    const panel = open && buttonRect ? <VideoSettingsPortal buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} config={config} onConfigChange={onConfigChange} /> : null;
+    const panel = open && buttonRect ? <VideoSettingsPortal buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} config={normalizedConfig} onConfigChange={onConfigChange} /> : null;
 
     return (
         <>
             <span ref={buttonRef} className="inline-flex min-w-0">
                 <Button size="small" type="text" className={buttonClassName || "!h-8 !max-w-[220px] !justify-start !rounded-full !px-2.5"} style={{ background: theme.node.fill, color: theme.node.text }} icon={<Settings2 className="size-3.5" />} onClick={() => setOpen((current) => !current)}>
                     <span className="truncate">
-                        {videoResolutionLabel(config.vquality)} · {videoSizeLabel(config.size)} · {videoSecondsLabel(config.videoSeconds)} · {videoModeLabel(config.videoMode)}
+                        {videoResolutionLabel(normalizedConfig.vquality)} · {videoSizeLabel(normalizedConfig.size, normalizedConfig)} · {videoSecondsLabel(normalizedConfig.videoSeconds)} · {videoModeLabel(normalizedConfig.videoMode)}
                     </span>
                 </Button>
             </span>
@@ -79,7 +82,9 @@ function VideoSettingsPortal({
     const margin = 12;
     const alignRight = placement?.endsWith("Right");
     const alignCenter = placement === "top" || placement === "bottom";
-    const left = alignCenter ? buttonRect.left + buttonRect.width / 2 - width / 2 : alignRight ? buttonRect.right - width : buttonRect.left;
+    let left = buttonRect.left;
+    if (alignCenter) left = buttonRect.left + buttonRect.width / 2 - width / 2;
+    else if (alignRight) left = buttonRect.right - width;
     const topPlacement = placement?.startsWith("top");
     const style = {
         position: "fixed",

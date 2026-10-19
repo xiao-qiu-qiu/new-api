@@ -41,6 +41,37 @@ function model(
   return { model_name: name, ...metadata }
 }
 
+it('passes only the selected group video capabilities through the host catalog', () => {
+  const restricted = { resolutions: ['720p'], max_reference_images: 0 }
+  const channels = buildCanvasChannels(
+    [
+      { value: 'restricted', label: 'Restricted', ratio: 1 },
+      { value: 'standard', label: 'Standard', ratio: 1 },
+    ],
+    new Map([
+      ['restricted', [{ value: 'video', label: 'Video' }]],
+      ['standard', [{ value: 'video', label: 'Video' }]],
+    ]),
+    {
+      data: [
+        model('video', {
+          supported_endpoint_types: ['openai-video'],
+          enable_groups: ['restricted'],
+          video_capabilities: restricted,
+        }),
+        model('video', {
+          supported_endpoint_types: ['openai-video'],
+          enable_groups: ['standard'],
+        }),
+      ],
+    },
+    'https://gateway.example'
+  )
+
+  expect(channels[0].models[0].videoCapabilities).toEqual(restricted)
+  expect(channels[1].models[0].videoCapabilities).toBeUndefined()
+})
+
 const capabilityCases: Array<[string, CanvasPricingModel, CanvasCapability[]]> =
   [
     [

@@ -1,3 +1,5 @@
+import type { VideoModelCapabilities } from '@/lib/video-model-constraints'
+
 export type SiteChannel = {
   id: string
   name: string
@@ -9,6 +11,7 @@ export type SiteChannel = {
     capability: 'image' | 'video' | 'text' | 'audio'
     capabilities?: Array<'image' | 'video' | 'text' | 'audio'>
     chatProtocol?: 'chat' | 'responses'
+    videoCapabilities?: VideoModelCapabilities
   }>
 }
 

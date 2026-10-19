@@ -7,6 +7,8 @@ import { CanvasNodeType, type CanvasConnection, type CanvasNodeData } from "@/ty
 import { getGenerationResourceNodes, getGroupResourceNodes } from "@/lib/canvas/canvas-resource-references";
 import { getNodeDefinition } from "@/lib/canvas/node-registry";
 import { sourceNodeReferenceImages } from "@/lib/canvas/canvas-generation-helpers";
+import { getVideoModelConstraints } from "@/lib/video-model-constraints";
+import type { AiConfig } from "@/stores/use-config-store";
 
 export type NodeGenerationContext = {
     prompt: string;
@@ -134,6 +136,28 @@ export function buildNodeGenerationInputs(nodeId: string, nodes: CanvasNodeData[
         }
         return readNodeGenerationResource(node);
     });
+}
+
+export function getVideoReferenceSelectionDisabledNodes(config: AiConfig, nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]): Set<string> {
+    const constraints = getVideoModelConstraints(config);
+    const currentInputs = flattenGenerationInputs(buildNodeGenerationInputs(nodeId, nodes, connections));
+    const selectedIds = new Set(currentInputs.map((input) => input.nodeId));
+    const counts = {
+        image: currentInputs.filter((input) => input.type === "image").length,
+        audio: currentInputs.filter((input) => input.type === "audio").length,
+        video: currentInputs.filter((input) => input.type === "video").length,
+    };
+    const limits = { image: constraints.maxReferenceImages, audio: constraints.maxReferenceAudio, video: constraints.maxReferenceVideos };
+    const disabled = new Set<string>();
+    for (const node of nodes) {
+        const resources = (node.type === CanvasNodeType.Group ? getGroupResourceNodes(node.id, nodes) : [node]).flatMap(readNodeGenerationResource).filter((input) => !selectedIds.has(input.nodeId));
+        for (const kind of ["image", "audio", "video"] as const) {
+            const addedCount = resources.filter((input) => input.type === kind).length;
+            const limit = limits[kind];
+            if (addedCount && limit !== undefined && counts[kind] + addedCount > limit) disabled.add(node.id);
+        }
+    }
+    return disabled;
 }
 
 function flattenGenerationInputs(inputs: NodeGenerationInput[]) {

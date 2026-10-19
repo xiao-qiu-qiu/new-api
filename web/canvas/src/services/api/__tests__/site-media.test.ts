@@ -307,6 +307,25 @@ test("multiple video reference images retain frame metadata in the gateway task 
   });
 });
 
+test("video requests preserve model duration, resolution and ratio limits while forwarding reference audio", async () => {
+  const videoConfig = { ...videoContractConfig("doubao-seedance-2-0-260128"), videoSeconds: "45", vquality: "1080", size: "2:3" };
+  videoConfig.channels[0].models.push({ name: "limited-audio-video", capability: "video", videoCapabilities: {
+    durations: [15, 45], max_duration_seconds: 60, resolutions: ["1080p"], aspect_ratios: ["2:3"], max_reference_audio: 1,
+  } });
+  videoConfig.model = "media group::limited-audio-video";
+  siteFetch.mockResolvedValueOnce(json({ id: "audio-reference", status: "queued" }));
+  const audios = [{ id: "voice", name: "voice.wav", type: "audio/wav", url: "data:audio/wav;base64,dm9pY2U=" }];
+  await createVideoGenerationTask(videoConfig, "Animate", [], { audios });
+  expect(JSON.parse(String(siteFetch.mock.calls[0][1]?.body))).toMatchObject({
+    seconds: "45", size: "1080x1620", metadata: {
+      ratio: "2:3", resolution: "1080p", audios: [audios[0].url],
+    },
+  });
+  siteFetch.mockClear();
+  await expect(createVideoGenerationTask(videoConfig, "Animate", [], { audios: [...audios, { ...audios[0], id: "second" }] })).rejects.toThrow("up to 1 reference audio");
+  expect(siteFetch).not.toHaveBeenCalled();
+});
+
 test.each([
   {
     model: "kling-v2-1",

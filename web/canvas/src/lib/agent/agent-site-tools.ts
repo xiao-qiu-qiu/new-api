@@ -4,7 +4,7 @@ import i18n from "@/i18n";
 import { fetchPrompts } from "@/services/api/prompts";
 import { uploadImage } from "@/services/image-storage";
 import { imageAspectOptions, imageQualityOptions, imageScaleOptions } from "@/components/image-settings-panel";
-import { videoResolutionOptions, videoSecondsRange, videoSizeOptions } from "@/components/video-settings-panel";
+import { videoResolutionOptions, videoSecondsRange, videoSizeOptions } from "@/lib/video-settings";
 import type { CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
 import { clampVideoSeconds } from "@/lib/media-size";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
@@ -113,7 +113,8 @@ function getGenerationStatus(input: SiteToolInput, canvasSnapshot?: CanvasAgentS
 }
 
 function generationStatusOrder(status: GenerationStatus) {
-    return status === "running" ? 0 : status === "queued" ? 1 : 2;
+    if (status === "running") return 0;
+    return status === "queued" ? 1 : 2;
 }
 
 function normalizeCanvasGenerationStatus(status: unknown): GenerationStatus | null {

@@ -5,6 +5,7 @@ import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
 import { getUserStorageKey } from "@/lib/site-storage";
+import type { VideoModelCapabilities } from "@/lib/video-model-constraints";
 
 export type ApiCallFormat = "openai" | "gemini";
 export type ModelCapability = "image" | "video" | "text" | "audio";
@@ -14,6 +15,7 @@ export type ChannelModel = {
     name: string;
     capability: ModelCapability;
     capabilities?: ModelCapability[];
+    videoCapabilities?: VideoModelCapabilities;
     script?: string;
 };
 
@@ -297,7 +299,8 @@ export function normalizeChannelModels(models: Array<string | ChannelModel> | un
         const capability = typeof item === "string" ? guessCapability(name) : item.capability || guessCapability(name);
         const script = typeof item === "string" ? undefined : item.script?.trim() || undefined;
         const capabilities = typeof item === "string" ? undefined : item.capabilities;
-        result.push({ name, capability, capabilities, script });
+        const videoCapabilities = typeof item === "string" ? undefined : item.videoCapabilities;
+        result.push({ name, capability, capabilities, script, ...(videoCapabilities ? { videoCapabilities } : {}) });
     }
     return result;
 }

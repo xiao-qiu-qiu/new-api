@@ -31,7 +31,20 @@
   "agent.site.placeholder": "描述任务，或输入 @ 引用画布素材",
   "agent.site.requestFailed": "请求失败（{{status}}）",
   "agent.site.truncatedResponse": "模型回复被截断，请缩短请求后重试",
+  "Failed to upload audio": "上传音频失败",
   "Model groups": "模型分组",
   "No matching models": "没有匹配的模型",
-  "Search models...": "搜索模型…"
+  "No reference audio": "暂无参考音频",
+  "No reference images. Drop files here (maximum {{max}}).": "暂无参考图片。将文件拖到此处（最多 {{max}} 张）。",
+  "Only audio files are supported": "仅支持音频文件",
+  "Preview audio: {{name}}": "试听音频：{{name}}",
+  "Remove audio": "移除音频",
+  "Search models...": "搜索模型…",
+  "This model does not support reference audio": "此模型不支持参考音频",
+  "This model supports up to {{max}} reference audio files.": "此模型最多支持 {{max}} 个参考音频。",
+  "This model supports up to {{max}} reference images.": "此模型最多支持 {{max}} 张参考图片。",
+  "This model supports up to {{max}} reference videos.": "此模型最多支持 {{max}} 个参考视频。",
+  "Upload audio": "上传音频",
+  "Video height": "视频高度",
+  "Video width": "视频宽度"
 }

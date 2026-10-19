@@ -26,11 +26,22 @@ export type { GroupOption } from '../playground/types'
 export type CanvasCapability = 'image' | 'video' | 'text' | 'audio'
 export type CanvasChatProtocol = 'chat' | 'responses'
 
+export type CanvasVideoCapabilities = {
+  resolutions?: string[]
+  aspect_ratios?: string[]
+  durations?: number[]
+  max_duration_seconds?: number
+  max_reference_images?: number
+  max_reference_audio?: number
+  max_reference_videos?: number
+}
+
 export type CanvasModel = {
   name: string
   capability: CanvasCapability
   capabilities?: CanvasCapability[]
   chatProtocol: CanvasChatProtocol
+  videoCapabilities?: CanvasVideoCapabilities
 }
 
 export type CanvasChannel = {
@@ -57,6 +68,7 @@ export type CanvasPricingModel = Pick<
 > & {
   enable_groups?: string[]
   task_plugins?: Array<CanvasTaskPlugin | string>
+  video_capabilities?: CanvasVideoCapabilities
 }
 
 export type CanvasPricingMetadata = {
@@ -274,6 +286,9 @@ export function buildCanvasChannels(
           )
             ? 'responses'
             : 'chat'
+        const videoCapabilities = metadata.find(
+          (entry) => entry.video_capabilities
+        )?.video_capabilities
         // One entry per name: upstream lookups select the first name match.
         // Consumers filter capabilities for a node's actual generation mode.
         models.push({
@@ -281,6 +296,7 @@ export function buildCanvasChannels(
           capability: primary,
           capabilities: ordered,
           chatProtocol,
+          ...(videoCapabilities ? { videoCapabilities } : {}),
         })
       }
     }

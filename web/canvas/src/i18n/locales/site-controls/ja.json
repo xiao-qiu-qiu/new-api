@@ -31,7 +31,20 @@
   "agent.site.placeholder": "タスクを説明するか、@ でキャンバスの素材を参照してください",
   "agent.site.requestFailed": "リクエストに失敗しました（{{status}}）",
   "agent.site.truncatedResponse": "モデルの応答が途中で切れました。リクエストを短くして再試行してください。",
+  "Failed to upload audio": "音声をアップロードできませんでした",
   "Model groups": "モデルグループ",
   "No matching models": "一致するモデルがありません",
-  "Search models...": "モデルを検索…"
+  "No reference audio": "参照音声はありません",
+  "No reference images. Drop files here (maximum {{max}}).": "参照画像はありません。ここにファイルをドロップしてください（最大 {{max}} 枚）。",
+  "Only audio files are supported": "音声ファイルのみ対応しています",
+  "Preview audio: {{name}}": "音声をプレビュー：{{name}}",
+  "Remove audio": "音声を削除",
+  "Search models...": "モデルを検索…",
+  "This model does not support reference audio": "このモデルは参照音声に対応していません",
+  "This model supports up to {{max}} reference audio files.": "このモデルでは参照音声ファイルを最大 {{max}} 件まで使用できます。",
+  "This model supports up to {{max}} reference images.": "このモデルでは参照画像を最大 {{max}} 枚まで使用できます。",
+  "This model supports up to {{max}} reference videos.": "このモデルでは参照動画を最大 {{max}} 件まで使用できます。",
+  "Upload audio": "音声をアップロード",
+  "Video height": "動画の高さ",
+  "Video width": "動画の幅"
 }

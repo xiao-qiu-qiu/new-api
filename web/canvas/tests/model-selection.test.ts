@@ -50,6 +50,41 @@ const { defaultConfig, resolveModelForCapability, useConfigStore } =
 const { buildGenerationConfig } =
   await import("../src/lib/canvas/canvas-generation-helpers");
 const { CanvasNodeType } = await import("../src/types/canvas");
+const { getVideoModelConstraints, normalizeVideoConfig, validateVideoReferenceCounts } = await import("../src/lib/video-model-constraints");
+const { getVideoReferenceSelectionDisabledNodes } = await import("../src/components/canvas/canvas-node-generation");
+
+test("video constraints normalize stale model parameters and preserve zero reference limits", () => {
+  const restricted: AiConfig = {
+    ...defaultConfig,
+    model: "restricted::video",
+    channels: [{ id: "restricted", name: "Restricted", baseUrl: "", apiKey: "", apiFormat: "openai", models: [{ name: "video", capability: "video", videoCapabilities: { resolutions: ["720p", "1080P"], aspect_ratios: ["2:3"], durations: [5, 10], max_duration_seconds: 8, max_reference_images: 1, max_reference_audio: 0 } }] }],
+    vquality: "480",
+    size: "1920x1080",
+    videoSeconds: "30",
+  };
+  expect(normalizeVideoConfig(restricted)).toMatchObject({ vquality: "720", size: "720x1080", videoSeconds: "5" });
+  expect(getVideoModelConstraints(restricted)).toMatchObject({ maxReferenceAudio: 0, durations: [5], maxDurationSeconds: 8 });
+  expect(() => validateVideoReferenceCounts(restricted, { images: 1, audios: 0, videos: 0 })).not.toThrow();
+  expect(() => validateVideoReferenceCounts(restricted, { images: 1, audios: 1, videos: 0 })).toThrow();
+  expect(normalizeVideoConfig({ ...restricted, vquality: "1080", size: "1080x1620" })).toMatchObject({ vquality: "1080", size: "1080x1620" });
+});
+
+test("unconfigured video models retain the existing duration and free resolution defaults", () => {
+  const config = { ...defaultConfig, vquality: "864", size: "1536x864", videoSeconds: "60" };
+  expect(normalizeVideoConfig(config)).toMatchObject({ vquality: "864", size: "1536x864", videoSeconds: "30" });
+  expect(getVideoModelConstraints(config).maxReferenceAudio).toBeUndefined();
+});
+
+test("video reference selection disables a full image slot and an explicitly unsupported audio group", () => {
+  const config: AiConfig = { ...defaultConfig, model: "media::video", channels: [{ id: "media", name: "Media", baseUrl: "", apiKey: "", apiFormat: "openai", models: [{ name: "video", capability: "video", videoCapabilities: { max_reference_images: 1, max_reference_audio: 0 } }] }] };
+  const node = (id: string, type: CanvasNodeData["type"], groupId?: string): CanvasNodeData => ({ id, type, title: id, position: { x: 0, y: 0 }, width: 100, height: 100, metadata: { content: type === "image" ? "data:image/png;base64,AA==" : "https://media.example/file", groupId } });
+  const nodes = [node("target", CanvasNodeType.Video), node("first", CanvasNodeType.Image), node("second", CanvasNodeType.Image), node("group", CanvasNodeType.Group), node("audio", CanvasNodeType.Audio, "group"), node("text", CanvasNodeType.Text)];
+  const disabled = getVideoReferenceSelectionDisabledNodes(config, "target", nodes, [{ id: "connection", fromNodeId: "first", toNodeId: "target" }]);
+  expect(disabled.has("second")).toBe(true);
+  expect(disabled.has("audio")).toBe(true);
+  expect(disabled.has("group")).toBe(true);
+  expect(disabled.has("text")).toBe(false);
+});
 
 const config: AiConfig = {
   ...defaultConfig,

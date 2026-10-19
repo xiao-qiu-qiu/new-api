@@ -31,7 +31,20 @@
   "agent.site.placeholder": "Mô tả tác vụ hoặc nhập @ để tham chiếu tài nguyên trên canvas",
   "agent.site.requestFailed": "Yêu cầu thất bại ({{status}})",
   "agent.site.truncatedResponse": "Phản hồi của mô hình bị cắt ngắn. Hãy rút gọn yêu cầu rồi thử lại.",
+  "Failed to upload audio": "Tải âm thanh lên thất bại",
   "Model groups": "Nhóm mô hình",
   "No matching models": "Không có mô hình phù hợp",
-  "Search models...": "Tìm mô hình…"
+  "No reference audio": "Chưa có âm thanh tham chiếu",
+  "No reference images. Drop files here (maximum {{max}}).": "Chưa có ảnh tham chiếu. Thả tệp vào đây (tối đa {{max}} ảnh).",
+  "Only audio files are supported": "Chỉ hỗ trợ tệp âm thanh",
+  "Preview audio: {{name}}": "Nghe thử âm thanh: {{name}}",
+  "Remove audio": "Xóa âm thanh",
+  "Search models...": "Tìm mô hình…",
+  "This model does not support reference audio": "Mô hình này không hỗ trợ âm thanh tham chiếu",
+  "This model supports up to {{max}} reference audio files.": "Mô hình này hỗ trợ tối đa {{max}} tệp âm thanh tham chiếu.",
+  "This model supports up to {{max}} reference images.": "Mô hình này hỗ trợ tối đa {{max}} ảnh tham chiếu.",
+  "This model supports up to {{max}} reference videos.": "Mô hình này hỗ trợ tối đa {{max}} video tham chiếu.",
+  "Upload audio": "Tải âm thanh lên",
+  "Video height": "Chiều cao video",
+  "Video width": "Chiều rộng video"
 }
