@@ -31,6 +31,35 @@ const requestExpression =
 afterEach(() => vi.useRealTimers())
 
 describe('request simulation', () => {
+  test('recalculates effective service tiers independently from the original request body', async () => {
+    const user = userEvent.setup()
+    render(
+      <RequestSimulation
+        expression='tier("base", p * 2) * (service_tier == "priority" ? 2 : 1) * (service_tier == "flex" ? 0.5 : 1)'
+        tokens={{ p: 1000000 }}
+        mode='token'
+        currency={USD_PRICING_CURRENCY}
+      />
+    )
+    await user.click(screen.getByRole('button', { name: 'Request simulation' }))
+    fireEvent.input(
+      screen.getByRole('textbox', { name: 'Simulated request body' }),
+      { target: { value: '{"service_tier":"priority"}' } }
+    )
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Simulated request cost: $2'
+    )
+    await user.click(screen.getByRole('combobox', { name: 'Service Tier' }))
+    await user.click(screen.getByRole('option', { name: /^fast$/ }))
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Simulated request cost: $4'
+    )
+    await user.click(screen.getByRole('combobox', { name: 'Service Tier' }))
+    await user.click(screen.getByRole('option', { name: /^flex$/ }))
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Simulated request cost: $1'
+    )
+  })
   test('explains absent task usage instead of showing a token estimator syntax error', () => {
     render(
       <TieredPricingEditor

@@ -30,6 +30,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 const responsesWSEventTypeResponseCreate = "response.create"
@@ -656,6 +658,16 @@ func buildResponsesWSCreatePayload(c *gin.Context, info *relaycommon.RelayInfo, 
 	jsonData, err := io.ReadAll(body)
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
+	}
+	tier := gjson.GetBytes(jsonData, "service_tier").String()
+	if strings.EqualFold(strings.TrimSpace(tier), "fast") {
+		jsonData, err = sjson.SetBytes(jsonData, "service_tier", "priority")
+		if err != nil {
+			return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+		}
+	}
+	if apiErr := service.PrepareServiceTierBilling(c, info, tier); apiErr != nil {
+		return nil, apiErr
 	}
 	event, err := buildResponsesWSCreateEvent(jsonData, generate, streamID)
 	if err != nil {

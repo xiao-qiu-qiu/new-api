@@ -19,6 +19,15 @@ For commercial licensing, please contact support@quantumnous.com
 // Static translation keys that don't get picked up by the t('...') regex.
 // These cover dynamic labels (e.g. constants, configs) that are passed into t at runtime.
 export const STATIC_I18N_KEYS = [
+  // Ranking chart descriptions follow the selected calendar period.
+  'Hourly token usage by model today',
+  'Daily token usage by model this week',
+  'Daily token usage by model this month',
+  'Weekly token usage by model this year',
+  'Token share by model author today',
+  'Token share by model author this week',
+  'Token share by model author this month',
+  'Token share by model author this year',
   'Task usage metadata is unavailable. Pricing details cannot be displayed.',
   'This expression cannot be expanded into a price table. View the original expression below.',
   'This operation is only supported for vLLM or SGLang channels',

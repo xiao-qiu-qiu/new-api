@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -516,6 +517,54 @@ func TestBillingSessionReserveWalletTopUpDecrementsBalance(t *testing.T) {
 	userQuota, err := model.GetUserQuota(userID, false)
 	require.NoError(t, err)
 	assert.Equal(t, 450_000, userQuota)
+
+	t.Run("service tier retry must fit the remaining wallet", func(t *testing.T) {
+		const expression = `tier("base", p) * (service_tier == "ultrafast" ? 6 : 1)`
+		relayInfo.TieredBillingSnapshot = &billingexpr.BillingSnapshot{ExprString: expression, ExprHash: billingexpr.ExprHashString(expression)}
+		// A trusted session also has to check an increased final tier before
+		// sending; the failed reserve preserves its existing funding state.
+		session.trusted = true
+		err := session.Reserve(600_000)
+		require.Error(t, err)
+		assert.Equal(t, 100_000, session.GetPreConsumedQuota())
+		userQuota, err := model.GetUserQuota(userID, false)
+		require.NoError(t, err)
+		assert.Equal(t, 450_000, userQuota)
+	})
+
+	t.Run("service tier reserves roll back and refund the full total", func(t *testing.T) {
+		const retryUserID = 703
+		const expression = `tier("base", p) * (service_tier == "ultrafast" ? 6 : 1)`
+		require.NoError(t, model.DB.Create(&model.User{Id: retryUserID, Username: "service_tier_refund_user", AffCode: "tier-refund", Quota: 500_000, Status: common.UserStatusEnabled}).Error)
+		funding := &WalletFunding{userId: retryUserID}
+		require.NoError(t, funding.PreConsume(100_000))
+		info := &relaycommon.RelayInfo{UserId: retryUserID, IsPlayground: true,
+			TieredBillingSnapshot: &billingexpr.BillingSnapshot{ExprString: expression, ExprHash: billingexpr.ExprHashString(expression)}}
+		retry := &BillingSession{relayInfo: info, funding: funding, preConsumedQuota: 100_000, tokenConsumed: 100_000}
+		require.NoError(t, retry.Reserve(300_000))
+		balance, err := model.GetUserQuota(retryUserID, false)
+		require.NoError(t, err)
+		assert.Equal(t, 200_000, balance)
+
+		// The wallet reserve succeeds but a missing limited API token rejects
+		// its side of the reservation. The entire wallet delta must roll back.
+		info.IsPlayground = false
+		info.TokenId, info.TokenKey = 999999, "missing-service-tier-token"
+		require.Error(t, retry.Reserve(350_000))
+		assert.Equal(t, 300_000, retry.GetPreConsumedQuota())
+		balance, err = model.GetUserQuota(retryUserID, false)
+		require.NoError(t, err)
+		assert.Equal(t, 200_000, balance)
+
+		info.IsPlayground = true
+		ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+		ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+		retry.Refund(ctx)
+		assert.Eventually(t, func() bool {
+			balance, err := model.GetUserQuota(retryUserID, false)
+			return err == nil && balance == 500_000
+		}, time.Second, 10*time.Millisecond)
+	})
 }
 
 func TestTryTieredSettleUsesFinalGroupAfterRetry(t *testing.T) {

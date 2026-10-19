@@ -35,7 +35,9 @@ import { EmptyState } from '@/components/empty-state'
 import { ErrorState } from '@/components/error-state'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Switch } from '@/components/ui/switch'
 import {
   Table,
   TableBody,
@@ -78,8 +80,23 @@ export function UserLeaderboard(props: {
   const currency = useSystemConfigStore((state) => state.config.currency)
   const metric = props.metric ?? 'tokens'
   const spending = metric === 'spending'
-  const { rankings, preference, participation, nickname, user } =
-    useUserRankings(props.period, metric)
+  const [adminViewerID, setAdminViewerID] = useState<number | null>(null)
+  const {
+    rankings,
+    preference,
+    participation,
+    nickname,
+    user,
+    adminMode,
+    canViewAllUsers,
+  } = useUserRankings(props.period, metric, adminViewerID)
+  // Changing accounts exits admin mode before rendering the next account's data.
+  if (
+    adminViewerID !== null &&
+    (adminViewerID !== user?.id || !canViewAllUsers)
+  ) {
+    setAdminViewerID(null)
+  }
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [rulesOpen, setRulesOpen] = useState(false)
   const [nicknameOpen, setNicknameOpen] = useState(false)
@@ -92,7 +109,7 @@ export function UserLeaderboard(props: {
       : preference.data?.participating) ?? false
   const publicModels = preference.data?.model_details_public
   const needsChoice = Boolean(
-    user && preference.data && !preference.data.prompted
+    !adminMode && user && preference.data && !preference.data.prompted
   )
   const initialRulesOpen = needsChoice && onboardingStep === null
   const initialNicknameOpen = needsChoice && onboardingStep === 'nickname'
@@ -132,21 +149,55 @@ export function UserLeaderboard(props: {
           <div>
             <div className='flex flex-wrap items-center gap-2'>
               <span className='font-medium'>
-                {t('Your usage, your choice')}
+                {adminMode ? t('All users') : t('Your usage, your choice')}
               </span>
-              {user && preference.data && (
+              {!adminMode && user && preference.data && (
                 <Badge variant='secondary'>
                   {optedIn ? t('Participating') : t('Viewing only')}
                 </Badge>
               )}
             </div>
-            <p className='text-muted-foreground mt-1 text-xs sm:text-sm'>
-              {sharingStatus}
-            </p>
+            {!adminMode && (
+              <p className='text-muted-foreground mt-1 text-xs sm:text-sm'>
+                {sharingStatus}
+              </p>
+            )}
           </div>
         </div>
         <div className='flex flex-wrap items-center gap-1.5'>
-          {user && preference.data && (
+          {canViewAllUsers && (
+            <div className='flex items-center gap-2 rounded-md border px-3 py-2'>
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Label
+                      htmlFor='ranking-admin-mode'
+                      className='cursor-help'
+                    />
+                  }
+                >
+                  {t('Administrator mode')}
+                </TooltipTrigger>
+                <TooltipContent>
+                  {t(
+                    'View all users, including private usage and model details.'
+                  )}
+                </TooltipContent>
+              </Tooltip>
+              <Switch
+                id='ranking-admin-mode'
+                checked={adminMode}
+                onCheckedChange={(checked) => {
+                  setAdminViewerID(checked ? (user?.id ?? null) : null)
+                  setSettingsOpen(false)
+                  setRulesOpen(false)
+                  setNicknameOpen(false)
+                  setOnboardingStep(null)
+                }}
+              />
+            </div>
+          )}
+          {!adminMode && user && preference.data && (
             <Button
               variant='ghost'
               size='sm'
@@ -161,9 +212,15 @@ export function UserLeaderboard(props: {
                 : t('Set nickname')}
             </Button>
           )}
-          <Button variant='ghost' size='sm' onClick={() => setRulesOpen(true)}>
-            {t('Ranking rules')}
-          </Button>
+          {!adminMode && (
+            <Button
+              variant='ghost'
+              size='sm'
+              onClick={() => setRulesOpen(true)}
+            >
+              {t('Ranking rules')}
+            </Button>
+          )}
           {!user ? (
             <Button
               size='sm'
@@ -173,21 +230,23 @@ export function UserLeaderboard(props: {
               <ArrowUpRight className='size-4' aria-hidden />
             </Button>
           ) : (
-            <Button
-              variant='outline'
-              size='sm'
-              disabled={preference.isLoading || participation.isPending}
-              onClick={() => {
-                if (preference.isError) void preference.refetch()
-                else {
-                  participation.reset()
-                  setSettingsOpen(true)
-                }
-              }}
-            >
-              <Settings2 className='size-3.5' aria-hidden />
-              {preference.isError ? t('Retry') : t('Ranking preferences')}
-            </Button>
+            !adminMode && (
+              <Button
+                variant='outline'
+                size='sm'
+                disabled={preference.isLoading || participation.isPending}
+                onClick={() => {
+                  if (preference.isError) void preference.refetch()
+                  else {
+                    participation.reset()
+                    setSettingsOpen(true)
+                  }
+                }}
+              >
+                <Settings2 className='size-3.5' aria-hidden />
+                {preference.isError ? t('Retry') : t('Ranking preferences')}
+              </Button>
+            )
           )}
         </div>
       </div>
@@ -211,7 +270,7 @@ export function UserLeaderboard(props: {
           <div className='grid grid-cols-3 gap-2 sm:gap-4'>
             <RankingMetricCard
               icon={<Users className='size-4' />}
-              label={t('Participants')}
+              label={adminMode ? t('All users') : t('Participants')}
               value={formatNumber(snapshot.participants, locale)}
             />
             <RankingMetricCard
@@ -256,19 +315,29 @@ export function UserLeaderboard(props: {
                   {t('Updates every minute')}
                 </TooltipTrigger>
                 <TooltipContent>
-                  {t(
-                    'Totals follow retained usage logs. Very short names are fully masked.'
-                  )}
+                  {adminMode
+                    ? t('Totals follow retained usage logs.')
+                    : t(
+                        'Totals follow retained usage logs. Very short names are fully masked.'
+                      )}
                 </TooltipContent>
               </Tooltip>
             </div>
             {snapshot.users.length === 0 ? (
               <EmptyState
                 icon={Trophy}
-                title={t('A new leaderboard starts with you')}
-                description={t(
-                  'No participating users have recorded usage in this period yet.'
-                )}
+                title={
+                  adminMode
+                    ? t('No data')
+                    : t('A new leaderboard starts with you')
+                }
+                description={
+                  adminMode
+                    ? undefined
+                    : t(
+                        'No participating users have recorded usage in this period yet.'
+                      )
+                }
               />
             ) : (
               <>
@@ -344,7 +413,7 @@ export function UserLeaderboard(props: {
                 </Table>
               </>
             )}
-            {snapshot.self && snapshot.self.rank > 100 && (
+            {!adminMode && snapshot.self && snapshot.self.rank > 100 && (
               <div className='bg-primary/5 flex items-center justify-between border-t px-6 py-4 text-sm'>
                 <span>
                   {t('Your ranking')} <strong>#{snapshot.self.rank}</strong>
@@ -415,7 +484,7 @@ export function UserLeaderboard(props: {
           </li>
           <li>
             {t(
-              'Today spending starts at midnight in the server timezone. Other periods follow the selected range. Spending uses actual recorded charges.'
+              '24 hours is a rolling window. Today, this week, this month, and this year start at their calendar boundaries in the server timezone; weeks start on Monday. Spending uses actual recorded charges.'
             )}
           </li>
           <li>

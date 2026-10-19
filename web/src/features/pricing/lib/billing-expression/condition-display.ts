@@ -135,6 +135,21 @@ function describeBillingCondition(
   t: Translate,
   locale: string
 ): Description | null {
+  if (
+    node.kind === 'binary' &&
+    ['==', '!='].includes(node.operator) &&
+    node.left.kind === 'variable' &&
+    node.left.name === 'service_tier' &&
+    node.right.kind === 'literal' &&
+    typeof node.right.value === 'string'
+  ) {
+    const tier = node.right.value === 'priority' ? 'fast' : node.right.value
+    return {
+      text: `${t('Service Tier')} ${node.operator} ${tier}`,
+      kind: 'combined',
+      timezone: '',
+    }
+  }
   if (node.kind === 'unary' && node.operator === '!') {
     const description = describeBillingCondition(node.operand, t, locale)
     if (!description) return null

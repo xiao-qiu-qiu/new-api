@@ -24,8 +24,11 @@ import zh from '@/i18n/locales/zh.json'
 
 import contract from '../../../../../../pkg/billingexpr/testdata/frontend_simulation.json'
 import {
+  buildRequestRuleExpr,
   combineBillingExpr,
+  parseTiersFromExpr,
   splitBillingExprAndRequestRules,
+  tryParseRequestRuleExpr,
 } from '../billing-expr'
 import { formatBillingCondition } from '../billing-expression/condition-display'
 import { readTokenTierChain } from '../billing-expression/display'
@@ -102,6 +105,66 @@ export const deepSeekExpression = `${peakCondition} ? tier("peak", p * 3 + cr * 
 afterEach(() => vi.useRealTimers())
 
 describe('local billing expression evaluation', () => {
+  test('uses effective service tiers for rates while retaining the requested body value', () => {
+    const base =
+      'len <= 272000 ? tier("standard", p * 10 + c * 50) : tier("long_context", p * 20 + c * 75)'
+    const rules =
+      '(service_tier == "priority" ? 2 : 1) * (service_tier == "ultrafast" ? 6 : 1) * (service_tier == "flex" ? 0.5 : 1)'
+    const source = combineBillingExpr(base, rules)
+    expect(splitBillingExprAndRequestRules(source)).toEqual({
+      billingExpr: base,
+      requestRuleExpr: rules,
+    })
+    expect(parseTiersFromExpr(base)).toHaveLength(2)
+    const groups = tryParseRequestRuleExpr(rules)
+    assert(groups)
+    expect(buildRequestRuleExpr(groups)).toBe(rules)
+    for (const [serviceTier, cost] of [
+      ['default', 10000],
+      ['priority', 20000],
+      ['ultrafast', 60000],
+      ['flex', 5000],
+    ] as const) {
+      const result = evaluateBillingExpression(source, {
+        serviceTier,
+        tokens: { p: 1000, c: 0, len: 1000 },
+        request: { body: { service_tier: 'priority' } },
+      })
+      expect(result).toMatchObject({ status: 'success', cost })
+      if (result.status === 'success') {
+        expect(result.requestRules.map((rule) => rule.matched)).toEqual([
+          serviceTier === 'priority',
+          serviceTier === 'ultrafast',
+          serviceTier === 'flex',
+        ])
+      }
+    }
+    expect(
+      evaluateBillingExpression(
+        'service_tier == "default" && param("service_tier") == "priority" ? 1 : 2',
+        { request: { body: { service_tier: 'priority' } } }
+      )
+    ).toMatchObject({ status: 'success', cost: 1 })
+    expect(
+      evaluateBillingExpression(
+        'tier("request", fixed(0.01)) * (service_tier == "priority" ? 2 : 1)',
+        { serviceTier: 'priority' }
+      )
+    ).toMatchObject({ status: 'success', cost: 20000, billingUnit: 'request' })
+  })
+  test('formats an effective tier condition and rejects using the string as a price quantity', async () => {
+    const translations = createInstance()
+    await translations.init({
+      lng: 'en',
+      resources: { en: { translation: {} } },
+    })
+    expect(
+      formatBillingCondition('service_tier == "priority"', translations.t)
+    ).toBe('Service Tier == fast')
+    expect(compileBillingExpression('service_tier * 2').status).toBe('invalid')
+    const compiled = compileBillingExpression('tier("base", service_tier * 2)')
+    expect(compiled.status).toBe('invalid')
+  })
   test('evaluates request prices without token inputs and retains an explicit zero price', () => {
     expect(
       evaluateBillingExpression('tier("request", fixed(0.01))')

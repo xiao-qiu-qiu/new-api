@@ -188,6 +188,7 @@ export const BILLING_CACHE_VAR_MAP = BILLING_EXTRA_VARS.map((v) => ({
 export const SOURCE_PARAM = 'param'
 export const SOURCE_HEADER = 'header'
 export const SOURCE_TIME = 'time'
+export const SOURCE_SERVICE_TIER = 'service_tier'
 
 export const MATCH_EQ = 'eq'
 export const MATCH_CONTAINS = 'contains'
@@ -237,7 +238,16 @@ export type TimeCondition = {
   rangeEnd: string
 }
 
-export type RequestCondition = TimeCondition | ParamHeaderCondition
+export type ServiceTierCondition = {
+  source: 'service_tier'
+  mode: 'eq'
+  value: string
+}
+
+export type RequestCondition =
+  | TimeCondition
+  | ParamHeaderCondition
+  | ServiceTierCondition
 
 export type RequestRuleGroup = {
   conditions: RequestCondition[]
@@ -441,6 +451,15 @@ function tryParseTimeCondition(expr: string): RequestCondition | null {
 function tryParseRequestCondition(expr: string): RequestCondition | null {
   const tc = tryParseTimeCondition(expr)
   if (tc) return tc
+
+  const tier = expr.match(/^service_tier\s*==\s*("(?:[^"\\]|\\.)*")$/)
+  if (tier) {
+    return {
+      source: SOURCE_SERVICE_TIER,
+      mode: MATCH_EQ,
+      value: JSON.parse(tier[1]) as string,
+    }
+  }
 
   let m = expr.match(/^header\("([^"]+)"\) != ""$/)
   if (m) return { source: 'header', path: m[1], mode: MATCH_EXISTS, value: '' }
@@ -681,6 +700,9 @@ export function createEmptyTimeRuleGroup(): RequestRuleGroup {
 export type MatchOption = { value: string; labelKey: string }
 
 export function getRequestRuleMatchOptions(source: string): MatchOption[] {
+  if (source === SOURCE_SERVICE_TIER) {
+    return [{ value: MATCH_EQ, labelKey: 'Equals' }]
+  }
   if (source === SOURCE_TIME) {
     return [
       { value: MATCH_EQ, labelKey: 'Equals' },
@@ -715,6 +737,13 @@ function isTimeFunc(value: unknown): value is TimeFunc {
 export function normalizeCondition(
   cond: Partial<RequestCondition> | null | undefined
 ): RequestCondition {
+  if (cond?.source === SOURCE_SERVICE_TIER) {
+    return {
+      source: SOURCE_SERVICE_TIER,
+      mode: MATCH_EQ,
+      value: cond.value ?? 'default',
+    }
+  }
   let source: RequestCondition['source'] = 'param'
   if (cond?.source === 'time') {
     source = 'time'
@@ -802,6 +831,9 @@ function buildTimeConditionExpr(cond: TimeCondition): string {
 
 function buildRequestConditionExpr(cond: RequestCondition): string {
   if (cond.source === 'time') return buildTimeConditionExpr(cond)
+  if (cond.source === SOURCE_SERVICE_TIER) {
+    return `service_tier == ${JSON.stringify(cond.value)}`
+  }
   const normalized = normalizeCondition(cond) as ParamHeaderCondition
   const path = normalized.path.trim()
   if (!path) return ''

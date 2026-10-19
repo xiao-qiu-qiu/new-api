@@ -226,8 +226,11 @@ export interface LogOtherData {
   expr_b64?: string
   matched_tier?: string
   request_rules?: RequestRuleTrace[]
+  expr_req?: { service_tier?: string }
   usage_facts?: Record<string, string | number>
   reasoning_effort?: string
+  service_tier?: string
+  requested_service_tier?: string
   image?: boolean
   image_ratio?: number
   image_output?: number

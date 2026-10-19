@@ -14,11 +14,12 @@ import (
 type RankedUser struct {
 	Rank           int               `json:"rank"`
 	Name           string            `json:"name"`
+	Username       string            `json:"username,omitempty"` // Administrative rankings only.
 	Nickname       string            `json:"nickname,omitempty"`
 	MaskedUsername string            `json:"masked_username"`
 	TotalTokens    *int64            `json:"total_tokens,omitempty"`
 	TotalQuota     *int64            `json:"total_quota,omitempty"`
-	UsagePublic    bool              `json:"usage_public"` // Model details only; totals follow board participation.
+	UsagePublic    bool              `json:"usage_public"` // Model details are available to this viewer.
 	Models         []RankedUserModel `json:"models,omitempty"`
 	IsSelf         bool              `json:"is_self"`
 }
@@ -33,7 +34,7 @@ type UserRankingsResponse struct {
 	Metric       string       `json:"metric"`
 	Users        []RankedUser `json:"users"`
 	Participants int          `json:"participants"`
-	// Snapshot totals include only quantities for boards each user has joined.
+	// Public snapshot totals include only quantities for boards each user has joined.
 	TotalTokens int64       `json:"total_tokens"`
 	TotalQuota  int64       `json:"total_quota"`
 	PeriodStart int64       `json:"period_start"`
@@ -55,6 +56,17 @@ var userRankingCache = struct {
 }{items: make(map[string]userRankingTotals)}
 var userRankingBuild singleflight.Group
 
+type userRankingOptions struct {
+	administrator bool
+}
+
+func (options userRankingOptions) participants(ctx context.Context, metric string) ([]model.RankingParticipant, error) {
+	if options.administrator {
+		return model.GetAdminRankingUsers(ctx)
+	}
+	return model.GetRankingParticipants(ctx, metric)
+}
+
 func InvalidateUserRankings() {
 	userRankingCache.Lock()
 	clear(userRankingCache.items)
@@ -68,6 +80,15 @@ func GetUserRankings(ctx context.Context, period string, viewerID int, metrics .
 	if len(metrics) > 0 && metrics[0] != "" {
 		metric = metrics[0]
 	}
+	return getUserRankings(ctx, period, viewerID, metric, userRankingOptions{})
+}
+
+// Callers must enforce administrator authorization before requesting this view.
+func GetAdminUserRankings(ctx context.Context, period string, viewerID int, metric string) (*UserRankingsResponse, error) {
+	return getUserRankings(ctx, period, viewerID, metric, userRankingOptions{administrator: true})
+}
+
+func getUserRankings(ctx context.Context, period string, viewerID int, metric string, options userRankingOptions) (*UserRankingsResponse, error) {
 	if metric != model.RankingMetricTokens && metric != model.RankingMetricSpending {
 		return nil, model.ErrInvalidRankingMetric
 	}
@@ -76,11 +97,11 @@ func GetUserRankings(ctx context.Context, period string, viewerID int, metrics .
 		return nil, err
 	}
 	now := time.Now()
-	cacheKey := metric + ":" + config.id
-	if metric == model.RankingMetricSpending && config.id == "today" {
-		// A calendar-day cache must never survive the server's local midnight.
-		cacheKey += ":" + now.Format("2006-01-02")
+	audience := "public"
+	if options.administrator {
+		audience = "admin"
 	}
+	cacheKey := audience + ":" + metric + ":" + config.cacheKey(now)
 	value, err, _ := userRankingBuild.Do(cacheKey, func() (any, error) {
 		userRankingCache.Lock()
 		cached, ok := userRankingCache.items[cacheKey]
@@ -89,7 +110,7 @@ func GetUserRankings(ctx context.Context, period string, viewerID int, metrics .
 		if ok && time.Now().Before(cached.expires) {
 			return cached, nil
 		}
-		participants, err := model.GetRankingParticipants(ctx, metric)
+		participants, err := options.participants(ctx, metric)
 		if err != nil {
 			return nil, err
 		}
@@ -97,7 +118,7 @@ func GetUserRankings(ctx context.Context, period string, viewerID int, metrics .
 		for _, participant := range participants {
 			ids = append(ids, participant.ID)
 		}
-		start, end := userRankingTimeRange(config, metric, now)
+		start, end := rankingTimeRange(config, now)
 		queryCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()
 		totals, err := model.GetUserRankingUsage(queryCtx, ids, start, end)
@@ -107,7 +128,7 @@ func GetUserRankings(ctx context.Context, period string, viewerID int, metrics .
 		cached = userRankingTotals{totals: totals, start: start, end: end, expires: time.Now().Add(time.Minute)}
 		userRankingCache.Lock()
 		if generation == userRankingCache.generation {
-			// Drop expired calendar-day keys along with other stale snapshots.
+			// Drop expired calendar-period keys along with other stale snapshots.
 			for key, item := range userRankingCache.items {
 				if !now.Before(item.expires) {
 					delete(userRankingCache.items, key)
@@ -124,7 +145,7 @@ func GetUserRankings(ctx context.Context, period string, viewerID int, metrics .
 	cached := value.(userRankingTotals)
 	// Consent and account status are NEVER cached: withdrawal takes effect on
 	// the next read on every instance, even while token totals are cached.
-	participants, err := model.GetRankingParticipants(ctx, metric)
+	participants, err := options.participants(ctx, metric)
 	if err != nil {
 		return nil, err
 	}
@@ -160,8 +181,8 @@ func GetUserRankings(ctx context.Context, period string, viewerID int, metrics .
 	}
 	for _, participant := range participants {
 		usage := cached.totals[participant.ID]
-		if (metric == model.RankingMetricTokens && usage.TotalTokens <= 0) ||
-			(metric == model.RankingMetricSpending && usage.TotalQuota <= 0) {
+		if !options.administrator && ((metric == model.RankingMetricTokens && usage.TotalTokens <= 0) ||
+			(metric == model.RankingMetricSpending && usage.TotalQuota <= 0)) {
 			continue
 		}
 		maskedUsername := model.MaskRankingName(participant.Username)
@@ -170,8 +191,12 @@ func GetUserRankings(ctx context.Context, period string, viewerID int, metrics .
 			name = maskedUsername
 		}
 		row := RankedUser{Rank: len(result.Users) + 1, Name: name, Nickname: participant.Nickname, MaskedUsername: maskedUsername, IsSelf: participant.ID == viewerID}
-		publicTokens := participant.Participating
-		publicSpending := participant.SpendingParticipating
+		if options.administrator {
+			row.Username = participant.Username
+			row.Name = participant.Username
+		}
+		publicTokens := options.administrator || participant.Participating
+		publicSpending := options.administrator || participant.SpendingParticipating
 		if publicTokens {
 			row.TotalTokens = &usage.TotalTokens
 			result.TotalTokens += usage.TotalTokens
@@ -182,11 +207,11 @@ func GetUserRankings(ctx context.Context, period string, viewerID int, metrics .
 		}
 		// One shared choice gates model names and per-model quantities on both
 		// boards. Each quantity still requires its own board's live consent.
-		row.UsagePublic = participant.TokenUsagePublic && participant.SpendingUsagePublic
+		row.UsagePublic = options.administrator || (participant.TokenUsagePublic && participant.SpendingUsagePublic)
 		if row.UsagePublic {
 			for name, item := range usage.Models {
-				if (metric == model.RankingMetricTokens && item.TotalTokens <= 0) ||
-					(metric == model.RankingMetricSpending && item.TotalQuota <= 0) {
+				if !options.administrator && ((metric == model.RankingMetricTokens && item.TotalTokens <= 0) ||
+					(metric == model.RankingMetricSpending && item.TotalQuota <= 0)) {
 					continue
 				}
 				detail := RankedUserModel{ModelName: name}
@@ -214,16 +239,8 @@ func GetUserRankings(ctx context.Context, period string, viewerID int, metrics .
 			result.Self = &row
 		}
 	}
-	if len(result.Users) > 100 {
+	if !options.administrator && len(result.Users) > 100 {
 		result.Users = result.Users[:100]
 	}
 	return result, nil
-}
-
-func userRankingTimeRange(config rankingPeriodConfig, metric string, now time.Time) (int64, int64) {
-	if metric == model.RankingMetricSpending && config.id == "today" {
-		start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-		return start.Unix(), now.Unix()
-	}
-	return rankingTimeRange(config, now)
 }

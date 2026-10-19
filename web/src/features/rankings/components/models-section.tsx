@@ -29,10 +29,11 @@ import type { ModelHistorySeries, ModelRanking, RankingPeriod } from '../types'
 import { ModelLeaderboard } from './model-leaderboard'
 
 const PERIOD_DESCRIPTIONS: Record<RankingPeriod, string> = {
-  today: 'Hourly token usage by model across the last 24 hours',
-  week: 'Weekly token usage by model across the past few weeks',
-  month: 'Daily token usage by model across the past month',
-  year: 'Weekly token usage by model across the past year',
+  '24h': 'Hourly token usage by model across the last 24 hours',
+  today: 'Hourly token usage by model today',
+  week: 'Daily token usage by model this week',
+  month: 'Daily token usage by model this month',
+  year: 'Weekly token usage by model this year',
 }
 
 const TOOLTIP_MAX_ROWS = 10

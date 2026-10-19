@@ -177,6 +177,9 @@ func PrepareTieredBillingForSelectedGroup(c *gin.Context, relayInfo *relaycommon
 	if snap == nil {
 		return nil
 	}
+	if relayInfo.DeferServiceTierReservation {
+		return nil
+	}
 	if snap.GroupRatio == 0 {
 		// Paid-to-free keeps FreeModel as-is: FreeModel means "pre-consume was
 		// skipped", which is not true once a session exists, and settlement
@@ -212,6 +215,7 @@ func TryTieredSettle(relayInfo *relaycommon.RelayInfo, params billingexpr.TokenP
 	if relayInfo.BillingRequestInput != nil {
 		requestInput = *relayInfo.BillingRequestInput
 	}
+	requestInput.ServiceTier = relayInfo.ServiceTier
 	if relayInfo.BillingImageCount != nil {
 		requestInput.ImageCount = relayInfo.BillingImageCount
 	} else if snap.EstimatedImageCount != nil {
@@ -219,7 +223,24 @@ func TryTieredSettle(relayInfo *relaycommon.RelayInfo, params billingexpr.TokenP
 	}
 
 	tr, err := billingexpr.ComputeTieredQuotaWithRequest(snap, params, requestInput)
+	if err == nil && relayInfo.OutboundServiceTier != "" && relayInfo.ServiceTier != relayInfo.OutboundServiceTier {
+		// Tier names are ordered by latency, while administrator expressions
+		// need not order their prices the same way. A response downgrade must
+		// also stay within the outbound tier's cost for the same actual usage.
+		outboundInput := requestInput
+		outboundInput.ServiceTier = relayInfo.OutboundServiceTier
+		outboundResult, outboundErr := billingexpr.ComputeTieredQuotaWithRequest(snap, params, outboundInput)
+		if outboundErr != nil {
+			err = outboundErr
+		} else if outboundResult.ActualQuotaBeforeGroup < tr.ActualQuotaBeforeGroup {
+			tr = outboundResult
+			relayInfo.ServiceTier = relayInfo.OutboundServiceTier
+		}
+	}
 	if err != nil {
+		if relayInfo.OutboundServiceTier != "" {
+			relayInfo.ServiceTier = relayInfo.OutboundServiceTier
+		}
 		quota = relayInfo.FinalPreConsumedQuota
 		if quota <= 0 {
 			quota = snap.EstimatedQuotaAfterGroup
@@ -233,6 +254,50 @@ func TryTieredSettle(relayInfo *relaycommon.RelayInfo, params billingexpr.TokenP
 	noteQuotaClamp(relayInfo, tr.Clamp)
 
 	return true, tr.ActualQuotaAfterGroup, &tr
+}
+
+// PrepareServiceTierBilling reserves the final outbound tier's estimate before
+// dispatch. The original request and administrator expression stay frozen;
+// only the host-observed tier and its reservation are refreshed on retries.
+func PrepareServiceTierBilling(c *gin.Context, info *relaycommon.RelayInfo, tier string) *types.NewAPIError {
+	info.ServiceTier = relaycommon.NormalizeServiceTier(tier)
+	if info.ServiceTier == "" {
+		info.ServiceTier = "default"
+	}
+	info.OutboundServiceTier = info.ServiceTier
+	snap := info.TieredBillingSnapshot
+	if snap == nil || !billingexpr.UsedVarsByHash(snap.ExprString, snap.ExprHash)["service_tier"] {
+		return nil
+	}
+	input := billingexpr.RequestInput{ServiceTier: info.ServiceTier}
+	if info.BillingRequestInput != nil {
+		input = *info.BillingRequestInput
+		input.ServiceTier = info.ServiceTier
+	}
+	rawCost, trace, err := billingexpr.RunExprByHashWithRequest(snap.ExprString, snap.ExprHash,
+		billingexpr.TokenParams{P: float64(snap.EstimatedPromptTokens), Len: float64(snap.EstimatedPromptTokens)}, input)
+	if err != nil {
+		return types.NewErrorWithStatusCode(err, types.ErrorCodeModelPriceError, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+	}
+	beforeGroup := rawCost / 1_000_000 * snap.QuotaPerUnit
+	if trace.BillingUnit != billingexpr.BillingUnitRequest && snap.PreConsumeMultiplier > 0 {
+		beforeGroup *= snap.PreConsumeMultiplier
+	}
+	quota, err := billingexpr.QuotaRoundStrict(beforeGroup * info.PriceData.GroupRatioInfo.GroupRatio)
+	if err != nil {
+		return types.NewErrorWithStatusCode(err, types.ErrorCodeModelPriceError, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+	}
+	snap.EstimatedQuotaBeforeGroup = beforeGroup
+	snap.EstimatedQuotaAfterGroup = quota
+	snap.GroupRatio = info.PriceData.GroupRatioInfo.GroupRatio
+	snap.EstimatedTier = trace.MatchedTier
+	snap.EstimatedBillingUnit = trace.BillingUnit
+	snap.EstimatedFixedPrice = trace.FixedPrice
+	deferred := info.DeferServiceTierReservation
+	info.DeferServiceTierReservation = false
+	apiErr := PrepareTieredBillingForSelectedGroup(c, info)
+	info.DeferServiceTierReservation = deferred
+	return apiErr
 }
 
 // A failed evaluation retains the reservation and its estimated billing unit.

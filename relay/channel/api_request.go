@@ -1,6 +1,7 @@
 package channel
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
+	"github.com/tidwall/sjson"
 )
 
 // ApplyUpstreamBodyMetadata restores metadata that net/http cannot infer from
@@ -532,6 +534,53 @@ func keepUpstreamRedirectResponse(_ *http.Request, _ []*http.Request) error {
 }
 
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
+	// Inspect the replayable final JSON body after conversion, field filtering
+	// and parameter overrides. Never use the incoming tier for this reservation.
+	finalFormat := info.GetFinalRequestRelayFormat()
+	if req.GetBody != nil && (finalFormat == types.RelayFormatOpenAI || finalFormat == types.RelayFormatOpenAIResponses || finalFormat == types.RelayFormatOpenAIResponsesCompaction) {
+		body, readErr := req.GetBody()
+		if readErr != nil {
+			return nil, readErr
+		}
+		var metadata struct {
+			ServiceTier string `json:"service_tier"`
+		}
+		decodeErr := common2.DecodeJson(body, &metadata)
+		_ = body.Close()
+		if decodeErr != nil && info.DeferServiceTierReservation {
+			return nil, types.NewErrorWithStatusCode(decodeErr, types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+		}
+		if decodeErr == nil {
+			if strings.EqualFold(strings.TrimSpace(metadata.ServiceTier), "fast") {
+				body, readErr = req.GetBody()
+				if readErr != nil {
+					return nil, readErr
+				}
+				data, readErr := io.ReadAll(body)
+				_ = body.Close()
+				if readErr != nil {
+					return nil, readErr
+				}
+				data, readErr = sjson.SetBytes(data, "service_tier", "priority")
+				if readErr != nil {
+					return nil, readErr
+				}
+				if req.Body != nil {
+					_ = req.Body.Close()
+				}
+				req.Body = io.NopCloser(bytes.NewReader(data))
+				req.ContentLength = int64(len(data))
+				req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(data)), nil }
+			}
+			if apiErr := service.PrepareServiceTierBilling(c, info, metadata.ServiceTier); apiErr != nil {
+				return nil, apiErr
+			}
+		}
+	} else if info.DeferServiceTierReservation {
+		if apiErr := service.PrepareServiceTierBilling(c, info, ""); apiErr != nil {
+			return nil, apiErr
+		}
+	}
 	if info.IsStream && info.RelayMode != constant.RelayModeRealtime {
 		clientErr := c.Request.Context().Err()
 		if clientErr == nil && info.StreamLifecycle != nil {

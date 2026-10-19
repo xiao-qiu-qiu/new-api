@@ -30,6 +30,9 @@ export function RankingUserName(props: {
   className?: string
 }) {
   const className = cn('min-w-0 truncate', props.className)
+  if (props.entry.username) {
+    return <span className={className}>{props.entry.username}</span>
+  }
   if (!props.entry.nickname) {
     return <span className={className}>{props.entry.name}</span>
   }

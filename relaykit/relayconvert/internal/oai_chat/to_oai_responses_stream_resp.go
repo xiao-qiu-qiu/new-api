@@ -18,10 +18,11 @@ type ChatToResponsesStreamEvent struct {
 }
 
 type ChatToResponsesStreamState struct {
-	ID      string
-	Model   string
-	Created int64
-	Usage   *dto.Usage
+	ID          string
+	Model       string
+	Created     int64
+	Usage       *dto.Usage
+	ServiceTier string
 
 	// EmitSequenceNumber enables the required sequence_number field for current
 	// Responses API SSE consumers while preserving the legacy relaykit default.
@@ -332,6 +333,9 @@ func ChatCompletionsStreamChunkToResponsesEvents(chunk *dto.ChatCompletionsStrea
 	}
 	if state.ID == "" {
 		state.ID = chunk.Id
+	}
+	if chunk.ServiceTier != "" {
+		state.ServiceTier = chunk.ServiceTier
 	}
 	if state.Model == "" {
 		state.Model = chunk.Model
@@ -793,6 +797,7 @@ func (s *ChatToResponsesStreamState) finalResponse() *dto.OpenAIResponsesRespons
 		}
 	}
 	return &dto.OpenAIResponsesResponse{
+		ServiceTier:       s.ServiceTier,
 		ID:                s.ID,
 		Object:            "response",
 		CreatedAt:         dto.IntValue(s.Created),
@@ -806,12 +811,13 @@ func (s *ChatToResponsesStreamState) finalResponse() *dto.OpenAIResponsesRespons
 
 func (s *ChatToResponsesStreamState) createdResponse() *dto.OpenAIResponsesResponse {
 	return &dto.OpenAIResponsesResponse{
-		ID:        s.ID,
-		Object:    "response",
-		CreatedAt: dto.IntValue(s.Created),
-		Status:    []byte(`"in_progress"`),
-		Model:     s.Model,
-		Output:    []dto.ResponsesOutput{},
+		ServiceTier: s.ServiceTier,
+		ID:          s.ID,
+		Object:      "response",
+		CreatedAt:   dto.IntValue(s.Created),
+		Status:      []byte(`"in_progress"`),
+		Model:       s.Model,
+		Output:      []dto.ResponsesOutput{},
 	}
 }
 

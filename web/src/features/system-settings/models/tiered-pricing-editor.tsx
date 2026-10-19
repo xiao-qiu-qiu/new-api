@@ -67,6 +67,7 @@ import {
   MATCH_RANGE,
   SOURCE_HEADER,
   SOURCE_PARAM,
+  SOURCE_SERVICE_TIER,
   SOURCE_TIME,
   buildRequestRuleExpr,
   combineBillingExpr,
@@ -82,6 +83,7 @@ import {
   type TimeCondition,
   type TimeFunc,
 } from '@/features/pricing/lib/billing-expr'
+import { SERVICE_TIERS } from '@/features/pricing/lib/billing-expression/types'
 import {
   parseVisualBillingDocument,
   serializeVisualBillingDocument,
@@ -213,8 +215,7 @@ const PRESET_GROUPS: PresetGroup[] = [
           {
             conditions: [
               {
-                source: SOURCE_PARAM as 'param',
-                path: 'service_tier',
+                source: SOURCE_SERVICE_TIER,
                 mode: MATCH_EQ,
                 value: 'priority',
               },
@@ -224,8 +225,7 @@ const PRESET_GROUPS: PresetGroup[] = [
           {
             conditions: [
               {
-                source: SOURCE_PARAM as 'param',
-                path: 'service_tier',
+                source: SOURCE_SERVICE_TIER,
                 mode: MATCH_EQ,
                 value: 'flex',
               },
@@ -317,7 +317,7 @@ function RawExprEditor({ exprString, onChange }: RawExprEditorProps) {
             {t('Variables')}: <code>len</code>, <code>p</code>, <code>c</code>,{' '}
             <code>cr</code>, <code>cc</code>, <code>cc1h</code>,{' '}
             <code>img</code>, <code>img_cr</code>, <code>img_o</code>,{' '}
-            <code>ai</code>, <code>ao</code>
+            <code>ai</code>, <code>ao</code>, <code>service_tier</code>
           </div>
           <div>
             {t('Functions')}: <code>tier(name, value)</code>,{' '}
@@ -386,12 +386,23 @@ function RuleConditionRow({
     }
   }
   let sourceLabel = t('Time')
-  if (condition.source === SOURCE_PARAM) sourceLabel = t('Body param')
-  else if (condition.source === SOURCE_HEADER) sourceLabel = t('Header')
+  if (condition.source === SOURCE_PARAM) {
+    sourceLabel = t('Body param')
+  } else if (condition.source === SOURCE_HEADER) {
+    sourceLabel = t('Header')
+  } else if (condition.source === SOURCE_SERVICE_TIER) {
+    sourceLabel = t('Service Tier')
+  }
 
   const handleSourceChange = (source: string) => {
     if (source === SOURCE_TIME) {
       onChange(createEmptyTimeCondition())
+    } else if (source === SOURCE_SERVICE_TIER) {
+      onChange({
+        source: SOURCE_SERVICE_TIER,
+        mode: MATCH_EQ,
+        value: 'priority',
+      })
     } else if (source === SOURCE_HEADER || source === SOURCE_PARAM) {
       onChange({
         ...createEmptyCondition(),
@@ -507,6 +518,7 @@ function RuleConditionRow({
           { value: SOURCE_PARAM, label: t('Body param') },
           { value: SOURCE_HEADER, label: t('Header') },
           { value: SOURCE_TIME, label: t('Time') },
+          { value: SOURCE_SERVICE_TIER, label: t('Service Tier') },
         ]}
         value={condition.source}
         onValueChange={(v) => v !== null && handleSourceChange(v)}
@@ -519,12 +531,43 @@ function RuleConditionRow({
             <SelectItem value={SOURCE_PARAM}>{t('Body param')}</SelectItem>
             <SelectItem value={SOURCE_HEADER}>{t('Header')}</SelectItem>
             <SelectItem value={SOURCE_TIME}>{t('Time')}</SelectItem>
+            <SelectItem value={SOURCE_SERVICE_TIER}>
+              {t('Service Tier')}
+            </SelectItem>
           </SelectGroup>
         </SelectContent>
       </Select>
-      {condition.source === SOURCE_TIME
-        ? renderTimeCondition(condition as TimeCondition)
-        : renderParamHeaderCondition(condition as ParamHeaderCondition)}
+      {condition.source === SOURCE_TIME && renderTimeCondition(condition)}
+      {(condition.source === SOURCE_PARAM ||
+        condition.source === SOURCE_HEADER) &&
+        renderParamHeaderCondition(condition)}
+      {condition.source === SOURCE_SERVICE_TIER && (
+        <Select
+          value={condition.value}
+          onValueChange={(value) => value && onChange({ ...condition, value })}
+          items={SERVICE_TIERS.map((tier) => ({
+            value: tier,
+            label: tier === 'priority' ? 'fast' : tier,
+          }))}
+        >
+          <SelectTrigger
+            aria-label={t('Service Tier')}
+            className='w-44'
+            size='sm'
+          >
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent alignItemWithTrigger={false}>
+            <SelectGroup>
+              {SERVICE_TIERS.map((tier) => (
+                <SelectItem key={tier} value={tier}>
+                  {tier === 'priority' ? 'fast' : tier}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
+      )}
       <Button
         variant='ghost'
         size='icon'
@@ -917,6 +960,10 @@ Output side:
 p and c are fallback variables representing all tokens not separately priced in the expression. If the expression uses a sub-category variable (e.g., cr), those tokens are deducted from p to avoid double-billing. Unused sub-category tokens remain in p/c at base price.
 
 Important: len is NOT affected by auto-exclusion. Tier conditions should use len instead of p to prevent cache hits from lowering p and misidentifying the tier.
+
+### Service Tier
+
+service_tier is the effective outbound/settlement tier: default, priority (fast), ultrafast, or flex. Use it for tier price multipliers, e.g. (service_tier == "priority" ? 2 : 1). param("service_tier") still reads the original request body and can differ from the effective tier.
 
 ### Built-in Functions
 

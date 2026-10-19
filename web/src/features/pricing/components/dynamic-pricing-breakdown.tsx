@@ -226,6 +226,10 @@ function describeCondition(
   cond: RequestCondition,
   t: (key: string) => string
 ): string {
+  if (cond.source === 'service_tier') {
+    const tier = cond.value === 'priority' ? 'fast' : cond.value
+    return `${t('Service Tier')} = ${tier}`
+  }
   if (cond.source === SOURCE_TIME) {
     const fn = t(TIME_FUNC_LABELS[cond.timeFunc] || cond.timeFunc)
     const tz = cond.timezone || 'UTC'

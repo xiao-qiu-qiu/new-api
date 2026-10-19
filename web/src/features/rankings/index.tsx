@@ -138,7 +138,6 @@ export function Rankings() {
           <div className='flex flex-wrap items-center justify-between gap-3'>
             <RankingPeriods
               period={period}
-              daily={board === 'users' && metric === 'spending'}
               onChange={(next) => {
                 setBoardHeight(0)
                 setPeriod(board, next)

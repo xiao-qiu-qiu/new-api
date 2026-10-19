@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -150,7 +151,7 @@ func TestUserRankingsConsentAndTotals(t *testing.T) {
 			t.Run("nickname_is_public_and_cooldown_survives_consent_changes", func(t *testing.T) {
 				at := time.Unix(now, 0)
 				require.NoError(t, model.SetRankingNickname(ctx, 91001, "  星河旅人  ", at))
-				updated, err := GetUserRankings(ctx, "today", 91001)
+				updated, err := GetUserRankings(ctx, "24h", 91001)
 				require.NoError(t, err)
 				require.Len(t, updated.Users, 1)
 				assert.Equal(t, "星河旅人", updated.Users[0].Name)
@@ -169,7 +170,7 @@ func TestUserRankingsConsentAndTotals(t *testing.T) {
 				require.ErrorIs(t, model.SetRankingNickname(ctx, 91001, strings.Repeat("字", 25), at), model.ErrInvalidRankingNickname)
 				require.ErrorIs(t, model.SetRankingNickname(ctx, 91001, "坏\n名字", at), model.ErrInvalidRankingNickname)
 				require.NoError(t, model.SetRankingNickname(ctx, 91001, "", at.Add(model.RankingNicknameCooldown)))
-				updated, err = GetUserRankings(ctx, "today", 91001)
+				updated, err = GetUserRankings(ctx, "24h", 91001)
 				require.NoError(t, err)
 				assert.Equal(t, "a***e", updated.Users[0].Name)
 				assert.Empty(t, updated.Users[0].Nickname)
@@ -379,28 +380,131 @@ func TestUserRankingsConsentAndTotals(t *testing.T) {
 			require.NoError(t, db.AutoMigrate(&model.UserRankingPreference{}))
 			require.NoError(t, db.Model(&model.Log{}).Count(&count).Error)
 			assert.Equal(t, int64(len(logs)), count)
+			t.Run("administrator_all_accounts_and_isolated_public_cache", func(t *testing.T) {
+				// Keep one public token-only row warm before adding new usage.
+				require.NoError(t, model.UpdateUserRankingPreference(ctx, 91001, model.UserRankingPreferenceUpdate{
+					Participating: &public, SpendingParticipating: &private, ModelDetailsPublic: &private,
+				}))
+				before, err := GetUserRankings(ctx, "week", 91001)
+				require.NoError(t, err)
+				require.Len(t, before.Users, 1)
+				assert.Equal(t, int64(260), *before.Users[0].TotalTokens)
+				// More than 100 current accounts proves the administrative view
+				// retains every zero-usage account instead of applying a top limit.
+				zeroUsers := make([]model.User, 98)
+				for i := range zeroUsers {
+					zeroUsers[i] = model.User{
+						Id: 92000 + i, Username: fmt.Sprintf("zero-%03d", i),
+						AffCode: fmt.Sprintf("rank-zero-%03d", i), Status: common.UserStatusEnabled,
+					}
+				}
+				require.NoError(t, db.Create(&zeroUsers).Error)
+				deleted := model.User{Id: 93000, Username: "deleted-account", AffCode: "rank-deleted", Status: common.UserStatusEnabled}
+				require.NoError(t, db.Create(&deleted).Error)
+				require.NoError(t, db.Delete(&deleted).Error)
+				require.NoError(t, db.Create(&[]model.Log{
+					{UserId: 91001, CreatedAt: now - 5, Type: model.LogTypeConsume, ModelName: "only-tokens", PromptTokens: 10},
+					{UserId: 91002, CreatedAt: now - 5, Type: model.LogTypeConsume, ModelName: "only-quota", Quota: 25},
+					{UserId: deleted.Id, CreatedAt: now - 5, Type: model.LogTypeConsume, ModelName: "deleted", Quota: 999999, PromptTokens: 999999},
+				}).Error)
+				for _, metric := range []string{model.RankingMetricTokens, model.RankingMetricSpending} {
+					admin, err := GetAdminUserRankings(ctx, "week", 91001, metric)
+					require.NoError(t, err)
+					assert.Equal(t, 101, admin.Participants)
+					require.Len(t, admin.Users, 101)
+					assert.Equal(t, int64(17270), admin.TotalTokens)
+					assert.Equal(t, int64(101524), admin.TotalQuota)
+					require.NotNil(t, admin.Self)
+					assert.Equal(t, "alice", admin.Self.Name)
+					assert.Equal(t, "alice", admin.Self.Username)
+					assert.Equal(t, int64(270), *admin.Self.TotalTokens)
+					assert.Equal(t, int64(1000), *admin.Self.TotalQuota)
+					require.Len(t, admin.Self.Models, 3)
+					rows := make(map[string]RankedUser, len(admin.Users))
+					for _, row := range admin.Users {
+						rows[row.Username] = row
+						assert.True(t, row.UsagePublic)
+						assert.NotNil(t, row.TotalTokens)
+						assert.NotNil(t, row.TotalQuota)
+						for _, detail := range row.Models {
+							assert.NotNil(t, detail.TotalTokens)
+							assert.NotNil(t, detail.TotalQuota)
+						}
+					}
+					assert.Contains(t, rows, "disabled")
+					assert.Contains(t, rows, "never-joined")
+					assert.Contains(t, rows, "zero-097")
+					assert.NotContains(t, rows, deleted.Username)
+					assert.Zero(t, *rows["zero-097"].TotalTokens)
+					assert.Zero(t, *rows["zero-097"].TotalQuota)
+					require.Len(t, rows["never-joined"].Models, 2)
+				}
+				// Administrative data and identity must not change the public
+				// response even while both snapshots remain warm.
+				after, err := GetUserRankings(ctx, "week", 91001)
+				require.NoError(t, err)
+				assert.Equal(t, before, after)
+				encoded, err := common.Marshal(after)
+				require.NoError(t, err)
+				assert.NotContains(t, string(encoded), `"username"`)
+				assert.NotContains(t, string(encoded), "only-tokens")
+				assert.NotContains(t, string(encoded), "never-joined")
+				// Account deletion is live, including in a warm admin snapshot.
+				require.NoError(t, db.Delete(&zeroUsers[0]).Error)
+				admin, err := GetAdminUserRankings(ctx, "week", 0, model.RankingMetricTokens)
+				require.NoError(t, err)
+				assert.Len(t, admin.Users, 100)
+				assert.Equal(t, 100, admin.Participants)
+			})
 		})
 	}
 }
 
 func TestUserRankingPeriodBoundaries(t *testing.T) {
-	// Calendar-day spending follows the supplied server location; token periods
-	// retain their existing rolling windows, including across local midnight.
-	now := time.Date(2026, 10, 16, 0, 5, 0, 0, time.FixedZone("server", 8*3600))
-	for _, period := range []string{"today", "week", "month", "year"} {
-		config, err := rankingConfig(period)
-		require.NoError(t, err)
-		start, end := userRankingTimeRange(config, "tokens", now)
-		assert.Equal(t, now.Add(-config.duration).Unix(), start)
-		assert.Equal(t, now.Unix(), end)
-		spendingStart, spendingEnd := userRankingTimeRange(config, "spending", now)
-		if period == "today" {
-			assert.Equal(t, time.Date(2026, 10, 16, 0, 0, 0, 0, now.Location()).Unix(), spendingStart)
-		} else {
-			assert.Equal(t, start, spendingStart)
-		}
-		assert.Equal(t, end, spendingEnd)
+	location := time.FixedZone("server", 8*3600)
+	now := time.Date(2026, 10, 16, 0, 5, 0, 0, location)
+	for _, test := range []struct {
+		period        string
+		start         time.Time
+		previousStart time.Time
+		nextStart     time.Time
+	}{
+		{"24h", now.Add(-24 * time.Hour), now.Add(-48 * time.Hour), now.Add(time.Minute)},
+		{"today", time.Date(2026, 10, 16, 0, 0, 0, 0, location), time.Date(2026, 10, 15, 0, 0, 0, 0, location), time.Date(2026, 10, 17, 0, 0, 0, 0, location)},
+		{"week", time.Date(2026, 10, 12, 0, 0, 0, 0, location), time.Date(2026, 10, 5, 0, 0, 0, 0, location), time.Date(2026, 10, 19, 0, 0, 0, 0, location)},
+		{"month", time.Date(2026, 10, 1, 0, 0, 0, 0, location), time.Date(2026, 9, 1, 0, 0, 0, 0, location), time.Date(2026, 11, 1, 0, 0, 0, 0, location)},
+		{"year", time.Date(2026, 1, 1, 0, 0, 0, 0, location), time.Date(2025, 1, 1, 0, 0, 0, 0, location), time.Date(2027, 1, 1, 0, 0, 0, 0, location)},
+	} {
+		t.Run(test.period, func(t *testing.T) {
+			config, err := rankingConfig(test.period)
+			require.NoError(t, err)
+			start, end := rankingTimeRange(config, now)
+			assert.Equal(t, test.start.Unix(), start)
+			assert.Equal(t, now.Unix(), end)
+			previousStart, previousEnd := previousRankingTimeRange(config, now)
+			assert.Equal(t, test.previousStart.Unix(), previousStart)
+			assert.Equal(t, start-1, previousEnd)
+			if test.period == "24h" {
+				assert.Equal(t, config.cacheKey(now), config.cacheKey(test.nextStart))
+			} else {
+				assert.Equal(t, config.cacheKey(now), config.cacheKey(test.nextStart.Add(-time.Second)))
+				assert.NotEqual(t, config.cacheKey(now), config.cacheKey(test.nextStart))
+			}
+		})
 	}
-	_, err := GetUserRankings(t.Context(), "week", 0, "invalid")
+	week, err := rankingConfig("week")
+	require.NoError(t, err)
+	monday := time.Date(2026, 10, 19, 0, 0, 0, 0, location)
+	sundayStart, _ := rankingTimeRange(week, monday.Add(-time.Second))
+	mondayStart, _ := rankingTimeRange(week, monday)
+	assert.Equal(t, time.Date(2026, 10, 12, 0, 0, 0, 0, location).Unix(), sundayStart)
+	assert.Equal(t, monday.Unix(), mondayStart)
+	month, err := rankingConfig("month")
+	require.NoError(t, err)
+	leapYearMarch := time.Date(2024, 3, 1, 0, 0, 0, 0, location)
+	previousStart, previousEnd := previousRankingTimeRange(month, leapYearMarch)
+	assert.Equal(t, time.Date(2024, 2, 1, 0, 0, 0, 0, location).Unix(), previousStart)
+	assert.Equal(t, time.Date(2024, 2, 29, 23, 59, 59, 0, location).Unix(), previousEnd)
+	_, err = GetUserRankings(t.Context(), "week", 0, "invalid")
 	require.ErrorIs(t, err, model.ErrInvalidRankingMetric)
 }

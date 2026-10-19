@@ -24,12 +24,12 @@ import type { RankingPeriod } from '../types'
 
 export function RankingPeriods(props: {
   period: RankingPeriod
-  daily?: boolean
   onChange: (period: RankingPeriod) => void
 }) {
   const { t } = useTranslation()
   const periods = [
-    { id: 'today', label: props.daily ? t('Today') : t('24 hours') },
+    { id: '24h', label: t('24 hours') },
+    { id: 'today', label: t('Today') },
     { id: 'week', label: t('Week') },
     { id: 'month', label: t('Month') },
     { id: 'year', label: t('Year') },
@@ -39,6 +39,7 @@ export function RankingPeriods(props: {
     <Tabs
       value={props.period}
       onValueChange={(value) => props.onChange(value as RankingPeriod)}
+      className='max-w-full min-w-0 overflow-x-auto'
     >
       <TabsList
         variant='line'
@@ -46,7 +47,11 @@ export function RankingPeriods(props: {
         className='h-11 border-b'
       >
         {periods.map((period) => (
-          <TabsTrigger key={period.id} value={period.id} className='px-4'>
+          <TabsTrigger
+            key={period.id}
+            value={period.id}
+            className='px-2 sm:px-4'
+          >
             {period.label}
           </TabsTrigger>
         ))}

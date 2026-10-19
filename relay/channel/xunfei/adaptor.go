@@ -10,6 +10,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service"
 
 	"github.com/gin-gonic/gin"
 )
@@ -73,6 +74,12 @@ func (a *Adaptor) ConvertOpenAIResponsesRequest(c *gin.Context, info *relaycommo
 }
 
 func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, requestBody io.Reader) (any, error) {
+	// Xunfei sends its upstream WebSocket request from DoResponse.
+	if info.DeferServiceTierReservation {
+		if apiErr := service.PrepareServiceTierBilling(c, info, "default"); apiErr != nil {
+			return nil, apiErr
+		}
+	}
 	// xunfei's request is not http request, so we don't need to do anything here
 	dummyResp := &http.Response{}
 	dummyResp.StatusCode = http.StatusOK

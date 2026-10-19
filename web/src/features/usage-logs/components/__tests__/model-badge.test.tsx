@@ -313,6 +313,43 @@ it('shows the OpenAI icon in the mobile model button', () => {
   ).toContainElement(screen.getByLabelText('OpenAI'))
 })
 
+it('keeps reasoning effort and the service tier inline while copying only the model', async () => {
+  const user = userEvent.setup()
+  const copy = vi.spyOn(navigator.clipboard, 'writeText').mockResolvedValue()
+  const { container } = render(
+    <ModelBadge
+      modelName='gpt-6-astra'
+      reasoningEffort='xhigh'
+      serviceTier='ultrafast'
+    />
+  )
+
+  expect(screen.getByLabelText('Reasoning Effort: xhigh')).toHaveTextContent(
+    'xhigh'
+  )
+  expect(screen.getByLabelText('Service Tier: ultrafast')).toHaveTextContent(
+    'ultrafast'
+  )
+  expect(container.firstElementChild).toHaveClass('h-6', 'whitespace-nowrap')
+  await user.click(screen.getByText('gpt-6-astra'))
+  expect(copy).toHaveBeenCalledWith('gpt-6-astra')
+})
+
+it('shows a downgraded service tier with the requested tier in its tooltip', () => {
+  render(
+    <ModelBadge
+      modelName='gpt-6-astra'
+      serviceTier='default'
+      requestedServiceTier='priority'
+    />
+  )
+
+  expect(screen.getByLabelText('Service Tier: default')).toHaveAttribute(
+    'title',
+    'Service Tier: default · Requested Service Tier: fast'
+  )
+})
+
 it('makes the Wan icon available to model icon selectors', () => {
   expect(getLobeIconNames()).toContain('Wan')
 })

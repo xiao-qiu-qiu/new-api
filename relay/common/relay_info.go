@@ -105,18 +105,27 @@ type RelayInfo struct {
 	// aliases never participate in channel selection or upstream routing.
 	BillingModelName string
 
-	RequestURLPath     string
-	RequestHeaders     map[string]string
-	ShouldIncludeUsage bool
-	DisablePing        bool // 是否禁止向下游发送自定义 Ping
-	ClientWs           *websocket.Conn
-	TargetWs           *websocket.Conn
-	InputAudioFormat   string
-	OutputAudioFormat  string
-	RealtimeTools      []dto.RealTimeTool
-	IsFirstRequest     bool
-	AudioUsage         bool
-	ReasoningEffort    string
+	RequestURLPath       string
+	RequestHeaders       map[string]string
+	ShouldIncludeUsage   bool
+	DisablePing          bool // 是否禁止向下游发送自定义 Ping
+	ClientWs             *websocket.Conn
+	TargetWs             *websocket.Conn
+	InputAudioFormat     string
+	OutputAudioFormat    string
+	RealtimeTools        []dto.RealTimeTool
+	IsFirstRequest       bool
+	AudioUsage           bool
+	ReasoningEffort      string
+	RequestedServiceTier string
+	// ServiceTier follows the final outbound request until an upstream
+	// response reports the tier actually used (including a downgrade).
+	ServiceTier                 string
+	OutboundServiceTier         string
+	ObservedServiceTier         string
+	DeferServiceTierReservation bool
+	serviceTierFinal            bool
+	serviceTierAmbiguous        bool
 	// ReasoningConversion is the suffix-derived reasoning intent attached
 	// after model mapping. Converters read it via ReasoningState().
 	ReasoningConversion *dto.ReasoningConversionState
@@ -327,6 +336,11 @@ func (info *RelayInfo) InitChannelMeta(c *gin.Context) {
 	}
 
 	info.ChannelMeta = channelMeta
+	info.ServiceTier = ""
+	info.OutboundServiceTier = ""
+	info.ObservedServiceTier = ""
+	info.serviceTierFinal = false
+	info.serviceTierAmbiguous = false
 
 	// Channel identity feeds the converter options snapshot (e.g.
 	// OpenRouterDialect); drop the cache so a cross-channel retry rebuilds it.
@@ -613,8 +627,9 @@ func genBaseRelayInfo(c *gin.Context, request dto.Request) *RelayInfo {
 	reasoningEffort := reasoningEffortFromRequest(request)
 	originModelName := common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
 	info := &RelayInfo{
-		Request:         request,
-		ReasoningEffort: reasoningEffort,
+		Request:              request,
+		ReasoningEffort:      reasoningEffort,
+		RequestedServiceTier: requestedServiceTier(request),
 
 		RequestId:  reqId,
 		UserId:     common.GetContextKeyInt(c, constant.ContextKeyUserId),

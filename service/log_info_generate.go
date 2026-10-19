@@ -111,6 +111,15 @@ func GenerateTextOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, m
 	if relayInfo.ReasoningEffort != "" {
 		other.SetPublic("reasoning_effort", relayInfo.ReasoningEffort)
 	}
+	if relayInfo.RequestedServiceTier != "" {
+		other.SetPublic("requested_service_tier", relayInfo.RequestedServiceTier)
+	}
+	if relayInfo.ServiceTier != "" {
+		other.SetPublic("service_tier", relayInfo.ServiceTier)
+	}
+	if relayInfo.ObservedServiceTier != "" {
+		other.SetPublic("observed_service_tier", relayInfo.ObservedServiceTier)
+	}
 	if relayInfo.IsModelMapped {
 		other.SetPublic("is_model_mapped", true)
 		other.SetPublic("upstream_model_name", relayInfo.UpstreamModelName)
@@ -356,6 +365,9 @@ func InjectTieredBillingInfo(other *model.LogOther, relayInfo *relaycommon.Relay
 	}
 	other.SetPublic("billing_mode", "tiered_expr")
 	other.SetPublic("expr_b64", base64.StdEncoding.EncodeToString([]byte(snap.ExprString)))
+	if billingexpr.UsedVarsByHash(snap.ExprString, snap.ExprHash)["service_tier"] {
+		other.SetPublic("expr_req", map[string]any{"service_tier": relayInfo.ServiceTier})
+	}
 	if result != nil {
 		if tokens := result.BillingTokens; tokens != nil && result.BillingUnit == billingexpr.BillingUnitToken {
 			other.SetPublic("image_cache_tokens", tokens.ImgCR)

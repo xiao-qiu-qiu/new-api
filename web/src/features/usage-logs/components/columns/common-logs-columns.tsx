@@ -680,13 +680,17 @@ export function useCommonLogsColumns(
           if (!isDisplayableLogType(log.type)) return null
 
           const modelInfo = formatModelName(log)
+          const other = parseLogOther(log.other)
 
           return (
-            <div className='flex w-fit flex-col gap-0.5'>
+            <div className='flex w-fit items-center'>
               <ModelBadge
                 modelName={modelInfo.name}
                 actualModel={modelInfo.actualModel}
                 responseModel={modelInfo.responseModel}
+                reasoningEffort={other?.reasoning_effort}
+                serviceTier={other?.service_tier}
+                requestedServiceTier={other?.requested_service_tier}
               />
             </div>
           )

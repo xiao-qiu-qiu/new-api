@@ -30,8 +30,18 @@ export const TOKEN_VARIABLES = [
   'ao',
 ] as const
 export type TokenVariable = (typeof TOKEN_VARIABLES)[number]
-export const BILLING_VARIABLES = [...TOKEN_VARIABLES, 'image_count'] as const
+export const BILLING_VARIABLES = [
+  ...TOKEN_VARIABLES,
+  'image_count',
+  'service_tier',
+] as const
 export type BillingVariable = (typeof BILLING_VARIABLES)[number]
+export const SERVICE_TIERS = [
+  'default',
+  'priority',
+  'ultrafast',
+  'flex',
+] as const
 export const TIME_FUNCTIONS = [
   'hour',
   'minute',
@@ -126,6 +136,8 @@ export type ExpressionFailure = {
 export type CompilationResult = CompiledBillingExpression | ExpressionFailure
 export type BillingSimulationContext = {
   imageCount?: number
+  /** Effective outbound/settlement tier, separate from the raw request body. */
+  serviceTier?: string
   /** Already normalized billable counts; no implicit cache subtraction. */
   tokens?: Partial<Record<TokenVariable, number>>
   /** Absent means unknown. An explicitly provided empty request means empty. */

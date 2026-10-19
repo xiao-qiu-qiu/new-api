@@ -24,6 +24,7 @@ import {
 } from '@tanstack/react-query'
 
 import { api } from '@/lib/api'
+import { ROLE } from '@/lib/roles'
 import { requireServerSuccess } from '@/lib/server-error-message'
 import { useAuthStore } from '@/stores/auth-store'
 
@@ -38,6 +39,7 @@ export type RankedModel = {
 export type RankedUser = {
   rank: number
   name: string
+  username?: string
   nickname?: string
   masked_username?: string
   total_tokens?: number
@@ -75,18 +77,29 @@ export type ParticipationChoice = Pick<
 
 export function useUserRankings(
   period: RankingPeriod,
-  metric: RankingMetric = 'tokens'
+  metric: RankingMetric = 'tokens',
+  adminViewerID: number | null = null
 ) {
   const user = useAuthStore((state) => state.auth.user)
+  const canViewAllUsers =
+    user?.role === ROLE.ADMIN || user?.role === ROLE.SUPER_ADMIN
+  const adminMode = adminViewerID === user?.id && canViewAllUsers
   const queryClient = useQueryClient()
   const preferenceKey = ['ranking-participation', user?.id]
   // Warm both boards together so switching never resets the page to a loading skeleton.
   const boards = useQueries({
     queries: (['tokens', 'spending'] as const).map((boardMetric) => ({
-      queryKey: ['user-rankings', period, user?.id, boardMetric],
+      queryKey: [
+        'user-rankings',
+        period,
+        user?.id,
+        user?.role,
+        boardMetric,
+        adminMode ? 'admin' : 'public',
+      ],
       queryFn: async () => {
         const response = await api.get<Response<UserRankingSnapshot>>(
-          '/api/rankings/users',
+          adminMode ? '/api/rankings/users/admin' : '/api/rankings/users',
           { params: { period, metric: boardMetric } }
         )
         return requireServerSuccess(response.data).data
@@ -138,5 +151,13 @@ export function useUserRankings(
       void queryClient.invalidateQueries({ queryKey: preferenceKey })
     },
   })
-  return { rankings, preference, participation, nickname, user }
+  return {
+    rankings,
+    preference,
+    participation,
+    nickname,
+    user,
+    adminMode,
+    canViewAllUsers,
+  }
 }

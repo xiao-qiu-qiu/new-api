@@ -12,6 +12,14 @@ import (
 )
 
 func GetUserRankings(c *gin.Context) {
+	getUserRankings(c, false)
+}
+
+func GetAdminUserRankings(c *gin.Context) {
+	getUserRankings(c, true)
+}
+
+func getUserRankings(c *gin.Context, administrator bool) {
 	metric := c.DefaultQuery("metric", model.RankingMetricTokens)
 	if metric != model.RankingMetricTokens && metric != model.RankingMetricSpending {
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": model.ErrInvalidRankingMetric.Error()})
@@ -19,12 +27,18 @@ func GetUserRankings(c *gin.Context) {
 	}
 	period := c.DefaultQuery("period", "today")
 	switch period {
-	case "today", "week", "month", "year":
+	case "24h", "today", "week", "month", "year":
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid ranking period"})
 		return
 	}
-	result, err := service.GetUserRankings(c.Request.Context(), period, c.GetInt("id"), metric)
+	var result *service.UserRankingsResponse
+	var err error
+	if administrator {
+		result, err = service.GetAdminUserRankings(c.Request.Context(), period, c.GetInt("id"), metric)
+	} else {
+		result, err = service.GetUserRankings(c.Request.Context(), period, c.GetInt("id"), metric)
+	}
 	if err != nil {
 		common.SysError("user rankings query failed: " + err.Error())
 		c.JSON(http.StatusServiceUnavailable, gin.H{"success": false, "message": "Rankings are temporarily unavailable"})

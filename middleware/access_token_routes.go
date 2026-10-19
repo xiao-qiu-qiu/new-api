@@ -49,6 +49,7 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 	"GET /api/perf-metrics":               accessTokenAnyRule,
 	"GET /api/rankings":                   accessTokenAnyRule,
 	"GET /api/rankings/users":             accessTokenAnyRule,
+	"GET /api/rankings/users/admin":       accessTokenScopeRule("log:read"),
 	"GET /api/channel/probes/status":      accessTokenAnyRule,
 	"GET /api/user/self/ranking":          accessTokenScopeRule("profile:read"),
 	"PUT /api/user/self/ranking":          accessTokenScopeRule("profile:write"),

@@ -1131,6 +1131,26 @@ export function DetailsDialog(props: DetailsDialogProps) {
           />
         )}
 
+        {other?.service_tier && (
+          <DetailRow
+            label={t('Service Tier')}
+            value={
+              other.service_tier === 'priority' ? 'fast' : other.service_tier
+            }
+          />
+        )}
+        {other?.requested_service_tier &&
+          other.requested_service_tier !== other.service_tier && (
+            <DetailRow
+              label={t('Requested Service Tier')}
+              value={
+                other.requested_service_tier === 'priority'
+                  ? 'fast'
+                  : other.requested_service_tier
+              }
+            />
+          )}
+
         {/* System prompt override */}
         {other?.is_system_prompt_overwritten && (
           <DetailRow

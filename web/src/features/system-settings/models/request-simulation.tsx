@@ -33,6 +33,7 @@ import { Input } from '@/components/ui/input'
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
   SelectTrigger,
   SelectValue,
@@ -45,9 +46,10 @@ import { useBillingTime } from '@/features/pricing/hooks/use-billing-time'
 import { formatBillingCondition } from '@/features/pricing/lib/billing-expression/condition-display'
 import { compileBillingExpression } from '@/features/pricing/lib/billing-expression/parser'
 import { evaluateBillingExpression } from '@/features/pricing/lib/billing-expression/runtime'
-import type {
-  BillingSimulationContext,
-  DiagnosticCode,
+import {
+  SERVICE_TIERS,
+  type BillingSimulationContext,
+  type DiagnosticCode,
 } from '@/features/pricing/lib/billing-expression/types'
 import { taskPriceLabel } from '@/features/pricing/lib/task-price-display'
 import type { BillingUsageSchema } from '@/features/pricing/types'
@@ -77,13 +79,17 @@ export function RequestSimulation(props: RequestSimulationProps) {
   const headersId = useId()
   const timeId = useId()
   const imageCountId = useId()
+  const serviceTierId = useId()
   const [imageCount, setImageCount] = useState('1')
+  const [serviceTier, setServiceTier] = useState('default')
   const compiled = useMemo(
     () => compileBillingExpression(props.expression),
     [props.expression]
   )
   const usesImageCount =
     compiled.status === 'ready' && compiled.variables.has('image_count')
+  const usesServiceTier =
+    compiled.status === 'ready' && compiled.variables.has('service_tier')
   const booleanFields = Object.entries(props.usageSchema ?? {}).filter(
     ([, field]) => field.type === 'boolean'
   )
@@ -171,6 +177,7 @@ export function RequestSimulation(props: RequestSimulationProps) {
     }
     return evaluateBillingExpression(props.expression, {
       imageCount: Number(imageCount),
+      serviceTier,
       tokens: props.tokens,
       usage,
       now,
@@ -182,6 +189,7 @@ export function RequestSimulation(props: RequestSimulationProps) {
   }, [
     open,
     imageCount,
+    serviceTier,
     body,
     headers,
     timeMode,
@@ -221,6 +229,32 @@ export function RequestSimulation(props: RequestSimulationProps) {
         {t('Request simulation')}
       </CollapsibleTrigger>
       <CollapsibleContent className='mt-3 space-y-4'>
+        {usesServiceTier && (
+          <Field>
+            <FieldLabel htmlFor={serviceTierId}>{t('Service Tier')}</FieldLabel>
+            <Select
+              value={serviceTier}
+              onValueChange={(value) => value && setServiceTier(value)}
+              items={SERVICE_TIERS.map((tier) => ({
+                value: tier,
+                label: tier === 'priority' ? 'fast' : tier,
+              }))}
+            >
+              <SelectTrigger id={serviceTierId} className='w-full sm:w-56'>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectGroup>
+                  {SERVICE_TIERS.map((tier) => (
+                    <SelectItem key={tier} value={tier}>
+                      {tier === 'priority' ? 'fast' : tier}
+                    </SelectItem>
+                  ))}
+                </SelectGroup>
+              </SelectContent>
+            </Select>
+          </Field>
+        )}
         {usesImageCount && (
           <Field>
             <FieldLabel htmlFor={imageCountId}>

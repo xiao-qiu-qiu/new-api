@@ -36,6 +36,7 @@ func OaiChatToResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	}
 
 	info.ObserveResponseModel(chatResp.Model)
+	info.ObserveResponseServiceTier(body)
 	if responseID := helper.GetResponseID(c); responseID != "" {
 		chatResp.Id = responseID
 	}
@@ -82,6 +83,7 @@ func OaiChatToResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 	// upstreamFailure is the upstream or conversion failure the client was
 	// told about with response.failed.
 	var upstreamFailure *types.NewAPIError
+	var lastTierFrame string
 
 	sendEvent := func(event relayconvert.ChatToResponsesStreamEvent) bool {
 		data, err := common.Marshal(event.Payload)
@@ -156,6 +158,8 @@ func OaiChatToResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 		}
 
 		info.ObserveResponseModel(chunk.Model)
+		lastTierFrame = data
+		info.ObserveResponseServiceTier(common.StringToByteSlice(data))
 		results, err := service.ConvertStreamResponseChunk(c, info, state, &chunk)
 		if err != nil {
 			if failResponsesStream(err) {
@@ -184,6 +188,7 @@ func OaiChatToResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 	if streamErr != nil {
 		return nil, streamErr
 	}
+	info.ObserveFinalResponseServiceTier(common.StringToByteSlice(lastTierFrame))
 
 	usage := state.Usage()
 	noUpstreamUsage := usage == nil || usage.TotalTokens == 0

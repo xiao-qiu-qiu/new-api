@@ -164,6 +164,17 @@ func GetRankingParticipants(ctx context.Context, metrics ...string) ([]RankingPa
 	return participants, err
 }
 
+// Administrative rankings include every current account, regardless of public
+// participation or account status. GORM retains the User soft-delete scope.
+func GetAdminRankingUsers(ctx context.Context) ([]RankingParticipant, error) {
+	users := make([]RankingParticipant, 0)
+	err := DB.WithContext(ctx).Model(&User{}).
+		Select("users.id, users.username, p.nickname").
+		Joins("LEFT JOIN user_ranking_preferences p ON p.user_id = users.id").
+		Order("users.id").Scan(&users).Error
+	return users, err
+}
+
 // Normalize the same explicit usage semantics that consumption logs record.
 // OpenAI prompt tokens already include cache hits; Anthropic input tokens do not.
 func RankingTokenTotal(prompt, completion int64, other string) int64 {
@@ -213,8 +224,8 @@ type RankingUserUsage struct {
 	Models      map[string]RankingModelUsage
 }
 
-// This is internal usage only. The service must apply live consent before
-// returning either totals or model names, including on the viewer's own row.
+// This is internal usage only. Public rankings must apply live consent before
+// returning totals or model names; administrative access requires AdminAuth.
 func GetUserRankingUsage(ctx context.Context, userIDs []int, start, end int64) (map[int]RankingUserUsage, error) {
 	totals := make(map[int]RankingUserUsage, len(userIDs))
 	for _, userID := range userIDs {

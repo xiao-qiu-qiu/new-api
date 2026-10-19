@@ -39,13 +39,14 @@ type OpenAITextResponseChoice struct {
 }
 
 type OpenAITextResponse struct {
-	Id      string                     `json:"id"`
-	Model   string                     `json:"model"`
-	Object  string                     `json:"object"`
-	Created any                        `json:"created"`
-	Choices []OpenAITextResponseChoice `json:"choices"`
-	Error   any                        `json:"error,omitempty"`
-	Usage   `json:"usage"`
+	ServiceTier string                     `json:"service_tier,omitempty"`
+	Id          string                     `json:"id"`
+	Model       string                     `json:"model"`
+	Object      string                     `json:"object"`
+	Created     any                        `json:"created"`
+	Choices     []OpenAITextResponseChoice `json:"choices"`
+	Error       any                        `json:"error,omitempty"`
+	Usage       `json:"usage"`
 }
 
 // GetOpenAIError 从动态错误类型中提取OpenAIError结构
@@ -145,6 +146,7 @@ type FunctionResponse struct {
 }
 
 type ChatCompletionsStreamResponse struct {
+	ServiceTier       string                                `json:"service_tier,omitempty"`
 	Id                string                                `json:"id"`
 	Object            string                                `json:"object"`
 	Created           int64                                 `json:"created"`
@@ -192,6 +194,7 @@ func (c *ChatCompletionsStreamResponse) Copy() *ChatCompletionsStreamResponse {
 	choices := make([]ChatCompletionsStreamResponseChoice, len(c.Choices))
 	copy(choices, c.Choices)
 	return &ChatCompletionsStreamResponse{
+		ServiceTier:       c.ServiceTier,
 		Id:                c.Id,
 		Object:            c.Object,
 		Created:           c.Created,
@@ -329,6 +332,7 @@ type OutputTokenDetails struct {
 }
 
 type OpenAIResponsesResponse struct {
+	ServiceTier        string             `json:"service_tier,omitempty"`
 	ID                 string             `json:"id"`
 	Object             string             `json:"object"`
 	CreatedAt          IntValue           `json:"created_at"`

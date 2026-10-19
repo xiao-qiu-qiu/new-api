@@ -248,6 +248,9 @@ class BillingRuntime {
       return { value: node.value, integer: node.integer }
     }
     if (node.kind === 'variable') {
+      if (node.name === 'service_tier') {
+        return { value: this.context.serviceTier || 'default' }
+      }
       if (node.name === 'image_count') {
         const value = this.context.imageCount ?? 1
         if (!Number.isInteger(value) || value < 1 || value > 128) {

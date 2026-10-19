@@ -157,6 +157,12 @@ func (a *Adaptor) DoRequest(c *gin.Context, info *relaycommon.RelayInfo, request
 	if a.ClientMode == ClientModeApiKey {
 		return channel.DoApiRequest(a, c, info, requestBody)
 	} else {
+		// The AWS SDK bypasses the shared HTTP dispatch boundary.
+		if info.DeferServiceTierReservation {
+			if apiErr := service.PrepareServiceTierBilling(c, info, "default"); apiErr != nil {
+				return nil, apiErr
+			}
+		}
 		return doAwsClientRequest(c, info, a, requestBody)
 	}
 }

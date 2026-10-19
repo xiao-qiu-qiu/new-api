@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { AlertTriangle, Route } from 'lucide-react'
+import { AlertTriangle, Brain, Route, Zap } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import { CopyButton } from '@/components/copy-button'
@@ -31,6 +31,7 @@ import { getLobeIcon } from '@/lib/lobe-icon'
 import { resolveModelProvider } from '@/lib/model-provider'
 import { cn } from '@/lib/utils'
 
+import { getReasoningEffortVariant } from '../lib/format'
 import { isResponseModelMismatch } from '../lib/response-model'
 import type { LogOtherData } from '../types'
 import { DetailRow } from './dialogs/log-detail-layout'
@@ -39,13 +40,28 @@ interface ModelBadgeProps {
   modelName: string
   actualModel?: string
   responseModel?: LogOtherData['response_model']
+  reasoningEffort?: string
+  serviceTier?: string
+  requestedServiceTier?: string
   className?: string
   wrapText?: boolean
   onInspect?: () => void
 }
 
 function ModelBadgeContent(props: ModelBadgeProps & { copyable: boolean }) {
+  const { t } = useTranslation()
   const provider = resolveModelProvider(props.modelName)
+  const effort = props.reasoningEffort?.trim()
+  const tier = props.serviceTier?.trim().toLowerCase()
+  const serviceTier = tier === 'priority' ? 'fast' : tier
+  const requestedTier = props.requestedServiceTier?.trim().toLowerCase()
+  const requestedServiceTier =
+    requestedTier === 'priority' ? 'fast' : requestedTier
+  const tierLabel = `${t('Service Tier')}: ${serviceTier}`
+  const tierTitle =
+    requestedServiceTier && requestedServiceTier !== serviceTier
+      ? `${tierLabel} · ${t('Requested Service Tier')}: ${requestedServiceTier}`
+      : tierLabel
 
   return (
     <StatusBadge
@@ -85,6 +101,30 @@ function ModelBadgeContent(props: ModelBadgeProps & { copyable: boolean }) {
         >
           {props.modelName}
         </span>
+        {effort && (
+          <StatusBadge
+            type='text'
+            icon={Brain}
+            label={effort}
+            variant={getReasoningEffortVariant(effort)}
+            copyable={false}
+            aria-label={`${t('Reasoning Effort')}: ${effort}`}
+            title={`${t('Reasoning Effort')}: ${effort}`}
+            className='border-border/60 h-4 shrink-0 border-l pl-1.5 text-xs [&>svg]:size-3'
+          />
+        )}
+        {serviceTier && (
+          <StatusBadge
+            type='text'
+            icon={serviceTier === 'default' ? undefined : Zap}
+            label={serviceTier}
+            variant={serviceTier === 'default' ? 'neutral' : 'info'}
+            copyable={false}
+            aria-label={tierLabel}
+            title={tierTitle}
+            className='border-border/60 h-4 shrink-0 border-l pl-1.5 text-xs [&>svg]:size-3'
+          />
+        )}
       </span>
     </StatusBadge>
   )
@@ -170,7 +210,10 @@ export function ModelBadge(props: ModelBadgeProps) {
           <Button
             variant='ghost'
             aria-label={modelLabel}
-            className='h-auto max-w-full min-w-0 flex-wrap justify-start gap-1 p-0 font-normal'
+            className={cn(
+              'h-auto max-w-full min-w-0 flex-nowrap justify-start gap-1 p-0 font-normal',
+              props.wrapText && 'flex-wrap'
+            )}
           />
         }
       >

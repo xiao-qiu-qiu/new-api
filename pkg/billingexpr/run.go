@@ -56,6 +56,10 @@ func runProgram(prog *vm.Program, requestRules []RequestRuleTrace, usedVars map[
 		RequestRules: append([]RequestRuleTrace(nil), requestRules...),
 	}
 	headers := normalizeHeaders(request.Headers)
+	serviceTier := request.ServiceTier
+	if serviceTier == "" {
+		serviceTier = "default"
+	}
 	imageCount := 1
 	if usedVars["image_count"] {
 		if request.ImageCount != nil {
@@ -68,18 +72,19 @@ func runProgram(prog *vm.Program, requestRules []RequestRuleTrace, usedVars map[
 	}
 
 	env := map[string]any{
-		"image_count": float64(imageCount),
-		"p":           params.P,
-		"c":           params.C,
-		"len":         params.Len,
-		"cr":          params.CR,
-		"cc":          params.CC,
-		"cc1h":        params.CC1h,
-		"img":         params.Img,
-		"img_cr":      params.ImgCR,
-		"img_o":       params.ImgO,
-		"ai":          params.AI,
-		"ao":          params.AO,
+		"service_tier": serviceTier,
+		"image_count":  float64(imageCount),
+		"p":            params.P,
+		"c":            params.C,
+		"len":          params.Len,
+		"cr":           params.CR,
+		"cc":           params.CC,
+		"cc1h":         params.CC1h,
+		"img":          params.Img,
+		"img_cr":       params.ImgCR,
+		"img_o":        params.ImgO,
+		"ai":           params.AI,
+		"ao":           params.AO,
 		"tier": func(name string, value float64) float64 {
 			trace.MatchedTier = name
 			trace.Cost = value

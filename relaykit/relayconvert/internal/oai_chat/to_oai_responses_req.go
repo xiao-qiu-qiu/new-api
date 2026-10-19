@@ -423,6 +423,11 @@ func ChatCompletionsRequestToResponsesRequest(ctx context.Context, req *dto.Gene
 	if req.MaxTokens != nil || req.MaxCompletionTokens != nil {
 		out.MaxOutputTokens = lo.ToPtr(maxOutputTokens)
 	}
+	if len(req.ServiceTier) > 0 {
+		if err := kitutil.Unmarshal(req.ServiceTier, &out.ServiceTier); err != nil {
+			return nil, fmt.Errorf("decode service_tier: %w", err)
+		}
+	}
 
 	reasoningIntent, diagnostics, err := reasoning.FromOpenAIChat(req)
 	if err != nil {

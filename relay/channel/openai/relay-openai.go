@@ -144,6 +144,7 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	})
 
 	info.StreamStatus.RequireTerminal()
+	info.ObserveFinalResponseServiceTier(common.StringToByteSlice(lastStreamData))
 
 	// 处理最后的响应
 	shouldSendLastResp := true
@@ -204,6 +205,7 @@ func observeStreamChoices(info *relaycommon.RelayInfo, data string, seen map[str
 	if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
 		return
 	}
+	info.ObserveResponseServiceTier(common.StringToByteSlice(data))
 	for _, choice := range streamResponse.Choices {
 		if choice.FinishReason != nil && *choice.FinishReason != "" {
 			if *choice.FinishReason == constant.FinishReasonContentFilter {
@@ -284,6 +286,7 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 	}
 
 	info.ObserveResponseModel(simpleResponse.Model)
+	info.ObserveResponseServiceTier(responseBody)
 	for _, choice := range simpleResponse.Choices {
 		if choice.FinishReason == constant.FinishReasonContentFilter {
 			info.PerformanceBusinessRejection = true

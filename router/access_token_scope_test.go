@@ -4,18 +4,24 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/middleware"
+	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/service/authz"
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 // accessTokenExemptRoutes are /api routes that never reach dashboard
@@ -140,6 +146,164 @@ func TestAccessTokenRouteRulesCoverEveryDashboardRoute(t *testing.T) {
 		require.True(t, ok, key)
 		assert.Equal(t, "scope", rule.Kind(), key)
 		assert.Equal(t, service.AccessTokenScopeOf(permission), rule.Scope(), key)
+	}
+}
+
+func TestAdminUserRankingsRouteAuthorization(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(1)
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.UserRankingPreference{}, &model.Log{}, &model.UserAccessToken{}, &model.AuditLog{}))
+	previousDB, previousLogs := model.DB, model.LOG_DB
+	previousRedis, previousRateLimit := common.RedisEnabled, common.GlobalApiRateLimitEnable
+	previousSecret := common.SessionSecret
+	model.DB, model.LOG_DB = db, db
+	common.RedisEnabled, common.GlobalApiRateLimitEnable = false, false
+	common.SessionSecret = "rankings-admin-route-test-secret"
+	common.OptionMapRWMutex.Lock()
+	if common.OptionMap == nil {
+		common.OptionMap = make(map[string]string)
+	}
+	previousNavigation, hadNavigation := common.OptionMap["HeaderNavModules"]
+	common.OptionMap["HeaderNavModules"] = `{"rankings":false}`
+	common.OptionMapRWMutex.Unlock()
+	t.Cleanup(func() {
+		model.DB, model.LOG_DB = previousDB, previousLogs
+		common.RedisEnabled, common.GlobalApiRateLimitEnable = previousRedis, previousRateLimit
+		common.SessionSecret = previousSecret
+		common.OptionMapRWMutex.Lock()
+		if hadNavigation {
+			common.OptionMap["HeaderNavModules"] = previousNavigation
+		} else {
+			delete(common.OptionMap, "HeaderNavModules")
+		}
+		common.OptionMapRWMutex.Unlock()
+		service.InvalidateUserRankings()
+		_ = sqlDB.Close()
+	})
+	service.InvalidateUserRankings()
+	tokens := make(map[string]string)
+	for i, fixture := range []struct {
+		name, sid string
+		role      int
+		status    int
+	}{
+		{"user", "ranking-user-session", common.RoleCommonUser, common.UserStatusEnabled},
+		{"admin", "ranking-admin-session", common.RoleAdminUser, common.UserStatusEnabled},
+		{"root", "ranking-root-session", common.RoleRootUser, common.UserStatusEnabled},
+		{"disabled", "ranking-disabled-session", common.RoleAdminUser, common.UserStatusDisabled},
+	} {
+		user := model.User{Id: 94000 + i, Username: fixture.name, AffCode: fixture.sid, Role: fixture.role, Status: fixture.status, AuthVersion: 1}
+		require.NoError(t, db.Create(&user).Error)
+		now := time.Now().Unix()
+		session := model.UserSession{
+			SID: fixture.sid, UserID: user.Id, Version: 1, UserAuthVersion: 1,
+			Status: model.UserSessionStatusActive, RefreshHash: fixture.sid,
+			LoginMethod: "password", LastActiveAt: now, ExpiresAt: now + 3600,
+		}
+		require.NoError(t, db.Create(&session).Error)
+		token, _, err := service.IssueAccessToken(service.AuthIdentity{
+			UserID: user.Id, SessionID: session.SID, UserAuthVersion: 1, SessionVersion: 1,
+		})
+		require.NoError(t, err)
+		tokens[fixture.name] = token
+	}
+	engine := gin.New()
+	SetApiRouter(engine)
+	for _, test := range []struct {
+		name, identity, query string
+		wantStatus            int
+	}{
+		{"anonymous", "", "", http.StatusUnauthorized},
+		{"ordinary user", "user", "?admin=true", http.StatusForbidden},
+		{"disabled administrator", "disabled", "", http.StatusUnauthorized},
+		{"administrator with public navigation disabled", "admin", "", http.StatusOK},
+		{"root with public navigation disabled", "root", "?period=week&metric=spending", http.StatusOK},
+		{"invalid metric", "admin", "?metric=invalid", http.StatusBadRequest},
+		{"invalid period", "admin", "?period=invalid", http.StatusBadRequest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/api/rankings/users/admin"+test.query, nil)
+			if test.identity != "" {
+				request.Header.Set("Authorization", "Bearer "+tokens[test.identity])
+			}
+			response := httptest.NewRecorder()
+			engine.ServeHTTP(response, request)
+			require.Equal(t, test.wantStatus, response.Code, response.Body.String())
+			assert.Contains(t, response.Header().Get("Cache-Control"), "no-store")
+			if test.wantStatus != http.StatusOK {
+				return
+			}
+			var body struct {
+				Success bool                         `json:"success"`
+				Data    service.UserRankingsResponse `json:"data"`
+			}
+			require.NoError(t, common.Unmarshal(response.Body.Bytes(), &body))
+			assert.True(t, body.Success)
+			assert.Len(t, body.Data.Users, len(tokens))
+			require.NotNil(t, body.Data.Self)
+			assert.Equal(t, test.identity, body.Data.Self.Username)
+		})
+	}
+	// The public feature switch still applies to the public endpoint.
+	response := httptest.NewRecorder()
+	engine.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/rankings/users?admin=true", nil))
+	assert.Equal(t, http.StatusForbidden, response.Code)
+
+	for _, test := range []struct {
+		name    string
+		changes map[string]any
+	}{
+		{"expired session", map[string]any{"expires_at": time.Now().Unix() - 1}},
+		{"revoked session", map[string]any{"status": model.UserSessionStatusRevoked}},
+		{"rotated session rejects the old token", map[string]any{"version": 2}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			require.NoError(t, db.Model(&model.UserSession{}).Where("sid = ?", "ranking-admin-session").Updates(test.changes).Error)
+			request := httptest.NewRequest(http.MethodGet, "/api/rankings/users/admin", nil)
+			request.Header.Set("Authorization", "Bearer "+tokens["admin"])
+			response := httptest.NewRecorder()
+			engine.ServeHTTP(response, request)
+			assert.Equal(t, http.StatusUnauthorized, response.Code)
+			assert.NotContains(t, response.Body.String(), `"username"`)
+			require.NoError(t, db.Model(&model.UserSession{}).Where("sid = ?", "ranking-admin-session").
+				Updates(map[string]any{"expires_at": time.Now().Unix() + 3600, "status": model.UserSessionStatusActive, "version": 1}).Error)
+		})
+	}
+	for _, test := range []struct {
+		name, scope string
+		userID      int
+		expired     bool
+		wantStatus  int
+	}{
+		{"administrator with log scope", "log:read", 94001, false, http.StatusOK},
+		{"administrator missing log scope", "profile:read", 94001, false, http.StatusForbidden},
+		{"ordinary user with log scope", "log:read", 94000, false, http.StatusForbidden},
+		{"expired administrator token", "log:read", 94001, true, http.StatusUnauthorized},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			raw := model.AccessTokenPrefix + strings.ReplaceAll(test.name, " ", "-")
+			token := model.UserAccessToken{UserId: test.userID, Name: test.name, TokenHash: model.AccessTokenFingerprint(raw)}
+			if test.expired {
+				token.ExpiresAt = time.Now().Unix() - 1
+			}
+			require.NoError(t, token.SetScopes([]string{test.scope}))
+			require.NoError(t, db.Create(&token).Error)
+			request := httptest.NewRequest(http.MethodGet, "/api/rankings/users/admin", nil)
+			request.Header.Set("Authorization", "Bearer "+raw)
+			response := httptest.NewRecorder()
+			engine.ServeHTTP(response, request)
+			assert.Equal(t, test.wantStatus, response.Code, response.Body.String())
+			assert.Contains(t, response.Header().Get("Cache-Control"), "no-store")
+			var audit model.AuditLog
+			require.NoError(t, db.Where("token_ref = ?", token.TokenHash).Take(&audit).Error)
+			assert.Equal(t, test.wantStatus, audit.Status)
+			encoded, err := common.Marshal(audit)
+			require.NoError(t, err)
+			assert.NotContains(t, string(encoded), raw)
+		})
 	}
 }
 

@@ -11,6 +11,9 @@ type RequestInput struct {
 	Headers map[string]string
 	Body    []byte
 	Usage   map[string]any
+	// ServiceTier is the effective upstream tier. param("service_tier") keeps
+	// reading the original client request independently of this billing fact.
+	ServiceTier string `json:"service_tier,omitempty"`
 	// ImageCount is a validated billing quantity, separate from the frozen
 	// request's n. Settlement can replace it with the actual returned count.
 	ImageCount *int

@@ -52,13 +52,14 @@ func ChatCompletionsResponseToResponsesResponseWithTools(resp *dto.OpenAITextRes
 
 	usage := UsageFromChatUsage(&resp.Usage)
 	out := &dto.OpenAIResponsesResponse{
-		ID:        id,
-		Object:    "response",
-		CreatedAt: dto.IntValue(chatCreatedAt(resp.Created)),
-		Status:    []byte(`"completed"`),
-		Model:     resp.Model,
-		Output:    make([]dto.ResponsesOutput, 0),
-		Usage:     usage,
+		ServiceTier: resp.ServiceTier,
+		ID:          id,
+		Object:      "response",
+		CreatedAt:   dto.IntValue(chatCreatedAt(resp.Created)),
+		Status:      []byte(`"completed"`),
+		Model:       resp.Model,
+		Output:      make([]dto.ResponsesOutput, 0),
+		Usage:       usage,
 	}
 
 	if len(resp.Choices) == 0 {

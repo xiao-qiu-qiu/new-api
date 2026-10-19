@@ -158,6 +158,39 @@ OpenAI 已于 2026-05-12 下线 DALL·E 2/3；其校验、默认值和倍率保�
 
 > **注意：** 自动扣除针对 GPT/OpenAI 格式的 API（prompt_tokens 包含子类别）。Claude 格式的 API 不重复扣除缓存；未独立计价的缓存读取加回输入。系统根据上游返回格式自动处理。
 
+### Effective Service Tier
+
+`service_tier` is a host-owned string variable, separate from
+`param("service_tier")`, which continues to read the original client body.
+Its default is `"default"`. The final outbound JSON determines the initial
+value after channel filtering, conversion and parameter overrides. The `fast`
+alias is forwarded as `priority`; `auto` estimates standard pricing.
+
+An explicit upstream response may lower the billable tier in the order
+`flex < default < priority < ultrafast`; it never raises the charge above the
+final outbound tier. A Responses terminal event is authoritative. Conflicting
+early stream declarations retain the outbound tier until a terminal resolves
+them; Chat uses its final frame. Missing, null, unknown, `auto` and `scale`
+response declarations retain the outbound fallback. The same rule applies to
+Codex channels; no OAuth-specific exception is inferred from the channel name.
+Settlement also evaluates both tiers with the same actual usage and caps the
+response-derived charge at the outbound tier's amount. This preserves the
+cap for administrator expressions with non-monotonic tier prices and models
+without a published Ultrafast premium; the adopted tier and rule trace agree.
+
+For example, the following charges Fast at twice the ordinary token price:
+
+```
+tier("standard", p * 10 + c * 50 + cr * 1 + cc * 12.5) * (service_tier == "priority" ? 2 : 1)
+```
+
+Only expressions that reference this variable use tier-dependent billing.
+Administrator legacy prices and expressions that use the original `param()`
+keep their existing semantics. Built-in GPT-6 expressions include their full
+published tier prices; models do not inherit an unspecified Ultrafast premium.
+Logs expose the requested, observed and effective tiers as
+`requested_service_tier`, `observed_service_tier` and `service_tier`.
+
 ### Built-in Functions
 
 | Function | Signature | Purpose |
@@ -253,7 +286,7 @@ At compile time, the engine instruments ternary factors with this exact shape:
 <request-probe condition> ? <numeric literal> : 1
 ```
 
-The condition must reference at least one request probe (`param`, `header`, `hour`, `minute`, `weekday`, `month`, or `day`). Both branches must be numeric literals and the fallback must equal `1`. Other conditionals, including `(condition ? 2 : 1.5)`, are evaluated normally but are not traced. Integer-only factors use an integer-preserving trace callback, so instrumentation does not change expressions that require an integer operand (for example, `%`). The internal trace callback names are reserved and cannot be used in stored expressions.
+The condition must reference at least one request probe (`param`, `header`, `hour`, `minute`, `weekday`, `month`, `day`, or the effective `service_tier` variable). Both branches must be numeric literals and the fallback must equal `1`. Other conditionals, including `(condition ? 2 : 1.5)`, are evaluated normally but are not traced. Integer-only factors use an integer-preserving trace callback, so instrumentation does not change expressions that require an integer operand (for example, `%`). The internal trace callback names are reserved and cannot be used in stored expressions.
 
 The compiled cache stores the canonical condition and multiplier for every instrumented node. Each run starts with the full detected rule list marked as unmatched; callbacks mark rules that actually evaluate true. Rules skipped by normal expression short-circuiting remain unmatched. This keeps the expression's numeric result unchanged and avoids reparsing it on each request.
 
@@ -462,6 +495,19 @@ When a request arrives and the model uses `tiered_expr` billing:
 4. Converts output to quota: `rawCost / 1,000,000 * QuotaPerUnit`. For token-priced leaves, multiplies this reservation by `quota_setting.pre_consume_multiplier` (default 1; any finite positive decimal). The multiplier does not change context-length tier selection, actual settlement, or request-priced leaves. The snapshot freezes the multiplier for image quantity retries; group retries reuse the multiplied reservation. Older snapshots with no multiplier retain a factor of 1.
 5. Creates `BillingSnapshot` and stores it on `RelayInfo`. Expression and request state stay frozen for settlement. An auto-group retry refreshes group-dependent fields from the selected group before the next upstream attempt. If a free initial group skipped pre-consume and the retry selects a paid group, the billing session is created before that attempt. If an existing session moves to a more expensive group, its reservation is raised to that group's estimate before sending; cheaper groups are refunded only after actual usage is settled.
 
+For text requests whose expression references `service_tier`, creating the
+snapshot defers the first actual reservation until the final outbound request
+is available. This covers OpenAI Chat, Responses/compact, Claude and Gemini
+text entry points. The HTTP dispatch boundary (or Responses WebSocket create
+boundary) reevaluates the frozen expression with the final tier and reserves
+before submission. A non-OpenAI outbound protocol uses `default`. These requests
+force quota reservation, including retries, so the wallet trust bypass cannot
+skip a later, more expensive tier. Flex requests need only their discounted
+estimate before the first attempt. Other entry points keep their existing
+reservation lifecycle.
+The AWS SDK and Xunfei WebSocket adaptors reserve `default` at their own dispatch
+boundaries because they bypass the common HTTP transport.
+
 Wallet trust bypass uses `quota_setting.trust_quota_usd` (default 10 USD; 0 disables bypass). Both the wallet and any limited API token must exceed the threshold. The wallet must still cover the estimated reservation before bypass is considered. Subscriptions and asynchronous tasks do not use this bypass. Legacy token-ratio pricing also reserves estimated input cost times the multiplier, without the former `PreConsumedQuota` floor or output-token estimate. Task usage pricing is unchanged.
 
 ### 4. Settlement (Actual Billing)
@@ -477,7 +523,7 @@ After the upstream response returns with actual token usage:
 
 2. `TryTieredSettle(relayInfo, params)`:
    - Uses the captured `BillingSnapshot`, whose group-dependent fields have been refreshed from the final selected group
-   - Re-runs the expression with actual token counts
+   - Re-runs the expression with actual token counts and the observed effective service tier; original request parameters stay frozen
    - Converts via `quotaConversion()` (version-dispatched)
    - Returns actual quota
 
@@ -486,6 +532,8 @@ After the upstream response returns with actual token usage:
 **Files**: `service/log_info_generate.go`, `web/src/helpers/render.jsx`
 
 Backend: `InjectTieredBillingInfo()` adds `billing_mode`, `expr_b64` (base64 expression), `matched_tier`, and the structured `request_rules` trace list to the log's `other` JSON.
+Expressions using `service_tier` also record its effective value in
+`other.expr_req.service_tier` for deterministic display.
 
 Frontend: Detects `billing_mode === "tiered_expr"`, decodes `expr_b64`, parses tiers via shared `parseTiersFromExpr()`, and renders request multipliers from `request_rules` when present. Without log traces, it falls back to parsing the stored expression.
 

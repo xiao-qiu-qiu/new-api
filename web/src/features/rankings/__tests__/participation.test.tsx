@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
@@ -102,6 +102,161 @@ function mockRankings(preference: Participation, users: RankedUser[] = []) {
     return { data: { success: true, data: { ...preference } } }
   })
 }
+
+describe('ranking administrator mode', () => {
+  const publicUser: RankedUser = {
+    rank: 1,
+    name: 'p****c',
+    total_tokens: 120,
+    usage_public: false,
+    is_self: false,
+  }
+  const privateUser: RankedUser = {
+    rank: 1,
+    name: 'Private nickname',
+    nickname: 'Private nickname',
+    username: 'private-user',
+    total_tokens: 9000,
+    total_quota: 500000,
+    usage_public: true,
+    is_self: false,
+    models: [
+      { model_name: 'private-model', total_tokens: 9000, total_quota: 500000 },
+    ],
+  }
+
+  function mockAdministratorRankings(rejected = false) {
+    vi.mocked(api.get).mockImplementation(async (url) => {
+      if (url.includes('/self/')) {
+        return {
+          data: {
+            success: true,
+            data: { ...initialPreference, prompted: true },
+          },
+        }
+      }
+      const admin = url.endsWith('/admin')
+      if (admin && rejected) {
+        return { data: { success: false, message: 'Admin access required' } }
+      }
+      return {
+        data: {
+          success: true,
+          data: {
+            users: admin ? [privateUser] : [publicUser],
+            participants: 1,
+            total_tokens: admin ? 9000 : 120,
+            total_quota: admin ? 500000 : 0,
+          },
+        },
+      }
+    })
+  }
+
+  test.each([10, 100])(
+    'role %s starts in public mode and can toggle private usage on and off',
+    async (role) => {
+      useAuthStore.getState().auth.setUser({ id: 1, username: 'viewer', role })
+      mockAdministratorRankings()
+      renderRankings()
+      const control = screen.getByRole('switch', { name: 'Administrator mode' })
+      expect(control).not.toBeChecked()
+      expect(
+        await within(await screen.findByRole('table')).findByText('p****c')
+      ).toBeVisible()
+      expect(api.get).not.toHaveBeenCalledWith(
+        '/api/rankings/users/admin',
+        expect.anything()
+      )
+
+      await userEvent.click(control)
+      expect(control).toBeChecked()
+      expect(
+        await within(await screen.findByRole('table')).findByText(
+          'private-user'
+        )
+      ).toBeVisible()
+      expect(screen.queryByText('p****c')).not.toBeInTheDocument()
+      expect(
+        screen.getAllByRole('button', { name: 'private-model · 100%' }).length
+      ).toBeGreaterThan(0)
+      expect(api.get).toHaveBeenCalledWith('/api/rankings/users/admin', {
+        params: { period: 'week', metric: 'tokens' },
+      })
+      expect(api.get).toHaveBeenCalledWith('/api/rankings/users/admin', {
+        params: { period: 'week', metric: 'spending' },
+      })
+
+      await userEvent.click(control)
+      expect(control).not.toBeChecked()
+      expect(
+        await within(await screen.findByRole('table')).findByText('p****c')
+      ).toBeVisible()
+      expect(screen.queryByText('private-user')).not.toBeInTheDocument()
+      expect(
+        screen.queryByRole('button', { name: 'private-model · 100%' })
+      ).not.toBeInTheDocument()
+      expect(api.put).not.toHaveBeenCalled()
+    }
+  )
+
+  test('an ordinary user sees no administrator switch or private requests', async () => {
+    mockAdministratorRankings()
+    renderRankings()
+    expect(
+      await within(await screen.findByRole('table')).findByText('p****c')
+    ).toBeVisible()
+    expect(
+      screen.queryByRole('switch', { name: 'Administrator mode' })
+    ).not.toBeInTheDocument()
+    expect(api.get).not.toHaveBeenCalledWith(
+      '/api/rankings/users/admin',
+      expect.anything()
+    )
+  })
+
+  test('revoking the viewer role immediately removes private data and the switch', async () => {
+    useAuthStore
+      .getState()
+      .auth.setUser({ id: 1, username: 'viewer', role: 10 })
+    mockAdministratorRankings()
+    renderRankings()
+    await userEvent.click(
+      screen.getByRole('switch', { name: 'Administrator mode' })
+    )
+    expect(
+      await within(await screen.findByRole('table')).findByText('private-user')
+    ).toBeVisible()
+    act(() =>
+      useAuthStore
+        .getState()
+        .auth.setUser({ id: 1, username: 'viewer', role: 1 })
+    )
+    expect(screen.queryByText('private-user')).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('switch', { name: 'Administrator mode' })
+    ).not.toBeInTheDocument()
+    expect(
+      await within(await screen.findByRole('table')).findByText('p****c')
+    ).toBeVisible()
+  })
+
+  test('a rejected administrator request shows an error without reusing public data', async () => {
+    useAuthStore
+      .getState()
+      .auth.setUser({ id: 1, username: 'viewer', role: 10 })
+    mockAdministratorRankings(true)
+    renderRankings()
+    expect(
+      await within(await screen.findByRole('table')).findByText('p****c')
+    ).toBeVisible()
+    await userEvent.click(
+      screen.getByRole('switch', { name: 'Administrator mode' })
+    )
+    expect(await screen.findByText('Unable to load rankings')).toBeVisible()
+    expect(screen.queryByRole('table')).not.toBeInTheDocument()
+  })
+})
 
 describe('ranking participation', () => {
   test('first joining follows rules, nickname and enabled preferences before confirming participation', async () => {
@@ -427,7 +582,7 @@ describe('ranking participation', () => {
     client.clear()
   })
 
-  test('each board remembers its own selected period until a fresh page session', async () => {
+  test('both boards offer five distinct periods and retain their selection until a fresh page session', async () => {
     function Controls() {
       const [board, setBoard] = useState<'users' | 'models'>('users')
       const state = useRankingPeriods()
@@ -447,9 +602,25 @@ describe('ranking participation', () => {
       )
     }
     const view = render(<Controls />)
+    expect(screen.getAllByRole('tab').map((tab) => tab.textContent)).toEqual([
+      '24 hours',
+      'Today',
+      'Week',
+      'Month',
+      'Year',
+    ])
+    expect(screen.getByRole('tab', { name: 'Today' })).toHaveAttribute(
+      'aria-selected',
+      'true'
+    )
+    await userEvent.click(screen.getByRole('tab', { name: '24 hours' }))
     expect(screen.getByRole('tab', { name: '24 hours' })).toHaveAttribute(
       'aria-selected',
       'true'
+    )
+    expect(screen.getByRole('tab', { name: 'Today' })).toHaveAttribute(
+      'aria-selected',
+      'false'
     )
     await userEvent.click(screen.getByRole('tab', { name: 'Month' }))
     await userEvent.click(screen.getByRole('button', { name: 'Models' }))
@@ -471,7 +642,7 @@ describe('ranking participation', () => {
     view.unmount()
     useRankingPeriods.setState(useRankingPeriods.getInitialState(), true)
     render(<Controls />)
-    expect(screen.getByRole('tab', { name: '24 hours' })).toHaveAttribute(
+    expect(screen.getByRole('tab', { name: 'Today' })).toHaveAttribute(
       'aria-selected',
       'true'
     )
@@ -528,9 +699,9 @@ describe('ranking participation', () => {
     await waitFor(() =>
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     )
-    const publicName = await within(screen.getByRole('table')).findByText(
-      '星河旅人'
-    )
+    const publicName = await within(
+      await screen.findByRole('table')
+    ).findByText('星河旅人')
     expect(publicName).toBeVisible()
     await userEvent.click(screen.getByRole('button', { name: 'Edit nickname' }))
     expect(screen.getByRole('textbox', { name: 'Nickname' })).toBeDisabled()
