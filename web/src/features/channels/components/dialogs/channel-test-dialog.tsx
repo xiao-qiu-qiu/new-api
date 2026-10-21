@@ -29,6 +29,7 @@ import {
   Gauge,
   Info,
   Loader2,
+  MessageSquareText,
   Settings,
   Trash2,
 } from 'lucide-react'
@@ -80,6 +81,7 @@ import {
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import { useIsMobile } from '@/hooks/use-mobile'
 import { handleServerError } from '@/lib/handle-server-error'
+import { useChannelTestStore } from '@/stores/channel-test-store'
 
 import { updateChannel } from '../../api'
 import {
@@ -93,6 +95,10 @@ import type {
   SearchChannelsResponse,
 } from '../../types'
 import { useChannels } from '../channels-provider'
+import {
+  ChannelModelTestDialog,
+  type ChannelModelTestResult,
+} from './channel-model-test-dialog'
 
 type ChannelTestDialogProps = {
   open: boolean
@@ -107,15 +113,7 @@ type ModelRow = {
   model: string
 }
 
-type TestStatus = 'idle' | 'testing' | 'success' | 'error'
-
-type TestResult = {
-  status: TestStatus
-  responseTime?: number
-  completedAt?: number
-  error?: string
-  errorCode?: string
-}
+type TestResult = ChannelModelTestResult
 
 type BatchProgress = {
   total: number
@@ -341,6 +339,7 @@ function ChannelTestDialogContent({
   const [isDeletingFailed, setIsDeletingFailed] = useState(false)
   const [failureDetails, setFailureDetails] =
     useState<FailureDetailsState | null>(null)
+  const [activeModel, setActiveModel] = useState<string | null>(null)
   const [pagination, setPagination] = useState({
     pageIndex: 0,
     pageSize: 30,
@@ -402,6 +401,7 @@ function ChannelTestDialogContent({
     setIsDeleteFailedDialogOpen(false)
     setIsDeletingFailed(false)
     setFailureDetails(null)
+    setActiveModel(null)
     setPagination({ pageIndex: 0, pageSize: 30 })
   }, [])
 
@@ -540,8 +540,12 @@ function ChannelTestDialogContent({
     ): Promise<TestResult | undefined> => {
       if (!currentRow) return
 
+      const prompt =
+        useChannelTestStore.getState().prompts[String(currentRow.id)]?.[
+          model
+        ] || undefined
       markModelTesting(model, true)
-      updateTestResult(model, { status: 'testing' })
+      updateTestResult(model, { status: 'testing', prompt })
       let finalResult: TestResult | undefined
 
       try {
@@ -552,9 +556,10 @@ function ChannelTestDialogContent({
             testModel: model,
             endpointType: endpointType === 'auto' ? undefined : endpointType,
             stream: effectiveStreamTest || undefined,
+            prompt,
             silent,
           },
-          (success, responseTime, error, errorCode) => {
+          (success, responseTime, error, errorCode, response) => {
             const completedAt = Date.now()
             finalResult = {
               status: success ? 'success' : 'error',
@@ -562,6 +567,10 @@ function ChannelTestDialogContent({
               completedAt,
               error,
               errorCode,
+              prompt,
+              responseText: response?.response_text,
+              responseModel: response?.response_model,
+              responseTruncated: response?.response_truncated,
             }
             updateTestResult(model, finalResult)
           }
@@ -895,6 +904,7 @@ function ChannelTestDialogContent({
               result={result}
               model={model}
               onOpenDetails={setFailureDetails}
+              onOpenResponse={() => setActiveModel(model)}
             />
           )
         },
@@ -909,26 +919,46 @@ function ChannelTestDialogContent({
           const isTestingModel = testingModels.has(model)
 
           return (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <Button
-                    variant='ghost'
-                    size='icon-sm'
-                    onClick={() => testSingleModel(model)}
-                    disabled={isTestingModel || isBatchTesting}
-                    aria-label={t('Test Connection')}
-                  />
-                }
-              >
-                {isTestingModel ? (
-                  <Loader2 className='size-4 animate-spin' />
-                ) : (
-                  <Gauge className='size-4' />
-                )}
-              </TooltipTrigger>
-              <TooltipContent>{t('Test Connection')}</TooltipContent>
-            </Tooltip>
+            <div className='flex items-center justify-end gap-1'>
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      variant='ghost'
+                      size='icon-sm'
+                      onClick={() => setActiveModel(model)}
+                      aria-label={t('Prompt and response for {{model}}', {
+                        model,
+                      })}
+                      aria-haspopup='dialog'
+                    />
+                  }
+                >
+                  <MessageSquareText className='size-4' />
+                </TooltipTrigger>
+                <TooltipContent>{t('Prompt and response')}</TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      variant='ghost'
+                      size='icon-sm'
+                      onClick={() => testSingleModel(model)}
+                      disabled={isTestingModel || isBatchTesting}
+                      aria-label={t('Test Connection')}
+                    />
+                  }
+                >
+                  {isTestingModel ? (
+                    <Loader2 className='size-4 animate-spin' />
+                  ) : (
+                    <Gauge className='size-4' />
+                  )}
+                </TooltipTrigger>
+                <TooltipContent>{t('Test Connection')}</TooltipContent>
+              </Tooltip>
+            </div>
           )
         },
         enableSorting: false,
@@ -1146,6 +1176,20 @@ function ChannelTestDialogContent({
           }
         }}
       />
+      {activeModel !== null && (
+        <ChannelModelTestDialog
+          open={open}
+          onOpenChange={(nextOpen) => {
+            if (!nextOpen) setActiveModel(null)
+          }}
+          channelId={currentRow.id}
+          channelName={currentRow.name}
+          model={activeModel}
+          result={testResults[activeModel]}
+          disabled={isAnyTesting}
+          onTest={() => void testSingleModel(activeModel)}
+        />
+      )}
     </>
   )
 }
@@ -1183,10 +1227,12 @@ function TestResultCell({
   result,
   model,
   onOpenDetails,
+  onOpenResponse,
 }: {
   result?: TestResult
   model: string
   onOpenDetails: (details: FailureDetailsState) => void
+  onOpenResponse: () => void
 }) {
   const { t } = useTranslation()
 
@@ -1204,12 +1250,30 @@ function TestResultCell({
   }
 
   if (result.status === 'success') {
-    return typeof result.responseTime === 'number' ? (
-      <span className='text-muted-foreground text-sm'>
-        {formatResponseTime(result.responseTime, t)}
-      </span>
-    ) : (
-      <span className='text-muted-foreground text-sm'>-</span>
+    return (
+      <div className='flex min-w-0 flex-col items-start gap-1'>
+        <div className='flex items-center gap-2'>
+          {typeof result.responseTime === 'number' && (
+            <span className='text-muted-foreground text-xs'>
+              {formatResponseTime(result.responseTime, t)}
+            </span>
+          )}
+          <Button
+            variant='ghost'
+            size='sm'
+            className='h-6 px-1.5 text-xs'
+            onClick={onOpenResponse}
+            aria-haspopup='dialog'
+          >
+            {t('View response')}
+          </Button>
+        </div>
+        {result.responseText && (
+          <p className='text-muted-foreground line-clamp-2 max-w-full text-xs wrap-anywhere whitespace-pre-wrap'>
+            {result.responseText.slice(0, 240)}
+          </p>
+        )}
+      </div>
     )
   }
 

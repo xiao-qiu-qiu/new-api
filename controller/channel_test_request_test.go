@@ -1,8 +1,13 @@
 package controller
 
 import (
+	"context"
+	"io"
+	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -13,12 +18,141 @@ import (
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/model_setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/tidwall/gjson"
 )
+
+func TestChannelTestCustomPromptRequests(t *testing.T) {
+	const prompt = "请回答：\"你好\"\n第二行 🐱"
+	for _, tc := range []struct {
+		endpoint        constant.EndpointType
+		path, limitPath string
+	}{
+		{constant.EndpointTypeOpenAI, "messages.0.content", "max_tokens"},
+		{constant.EndpointTypeOpenAIResponse, "input.0.content", "max_output_tokens"},
+		{constant.EndpointTypeOpenAIResponseCompact, "input.0.content", ""},
+		{constant.EndpointTypeAnthropic, "messages.0.content", "max_tokens"},
+		{constant.EndpointTypeGemini, "contents.0.parts.0.text", "generationConfig.maxOutputTokens"},
+		{constant.EndpointTypeEmbeddings, "input.0", ""},
+		{constant.EndpointTypeImageGeneration, "prompt", ""},
+		{constant.EndpointTypeJinaRerank, "query", ""},
+	} {
+		t.Run(string(tc.endpoint), func(t *testing.T) {
+			request := buildTestRequest("fixture-model", string(tc.endpoint), &model.Channel{}, true)
+			before, err := common.Marshal(request)
+			require.NoError(t, err)
+			require.NoError(t, applyChannelTestPrompt(request, " \n\t"))
+			after, err := common.Marshal(request)
+			require.NoError(t, err)
+			assert.JSONEq(t, string(before), string(after), "empty prompts preserve health-check defaults")
+			require.NoError(t, applyChannelTestPrompt(request, prompt))
+			encoded, err := common.Marshal(request)
+			require.NoError(t, err)
+			assert.Equal(t, prompt, gjson.GetBytes(encoded, tc.path).String())
+			if tc.limitPath != "" {
+				assert.EqualValues(t, 4096, gjson.GetBytes(encoded, tc.limitPath).Int())
+			}
+		})
+	}
+	request := buildTestRequest("gpt-6-astra", "", &model.Channel{}, false)
+	require.NoError(t, applyChannelTestPrompt(request, prompt))
+	encoded := convertChatCompatibilityRequest(t, request.(*dto.GeneralOpenAIRequest), constant.ChannelTypeOpenAI, nil)
+	assert.Equal(t, prompt, gjson.GetBytes(encoded, "messages.0.content").String())
+	assert.EqualValues(t, 4096, gjson.GetBytes(encoded, "max_completion_tokens").Int())
+}
+
+func TestChannelTestPromptValidation(t *testing.T) {
+	request := buildTestRequest("gpt-4.1", "", &model.Channel{}, false)
+	require.NoError(t, applyChannelTestPrompt(request, strings.Repeat("🐱", 16000)))
+	require.Error(t, applyChannelTestPrompt(request, strings.Repeat("🐱", 16001)))
+	for _, body := range []string{`{"stream":"invalid"}`, `{"prompt":` + strings.Repeat("x", 128<<10), `{"prompt":"` + strings.Repeat("猫", 16001) + `"}`} {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodPost, "/api/channel/test/1", strings.NewReader(body))
+		TestChannel(c)
+		assert.Equal(t, http.StatusBadRequest, recorder.Code, "invalid input is rejected before database access")
+	}
+}
+
+func TestChannelTestResponsePreviews(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, text, model string
+		truncated               bool
+	}{
+		{"chat JSON", `{"model":"actual-model","choices":[{"message":{"content":"你好"}}]}`, "你好", "actual-model", false},
+		{"responses JSON", `{"model":"codex-model","output":[{"type":"reasoning","summary":[{"text":"private"}]},{"type":"message","content":[{"type":"output_text","text":"answer"}]}]}`, "answer", "codex-model", false},
+		{"Claude JSON", `{"model":"claude-fixture","content":[{"type":"thinking","thinking":"private"},{"type":"text","text":"answer"}],"stop_reason":"max_tokens"}`, "answer", "claude-fixture", true},
+		{"Gemini JSON", `{"modelVersion":"gemini-fixture","candidates":[{"content":{"parts":[{"thought":true,"text":"private"},{"text":"answer"}]}}]}`, "answer", "gemini-fixture", false},
+		{"chat SSE", "data: {\"model\":\"actual-model\",\"choices\":[{\"delta\":{\"content\":\"hello \"}}]}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"world\"},\"finish_reason\":\"length\"}]}\n\ndata: [DONE]\n\n", "hello world", "actual-model", true},
+		{"responses SSE without duplicate final", "data: {\"type\":\"response.output_text.delta\",\"delta\":\"answer\"}\n\ndata: {\"type\":\"response.output_text.done\",\"text\":\"answer\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"model\":\"codex-model\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}]}}\n\n", "answer", "codex-model", false},
+		{"responses complete snapshot restores missing deltas", "data: {\"type\":\"response.output_text.delta\",\"delta\":\"ans\"}\n\ndata: {\"type\":\"response.completed\",\"response\":{\"model\":\"codex-model\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"answer\"}]}]}}\n\n", "answer", "codex-model", false},
+		{"responses done parts are ordered and replace deltas", "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"delta\":\"a\"}\n\ndata: {\"type\":\"response.output_text.done\",\"output_index\":1,\"content_index\":0,\"text\":\"second\"}\n\ndata: {\"type\":\"response.output_text.done\",\"output_index\":0,\"content_index\":0,\"text\":\"first\"}\n\n", "firstsecond", "", false},
+		{"Claude SSE", "event: message_start\r\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-fixture\"}}\r\n\r\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"answer\"}}\n\n", "answer", "claude-fixture", false},
+		{"Gemini SSE", "data: {\"modelVersion\":\"gemini-fixture\",\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"a\"}]}}]}\n\ndata: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"b\"}]}}]}\n\n", "ab", "gemini-fixture", false},
+		{"partial stream with error", "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\ndata: {\"error\":{\"message\":\"interrupted\"}}\n\n", "partial", "", false},
+		{"hidden reasoning alone", `{"output":[{"type":"reasoning","encrypted_content":"private"}]}`, "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			text, model, truncated := extractChannelTestResponse([]byte(tc.body), false)
+			assert.Equal(t, tc.text, text)
+			assert.Equal(t, tc.model, model)
+			assert.Equal(t, tc.truncated, truncated)
+		})
+	}
+	text, _, _ := extractChannelTestResponse([]byte(`{"data":[{"embedding":[0.1,0.2]}]}`), false)
+	assert.JSONEq(t, `{"data":[{"embedding":[0.1,0.2]}]}`, text)
+	recorder := httptest.NewRecorder()
+	recorder.Body = nil
+	c, _ := gin.CreateTestContext(recorder)
+	writer := &channelTestResponseWriter{ResponseWriter: c.Writer}
+	_, err := writer.WriteString("data: {\"choices\":[{\"delta\":{\"content\":\"retained\"}}]}\n\n")
+	require.NoError(t, err)
+	_, err = writer.Write([]byte(strings.Repeat(" ", channelTestResponseLimit+1)))
+	require.NoError(t, err)
+	text, _, truncated := extractChannelTestResponse(writer.body.Bytes(), writer.truncated)
+	assert.Equal(t, "retained", text)
+	assert.True(t, truncated)
+	assert.LessOrEqual(t, writer.body.Len(), channelTestResponseLimit)
+	body, err := common.Marshal(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": strings.Repeat("猫", channelTestTextLimit)}}}})
+	require.NoError(t, err)
+	text, _, truncated = extractChannelTestResponse(body, false)
+	assert.True(t, truncated)
+	assert.True(t, utf8.ValidString(text))
+	assert.LessOrEqual(t, len(text), channelTestTextLimit)
+}
+
+func TestChannelTestPromptReachesUpstream(t *testing.T) {
+	oldDB, oldLogDB, oldLogEnabled := model.DB, model.LOG_DB, common.LogConsumeEnabled
+	t.Cleanup(func() { model.DB, model.LOG_DB, common.LogConsumeEnabled = oldDB, oldLogDB, oldLogEnabled })
+	db := setupModelListControllerTestDB(t)
+	common.LogConsumeEnabled = false
+	oldRatios := ratio_setting.ModelRatio2JSONString()
+	t.Cleanup(func() { require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(oldRatios)) })
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"gpt-4.1":1}`))
+	user := model.User{Id: 88001, Username: "channel-prompt-test", Group: "default"}
+	require.NoError(t, db.Create(&user).Error)
+	service.InitHttpClient()
+	var received []byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chat-fixture","model":"upstream-model","choices":[{"index":0,"message":{"role":"assistant","content":"fixture answer"},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}`))
+	}))
+	defer server.Close()
+	channel := &model.Channel{Id: 88001, Type: constant.ChannelTypeOpenAI, Key: "fixture-key", BaseURL: &server.URL, Models: "gpt-4.1", Group: "default"}
+	result := testChannelWithPrompt(context.Background(), channel, user.Id, "gpt-4.1", "", false, "用户的自定义问题", true)
+	require.NoError(t, result.localErr)
+	assert.Equal(t, "用户的自定义问题", gjson.GetBytes(received, "messages.0.content").String())
+	assert.EqualValues(t, 4096, gjson.GetBytes(received, "max_tokens").Int())
+	assert.Equal(t, "fixture answer", result.responseText)
+	assert.Equal(t, "upstream-model", result.responseModel)
+}
 
 func convertChatCompatibilityRequest(t *testing.T, request *dto.GeneralOpenAIRequest, channelType int, mapping map[string]string) []byte {
 	t.Helper()

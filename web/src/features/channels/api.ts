@@ -263,11 +263,17 @@ export async function batchSetChannelTag(
  */
 export async function testChannel(
   id: number,
-  params?: { model?: string; endpoint_type?: string; stream?: boolean }
+  params?: {
+    model?: string
+    endpoint_type?: string
+    stream?: boolean
+    prompt?: string
+  }
 ): Promise<ChannelTestResponse> {
-  const res = await api.get(
+  const res = await api.post(
     `/api/channel/test/${id}`,
-    channelActionConfig({ params })
+    params ?? {},
+    channelActionConfig()
   )
   return res.data
 }

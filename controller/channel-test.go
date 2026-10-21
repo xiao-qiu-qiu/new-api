@@ -2,6 +2,7 @@ package controller
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,10 +10,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -37,11 +40,40 @@ import (
 )
 
 type testResult struct {
-	context       *gin.Context
-	localErr      error
-	newAPIError   *types.NewAPIError
-	probeObserver *service.ChannelProbeObserver
-	relayInfo     *relaycommon.RelayInfo
+	context           *gin.Context
+	localErr          error
+	newAPIError       *types.NewAPIError
+	probeObserver     *service.ChannelProbeObserver
+	relayInfo         *relaycommon.RelayInfo
+	responseText      string
+	responseModel     string
+	responseTruncated bool
+}
+
+const (
+	channelTestPromptLimit   = 16000
+	channelTestResponseLimit = 256 << 10
+	channelTestTextLimit     = 64 << 10
+	channelTestOutputTokens  = 4096
+)
+
+// channelTestResponseWriter retains a bounded preview while allowing the relay
+// to finish reading the upstream response and calculating its normal usage.
+type channelTestResponseWriter struct {
+	gin.ResponseWriter
+	body      bytes.Buffer
+	truncated bool
+}
+
+func (w *channelTestResponseWriter) Write(data []byte) (int, error) {
+	remaining := channelTestResponseLimit - w.body.Len()
+	w.body.Write(data[:min(len(data), remaining)])
+	w.truncated = w.truncated || len(data) > remaining
+	return w.ResponseWriter.Write(data)
+}
+
+func (w *channelTestResponseWriter) WriteString(data string) (int, error) {
+	return w.Write([]byte(data))
 }
 
 func normalizeChannelTestEndpoint(channel *model.Channel, endpointType string) string {
@@ -73,6 +105,10 @@ func resolveChannelTestUserID(c *gin.Context) (int, error) {
 }
 
 func testChannel(ctx context.Context, channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool) (testOutcome testResult) {
+	return testChannelWithPrompt(ctx, channel, testUserID, testModel, endpointType, isStream, "", false)
+}
+
+func testChannelWithPrompt(ctx context.Context, channel *model.Channel, testUserID int, testModel string, endpointType string, isStream bool, prompt string, captureResponse bool) (testOutcome testResult) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -103,6 +139,21 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		observer := service.NewChannelProbeObserver(c.Writer)
 		c.Writer = observer
 		defer func() { testOutcome.probeObserver = observer }()
+	}
+	var responseWriter *channelTestResponseWriter
+	if !probeMode {
+		w.Body = nil
+		responseWriter = &channelTestResponseWriter{ResponseWriter: c.Writer}
+		c.Writer = responseWriter
+		if captureResponse {
+			defer func() {
+				testOutcome.responseText, testOutcome.responseModel, testOutcome.responseTruncated = extractChannelTestResponse(responseWriter.body.Bytes(), responseWriter.truncated)
+			}()
+		}
+	} else {
+		// Monitoring always uses its fixed prompt, even if a caller accidentally
+		// supplies interactive options. No response preview is retained.
+		prompt = ""
 	}
 
 	testModel = strings.TrimSpace(testModel)
@@ -244,6 +295,9 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 	}
 
 	request := buildTestRequest(testModel, endpointType, channel, isStream)
+	if err := applyChannelTestPrompt(request, prompt); err != nil {
+		return testResult{context: c, localErr: err}
+	}
 
 	info, err := relaycommon.GenRelayInfo(c, relayFormat, request, nil)
 
@@ -512,8 +566,7 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 			newAPIError: types.NewOpenAIError(usageErr, types.ErrorCodeBadResponseBody, http.StatusInternalServerError),
 		}
 	}
-	result := w.Result()
-	respBody, err := readTestResponseBody(result.Body, isStream)
+	respBody, err := readTestResponseBody(io.NopCloser(bytes.NewReader(responseWriter.body.Bytes())), isStream && !captureResponse)
 	if err != nil {
 		return testResult{
 			context:     c,
@@ -548,7 +601,9 @@ func testChannel(ctx context.Context, channel *model.Channel, testUserID int, te
 		Group:            info.UsingGroup,
 		Other:            other,
 	})
-	common.SysLog(common.LogText("testing channel #%d, response: \n%s", channel.Id, string(respBody)))
+	if !captureResponse {
+		common.SysLog(common.LogText("testing channel #%d, response: \n%s", channel.Id, string(respBody)))
+	}
 	return testResult{
 		context:     c,
 		localErr:    nil,
@@ -731,6 +786,227 @@ func detectErrorMessageFromJSONBytes(jsonBytes []byte) string {
 	return message
 }
 
+func applyChannelTestPrompt(request dto.Request, prompt string) error {
+	if strings.TrimSpace(prompt) == "" {
+		return nil
+	}
+	if utf8.RuneCountInString(prompt) > channelTestPromptLimit {
+		return fmt.Errorf("test prompt exceeds %d characters", channelTestPromptLimit)
+	}
+	switch req := request.(type) {
+	case *dto.GeneralOpenAIRequest:
+		req.Messages = []dto.Message{{Role: "user", Content: prompt}}
+		if req.MaxCompletionTokens != nil {
+			req.MaxCompletionTokens = lo.ToPtr(uint(channelTestOutputTokens))
+		} else {
+			req.MaxTokens = lo.ToPtr(uint(channelTestOutputTokens))
+		}
+	case *dto.OpenAIResponsesRequest:
+		input, err := common.Marshal([]dto.Message{{Role: "user", Content: prompt}})
+		if err != nil {
+			return err
+		}
+		req.Input = input
+		req.MaxOutputTokens = lo.ToPtr(uint(channelTestOutputTokens))
+	case *dto.OpenAIResponsesCompactionRequest:
+		input, err := common.Marshal([]dto.Message{{Role: "user", Content: prompt}})
+		if err != nil {
+			return err
+		}
+		req.Input = input
+	case *dto.ClaudeRequest:
+		req.Messages = []dto.ClaudeMessage{{Role: "user", Content: prompt}}
+		req.MaxTokens = lo.ToPtr(uint(channelTestOutputTokens))
+	case *dto.GeminiChatRequest:
+		req.Contents = []dto.GeminiChatContent{{Role: "user", Parts: []dto.GeminiPart{{Text: prompt}}}}
+		req.GenerationConfig.MaxOutputTokens = lo.ToPtr(uint(channelTestOutputTokens))
+	case *dto.EmbeddingRequest:
+		req.Input = []any{prompt}
+	case *dto.RerankRequest:
+		req.Query = prompt
+	case *dto.ImageRequest:
+		req.Prompt = prompt
+	}
+	return nil
+}
+
+// channelTestVisibleContent only extracts public text blocks; reasoning,
+// encrypted compaction state, image data and tool arguments stay out of replies.
+func channelTestVisibleContent(content gjson.Result) string {
+	if content.Type == gjson.String {
+		return content.String()
+	}
+	var text strings.Builder
+	for _, part := range content.Array() {
+		if part.Get("thought").Bool() {
+			continue
+		}
+		switch part.Get("type").String() {
+		case "", "text", "output_text", "input_text", "refusal":
+			text.WriteString(part.Get("text").String())
+			text.WriteString(part.Get("refusal").String())
+		}
+	}
+	return text.String()
+}
+
+type channelTestResponsePreview struct {
+	text          strings.Builder
+	model         string
+	truncated     bool
+	finalText     string
+	responseParts map[[2]int]string
+}
+
+func (p *channelTestResponsePreview) observe(payload []byte, stream bool) {
+	if !gjson.ValidBytes(payload) {
+		return
+	}
+	root := gjson.ParseBytes(payload)
+	for _, path := range []string{"model", "response.model", "message.model", "modelVersion"} {
+		if value := root.Get(path).String(); value != "" {
+			p.model = value
+			break
+		}
+	}
+	for _, path := range []string{"choices.0.finish_reason", "stop_reason", "delta.stop_reason", "candidates.0.finishReason", "incomplete_details.reason", "response.incomplete_details.reason"} {
+		switch root.Get(path).String() {
+		case "length", "max_tokens", "MAX_TOKENS", "max_output_tokens":
+			p.truncated = true
+		}
+	}
+	if stream {
+		switch root.Get("type").String() {
+		case "response.output_text.delta", "response.output_text.done":
+			if p.responseParts == nil {
+				p.responseParts = make(map[[2]int]string)
+			}
+			key := [2]int{int(root.Get("output_index").Int()), int(root.Get("content_index").Int())}
+			if root.Get("type").String() == "response.output_text.done" {
+				p.responseParts[key] = root.Get("text").String()
+			} else {
+				p.responseParts[key] += root.Get("delta").String()
+			}
+			return
+		case "content_block_start":
+			if root.Get("content_block.type").String() == "text" {
+				p.text.WriteString(root.Get("content_block.text").String())
+			}
+			return
+		case "content_block_delta":
+			if root.Get("delta.type").String() == "text_delta" {
+				p.text.WriteString(root.Get("delta.text").String())
+			}
+			return
+		case "response.completed", "response.incomplete":
+			root = root.Get("response")
+		default:
+			if strings.HasPrefix(root.Get("type").String(), "response.") {
+				return
+			}
+		}
+	}
+	var text strings.Builder
+	for _, choice := range root.Get("choices").Array() {
+		content := choice.Get("message.content")
+		refusal := choice.Get("message.refusal")
+		if stream {
+			content = choice.Get("delta.content")
+			refusal = choice.Get("delta.refusal")
+		}
+		text.WriteString(channelTestVisibleContent(content))
+		text.WriteString(refusal.String())
+		text.WriteString(choice.Get("text").String())
+	}
+	text.WriteString(channelTestVisibleContent(root.Get("content")))
+	for _, candidate := range root.Get("candidates").Array() {
+		text.WriteString(channelTestVisibleContent(candidate.Get("content.parts")))
+	}
+	var responseText strings.Builder
+	for _, item := range root.Get("output").Array() {
+		if item.Get("type").String() == "message" {
+			responseText.WriteString(channelTestVisibleContent(item.Get("content")))
+		}
+	}
+	if responseText.Len() == 0 {
+		responseText.WriteString(root.Get("output_text").String())
+	}
+	if stream {
+		if responseText.Len() > 0 {
+			p.finalText = responseText.String()
+		}
+	} else {
+		text.WriteString(responseText.String())
+	}
+	p.text.WriteString(text.String())
+}
+
+func extractChannelTestResponse(body []byte, truncated bool) (string, string, bool) {
+	preview := channelTestResponsePreview{truncated: truncated}
+	trimmed := bytes.TrimSpace(body)
+	if gjson.ValidBytes(trimmed) {
+		root := gjson.ParseBytes(trimmed)
+		if root.IsArray() {
+			for _, item := range root.Array() {
+				preview.observe([]byte(item.Raw), false)
+			}
+		} else {
+			preview.observe(trimmed, false)
+		}
+	} else {
+		var event bytes.Buffer
+		for line := range bytes.SplitSeq(append(bytes.Clone(trimmed), '\n', '\n'), []byte{'\n'}) {
+			line = bytes.TrimSuffix(line, []byte{'\r'})
+			if len(line) == 0 {
+				preview.observe(bytes.TrimSpace(event.Bytes()), true)
+				event.Reset()
+				continue
+			}
+			if data, ok := bytes.CutPrefix(line, []byte("data:")); ok {
+				event.Write(bytes.TrimPrefix(data, []byte{' '}))
+				event.WriteByte('\n')
+			}
+		}
+	}
+	text := preview.text.String()
+	if len(preview.responseParts) > 0 {
+		keys := make([][2]int, 0, len(preview.responseParts))
+		for key := range preview.responseParts {
+			keys = append(keys, key)
+		}
+		slices.SortFunc(keys, func(a, b [2]int) int {
+			if order := cmp.Compare(a[0], b[0]); order != 0 {
+				return order
+			}
+			return cmp.Compare(a[1], b[1])
+		})
+		var responseText strings.Builder
+		for _, key := range keys {
+			responseText.WriteString(preview.responseParts[key])
+		}
+		text = responseText.String()
+	}
+	if preview.finalText != "" {
+		text = preview.finalText
+	}
+	root := gjson.ParseBytes(trimmed)
+	if text == "" && gjson.ValidBytes(trimmed) && (root.Get("data").Exists() || root.Get("results").Exists()) {
+		// Non-text endpoints (embeddings, images and rerank) still provide an
+		// inspectable bounded JSON response.
+		if formatted, err := common.IndentJson(trimmed); err == nil {
+			text = string(formatted)
+		}
+	}
+	if len(text) > channelTestTextLimit {
+		text = text[:channelTestTextLimit]
+		for !utf8.ValidString(text) {
+			text = text[:len(text)-1]
+		}
+		preview.truncated = true
+	}
+	return text, preview.model, preview.truncated
+}
+
 func buildTestRequest(model string, endpointType string, channel *model.Channel, isStream bool) dto.Request {
 	testResponsesInput := json.RawMessage(`[{"role":"user","content":"hi"}]`)
 
@@ -828,12 +1104,16 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 	// 先判断是否为 Embedding 模型
 	if strings.Contains(strings.ToLower(model), "embedding") ||
 		strings.HasPrefix(model, "m3e") ||
-		strings.Contains(model, "bge-") {
+		strings.Contains(model, "bge-") || strings.Contains(model, "embed") ||
+		channel.Type == constant.ChannelTypeMokaAI {
 		// 返回 EmbeddingRequest
 		return &dto.EmbeddingRequest{
 			Model: model,
 			Input: []any{"hello world"},
 		}
+	}
+	if channel.Type == constant.ChannelTypeVolcEngine && strings.Contains(model, "seedream") {
+		return &dto.ImageRequest{Model: model, Prompt: "a cute cat", N: lo.ToPtr(uint(1)), Size: "1024x1024"}
 	}
 
 	// Responses-only models (e.g. codex series)
@@ -876,6 +1156,35 @@ func buildTestRequest(model string, endpointType string, channel *model.Channel,
 }
 
 func TestChannel(c *gin.Context) {
+	testModel := c.Query("model")
+	endpointType := c.Query("endpoint_type")
+	isStream, _ := strconv.ParseBool(c.Query("stream"))
+	prompt := ""
+	captureResponse := c.Request.Method == http.MethodPost
+	if captureResponse {
+		var input struct {
+			Model        string `json:"model"`
+			EndpointType string `json:"endpoint_type"`
+			Stream       bool   `json:"stream"`
+			Prompt       string `json:"prompt"`
+		}
+		body, readErr := io.ReadAll(io.LimitReader(c.Request.Body, (128<<10)+1))
+		if readErr == nil && len(body) > 128<<10 {
+			readErr = errors.New("test request body exceeds 128 KiB")
+		}
+		if readErr == nil {
+			readErr = common.Unmarshal(body, &input)
+		}
+		if readErr != nil {
+			common.ApiErrorStatus(c, http.StatusBadRequest, common.NewMessage("Invalid request parameters: {{error}}", map[string]any{"error": readErr.Error()}))
+			return
+		}
+		if utf8.RuneCountInString(input.Prompt) > channelTestPromptLimit {
+			common.ApiErrorStatus(c, http.StatusBadRequest, common.NewMessage("Test prompt exceeds {{limit}} characters", map[string]any{"limit": channelTestPromptLimit}))
+			return
+		}
+		testModel, endpointType, isStream, prompt = input.Model, input.EndpointType, input.Stream, input.Prompt
+	}
 	channelId, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
 		common.ApiError(c, err)
@@ -894,9 +1203,6 @@ func TestChannel(c *gin.Context) {
 	//		go func() { _ = channel.SaveChannelInfo() }()
 	//	}
 	//}()
-	testModel := c.Query("model")
-	endpointType := c.Query("endpoint_type")
-	isStream, _ := strconv.ParseBool(c.Query("stream"))
 	testUserID, err := resolveChannelTestUserID(c)
 	if err != nil {
 		common.ApiError(c, err)
@@ -907,7 +1213,7 @@ func TestChannel(c *gin.Context) {
 	if c.Request != nil {
 		requestCtx = c.Request.Context()
 	}
-	result := testChannel(requestCtx, channel, testUserID, testModel, endpointType, isStream)
+	result := testChannelWithPrompt(requestCtx, channel, testUserID, testModel, endpointType, isStream, prompt, captureResponse)
 	if result.localErr != nil {
 		resp := gin.H{
 			"success": false,
@@ -917,6 +1223,11 @@ func TestChannel(c *gin.Context) {
 		if result.newAPIError != nil {
 			resp["error_code"] = result.newAPIError.GetErrorCode()
 		}
+		if captureResponse {
+			resp["response_text"] = result.responseText
+			resp["response_model"] = result.responseModel
+			resp["response_truncated"] = result.responseTruncated
+		}
 		c.JSON(http.StatusOK, resp)
 		return
 	}
@@ -925,19 +1236,31 @@ func TestChannel(c *gin.Context) {
 	go channel.UpdateResponseTime(milliseconds)
 	consumedTime := float64(milliseconds) / 1000.0
 	if result.newAPIError != nil {
-		c.JSON(http.StatusOK, gin.H{
+		response := gin.H{
 			"success":    false,
 			"message":    result.newAPIError.Error(),
 			"time":       consumedTime,
 			"error_code": result.newAPIError.GetErrorCode(),
-		})
+		}
+		if captureResponse {
+			response["response_text"] = result.responseText
+			response["response_model"] = result.responseModel
+			response["response_truncated"] = result.responseTruncated
+		}
+		c.JSON(http.StatusOK, response)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
+	response := gin.H{
 		"success": true,
 		"message": "",
 		"time":    consumedTime,
-	})
+	}
+	if captureResponse {
+		response["response_text"] = result.responseText
+		response["response_model"] = result.responseModel
+		response["response_truncated"] = result.responseTruncated
+	}
+	c.JSON(http.StatusOK, response)
 }
 
 // channelTestSummary records the outcome of one channel test cycle so the

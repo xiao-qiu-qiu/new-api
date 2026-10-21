@@ -277,23 +277,30 @@ export async function handleTestChannel(
     testModel?: string
     endpointType?: string
     stream?: boolean
+    prompt?: string
     silent?: boolean
   },
   onTestComplete?: (
     success: boolean,
     responseTime?: number,
     error?: string,
-    errorCode?: string
+    errorCode?: string,
+    response?: ChannelTestResponse
   ) => void
 ): Promise<void> {
   const payload =
-    options && (options.testModel || options.endpointType || options.stream)
+    options &&
+    (options.testModel ||
+      options.endpointType ||
+      options.stream !== undefined ||
+      options.prompt !== undefined)
       ? {
           ...(options.testModel ? { model: options.testModel } : {}),
           ...(options.endpointType
             ? { endpoint_type: options.endpointType }
             : {}),
-          ...(options.stream ? { stream: true } : {}),
+          ...(options.stream !== undefined ? { stream: options.stream } : {}),
+          ...(options.prompt !== undefined ? { prompt: options.prompt } : {}),
         }
       : undefined
 
@@ -315,7 +322,7 @@ export async function handleTestChannel(
             : undefined
         )
       }
-      onTestComplete?.(true, responseTime)
+      onTestComplete?.(true, responseTime, undefined, undefined, response)
     } else {
       const errorMsg =
         getServerMessage(response) || i18next.t(ERROR_MESSAGES.TEST_FAILED)
@@ -327,7 +334,13 @@ export async function handleTestChannel(
             : errorMsg,
         })
       }
-      onTestComplete?.(false, responseTime, errorMsg, response.error_code)
+      onTestComplete?.(
+        false,
+        responseTime,
+        errorMsg,
+        response.error_code,
+        response
+      )
     }
   } catch (_error: unknown) {
     const err = _error as { response?: { data?: unknown } }
