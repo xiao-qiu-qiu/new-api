@@ -16,12 +16,16 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import type { FileUIPart } from 'ai'
+
 // Message types
 export type MessageRole = 'user' | 'assistant' | 'system'
 
 export type MessageStatus = 'loading' | 'streaming' | 'complete' | 'error'
 
 export type PlaygroundMessageLayoutMode = 'alternating' | 'left'
+
+export type MessageAttachment = FileUIPart & { id?: string }
 
 export interface MessageVersion {
   id: string
@@ -32,6 +36,7 @@ export interface Message {
   key: string
   from: MessageRole
   versions: MessageVersion[]
+  attachments?: MessageAttachment[]
   createdAt?: number
   startedAt?: number
   completedAt?: number

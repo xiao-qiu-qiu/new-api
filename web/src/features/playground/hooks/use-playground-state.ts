@@ -17,6 +17,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
+
+import { useAuthStore } from '@/stores/auth-store'
 
 import { DEFAULT_CONFIG, DEFAULT_PARAMETER_ENABLED } from '../constants'
 import {
@@ -43,6 +47,10 @@ const MESSAGE_SAVE_DEBOUNCE_MS = 500
  * Main state management hook for playground
  */
 export function usePlaygroundState() {
+  const { t } = useTranslation()
+  const [ownerId] = useState(
+    () => useAuthStore.getState().auth.user?.id ?? null
+  )
   // Load initial state from localStorage
   const [config, setConfig] = useState<PlaygroundConfig>(
     getInitialPlaygroundConfig
@@ -54,6 +62,7 @@ export function usePlaygroundState() {
 
   const [messages, setMessages] = useState<Message[]>([])
   const [isLoadingMessages, setIsLoadingMessages] = useState(true)
+  const [isMessageStorageReady, setIsMessageStorageReady] = useState(false)
   const messagesSaveTimerRef = useRef<number | null>(null)
   const latestMessagesRef = useRef<Message[]>(messages)
   const hasLoadedMessagesRef = useRef(false)
@@ -61,51 +70,106 @@ export function usePlaygroundState() {
   const [models, setModels] = useState<ModelOption[]>([])
   const [groups, setGroups] = useState<GroupOption[]>([])
 
-  const persistMessages = useCallback((messagesToSave: Message[]) => {
-    latestMessagesRef.current = messagesToSave
+  const saveConversation = useCallback(
+    (messagesToSave: Message[]): void => {
+      void saveMessages(messagesToSave, ownerId).then(
+        () => {
+          if ((useAuthStore.getState().auth.user?.id ?? null) === ownerId) {
+            toast.dismiss('playground-message-save-error')
+          }
+        },
+        () => {
+          if ((useAuthStore.getState().auth.user?.id ?? null) === ownerId) {
+            toast.error(
+              t(
+                'Failed to save conversation history. Keep this page open and try again.'
+              ),
+              {
+                id: 'playground-message-save-error',
+                action: {
+                  label: t('Retry'),
+                  onClick: () => {
+                    if (
+                      (useAuthStore.getState().auth.user?.id ?? null) ===
+                      ownerId
+                    ) {
+                      saveConversation(latestMessagesRef.current)
+                    }
+                  },
+                },
+              }
+            )
+          }
+        }
+      )
+    },
+    [ownerId, t]
+  )
 
-    if (!hasLoadedMessagesRef.current) {
-      return
-    }
+  const persistMessages = useCallback(
+    (messagesToSave: Message[]) => {
+      latestMessagesRef.current = messagesToSave
 
-    if (messagesSaveTimerRef.current !== null) {
-      window.clearTimeout(messagesSaveTimerRef.current)
-    }
+      if (!hasLoadedMessagesRef.current) {
+        return
+      }
 
-    messagesSaveTimerRef.current = window.setTimeout(() => {
-      messagesSaveTimerRef.current = null
-      saveMessages(latestMessagesRef.current)
-    }, MESSAGE_SAVE_DEBOUNCE_MS)
-  }, [])
+      if (messagesSaveTimerRef.current !== null) {
+        window.clearTimeout(messagesSaveTimerRef.current)
+      }
+
+      messagesSaveTimerRef.current = window.setTimeout(() => {
+        messagesSaveTimerRef.current = null
+        saveConversation(latestMessagesRef.current)
+      }, MESSAGE_SAVE_DEBOUNCE_MS)
+    },
+    [saveConversation]
+  )
 
   useEffect(() => {
     let cancelled = false
 
-    window.setTimeout(() => {
-      const loadedMessages = loadMessages() ?? []
-      if (cancelled) {
-        return
-      }
+    void loadMessages(ownerId).then(
+      (savedMessages) => {
+        if (
+          cancelled ||
+          (useAuthStore.getState().auth.user?.id ?? null) !== ownerId
+        ) {
+          return
+        }
 
-      latestMessagesRef.current = loadedMessages
-      hasLoadedMessagesRef.current = true
-      setMessages(loadedMessages)
-      setIsLoadingMessages(false)
-    }, 0)
+        const loadedMessages = savedMessages ?? []
+        latestMessagesRef.current = loadedMessages
+        hasLoadedMessagesRef.current = true
+        setMessages(loadedMessages)
+        setIsMessageStorageReady(true)
+        setIsLoadingMessages(false)
+      },
+      () => {
+        if (
+          cancelled ||
+          (useAuthStore.getState().auth.user?.id ?? null) !== ownerId
+        ) {
+          return
+        }
+        setIsLoadingMessages(false)
+      }
+    )
 
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [ownerId])
 
   useEffect(
     () => () => {
       if (messagesSaveTimerRef.current !== null) {
         window.clearTimeout(messagesSaveTimerRef.current)
-        saveMessages(latestMessagesRef.current)
+        messagesSaveTimerRef.current = null
+        saveConversation(latestMessagesRef.current)
       }
     },
-    []
+    [saveConversation]
   )
 
   // Update config with automatic save
@@ -135,13 +199,19 @@ export function usePlaygroundState() {
   // Update messages with automatic save
   const updateMessages = useCallback(
     (updater: MessageStateUpdater) => {
+      if (
+        !hasLoadedMessagesRef.current ||
+        (useAuthStore.getState().auth.user?.id ?? null) !== ownerId
+      ) {
+        return
+      }
       setMessages((prev) => {
         const newMessages = applyMessageStateUpdate(prev, updater)
         persistMessages(newMessages)
         return newMessages
       })
     },
-    [persistMessages]
+    [ownerId, persistMessages]
   )
 
   // Clear all messages
@@ -163,6 +233,7 @@ export function usePlaygroundState() {
     parameterEnabled,
     messages,
     isLoadingMessages,
+    isMessageStorageReady,
     models,
     groups,
 

@@ -26,6 +26,7 @@ import { Button } from '@/components/ui/button'
 
 import { getMessageEditorState } from '../../lib'
 import type { Message } from '../../types'
+import { PlaygroundMessageAttachments } from './playground-message-attachments'
 
 type PlaygroundMessageEditorProps = {
   editText: string
@@ -152,6 +153,7 @@ export function PlaygroundMessageEditor({
 
   return (
     <>
+      <PlaygroundMessageAttachments message={message} />
       <CodeBlockEditor
         actions={editorActions}
         ariaLabel={t('Edit')}

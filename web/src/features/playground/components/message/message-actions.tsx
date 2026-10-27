@@ -89,6 +89,8 @@ export function MessageActions({
 
   const { content, hasContent, isAssistant, isLoading, isUser } =
     getMessageActionState(message)
+  const hasPromptContent =
+    hasContent || (isUser && Boolean(message.attachments?.length))
   const isCopied = copiedText === content
 
   const handleCopy = () => {
@@ -129,7 +131,12 @@ export function MessageActions({
     })
   }
 
-  if ((isAssistant || isUser) && hasContent && !isLoading && onRegenerate) {
+  if (
+    (isAssistant || isUser) &&
+    hasPromptContent &&
+    !isLoading &&
+    onRegenerate
+  ) {
     actions.push({
       disabled: isGenerating,
       icon: RefreshCw,
@@ -138,7 +145,7 @@ export function MessageActions({
     })
   }
 
-  if (hasContent && onEdit) {
+  if (hasPromptContent && onEdit) {
     actions.push({
       disabled: isGenerating,
       icon: Edit,

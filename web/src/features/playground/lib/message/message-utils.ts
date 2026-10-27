@@ -21,6 +21,7 @@ import { nanoid } from 'nanoid'
 import { MESSAGE_ROLES, MESSAGE_STATUS } from '../../constants'
 import type {
   Message,
+  MessageAttachment,
   MessageVersion,
   ChatCompletionMessage,
   ContentPart,
@@ -57,6 +58,15 @@ export function hasMessageContent(message: Message): boolean {
   return getMessageContent(message).trim() !== ''
 }
 
+export function getMessageImageAttachments(
+  message: Message
+): MessageAttachment[] {
+  return (message.attachments ?? []).filter(
+    (attachment) =>
+      attachment.mediaType.startsWith('image/') && attachment.url.trim() !== ''
+  )
+}
+
 /**
  * Update current version content in message
  */
@@ -76,12 +86,21 @@ export function updateCurrentVersionContent(
  */
 export function createUserMessage(
   content: string,
-  createdAt: number = Date.now()
+  createdAt: number = Date.now(),
+  attachments?: MessageAttachment[]
 ): Message {
   return {
     key: nanoid(),
     from: MESSAGE_ROLES.USER,
     versions: [createMessageVersion(content)],
+    ...(attachments?.length
+      ? {
+          attachments: attachments.map((attachment) => ({
+            ...attachment,
+            id: attachment.id ?? nanoid(),
+          })),
+        }
+      : {}),
     createdAt,
   }
 }
@@ -120,10 +139,7 @@ export function buildMessageContent(
   }
 
   const parts: ContentPart[] = [
-    {
-      type: 'text',
-      text: text || '',
-    },
+    ...(text.trim() ? [{ type: 'text' as const, text }] : []),
     ...validImages.map((url) => ({
       type: 'image_url' as const,
       image_url: { url: url.trim() },
@@ -156,7 +172,10 @@ export function formatMessageForAPI(message: Message): ChatCompletionMessage {
   const currentVersion = getCurrentVersion(message)
   return {
     role: message.from,
-    content: currentVersion.content,
+    content: buildMessageContent(
+      currentVersion.content,
+      getMessageImageAttachments(message).map((attachment) => attachment.url)
+    ),
   }
 }
 

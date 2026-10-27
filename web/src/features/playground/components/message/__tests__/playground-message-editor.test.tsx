@@ -123,3 +123,33 @@ describe('PlaygroundMessageEditor beforeunload guard', () => {
     expect(event.defaultPrevented).toBe(false)
   })
 })
+
+test('preserves the original image when saving a message after removing its text', async () => {
+  const user = userEvent.setup()
+  const onSaveEditAndSubmit = vi.fn()
+  render(
+    <PlaygroundMessageEditor
+      editText=''
+      message={{
+        ...userMessage,
+        attachments: [
+          {
+            type: 'file',
+            filename: 'photo.png',
+            mediaType: 'image/png',
+            url: 'data:image/png;base64,aW1hZ2U=',
+          },
+        ],
+      }}
+      onEditTextChange={() => undefined}
+      onSaveEditAndSubmit={onSaveEditAndSubmit}
+      originalText='original'
+    />
+  )
+
+  expect(screen.getByRole('img', { name: 'photo.png' })).toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: 'Save & Submit' }))
+
+  expect(onSaveEditAndSubmit).toHaveBeenCalledWith('')
+  expect(screen.getByRole('img', { name: 'photo.png' })).toBeInTheDocument()
+})

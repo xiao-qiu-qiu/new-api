@@ -75,6 +75,17 @@ const messageSchema = z.object({
   key: z.string(),
   from: messageRoleSchema,
   versions: z.array(messageVersionSchema).min(1),
+  attachments: z
+    .array(
+      z.object({
+        type: z.literal('file'),
+        id: z.string().optional(),
+        url: z.string(),
+        mediaType: z.string(),
+        filename: z.string().optional(),
+      })
+    )
+    .optional(),
   createdAt: z.number().optional(),
   startedAt: z.number().optional(),
   completedAt: z.number().optional(),

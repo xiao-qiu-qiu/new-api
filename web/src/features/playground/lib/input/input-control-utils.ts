@@ -16,11 +16,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import type { FileUIPart } from 'ai'
+
 import type { GroupOption, ModelOption } from '../../types'
 
 type InputControlStateOptions = {
   disabled?: boolean
   groups: GroupOption[]
+  hasAttachments?: boolean
   hasStopHandler: boolean
   isGenerating?: boolean
   isModelLoading?: boolean
@@ -36,22 +39,24 @@ type InputControlState = {
 
 type SubmittableInputMessage = {
   text?: string | null
+  files?: readonly FileUIPart[]
 }
 
 export function getSubmittableInputText(
   message: SubmittableInputMessage,
   disabled?: boolean
 ): string | null {
-  if (disabled || !message.text?.trim()) {
+  if (disabled || (!message.text?.trim() && !message.files?.length)) {
     return null
   }
 
-  return message.text
+  return message.text ?? ''
 }
 
 export function getInputControlState({
   disabled,
   groups,
+  hasAttachments,
   hasStopHandler,
   isGenerating,
   isModelLoading,
@@ -61,7 +66,10 @@ export function getInputControlState({
   const hasModels = models.length > 0
 
   return {
-    canSubmit: !disabled && hasModels && text.trim().length > 0,
+    canSubmit:
+      !disabled &&
+      hasModels &&
+      (text.trim().length > 0 || Boolean(hasAttachments)),
     isSelectorDisabled: disabled || isModelLoading || groups.length === 0,
     shouldShowStop: Boolean(isGenerating && hasStopHandler),
   }

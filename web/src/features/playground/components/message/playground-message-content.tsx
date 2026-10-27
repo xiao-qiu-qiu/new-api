@@ -44,6 +44,7 @@ import { MESSAGE_STATUS } from '../../constants'
 import {
   getMessageAlignmentClass,
   getMessageContentState,
+  getMessageImageAttachments,
   isErrorMessage,
   type MessageAlignment,
 } from '../../lib'
@@ -51,6 +52,7 @@ import { getMessageContentStyles } from '../../lib/message/message-styles'
 import type { Message } from '../../types'
 import { MessageError } from './message-error'
 import { MessageMetadata } from './message-metadata'
+import { PlaygroundMessageAttachments } from './playground-message-attachments'
 
 type PlaygroundMessageContentProps = {
   actions: ReactNode
@@ -80,6 +82,7 @@ export function PlaygroundMessageContent({
     sources,
   } = getMessageContentState(message, versionContent)
   const isError = isErrorMessage(message)
+  const hasImages = getMessageImageAttachments(message).length > 0
   const isMessageFinal =
     message.status !== MESSAGE_STATUS.LOADING &&
     message.status !== MESSAGE_STATUS.STREAMING
@@ -134,7 +137,7 @@ export function PlaygroundMessageContent({
         </>
       )}
 
-      {!isError && showMessageContent && (
+      {!isError && (showMessageContent || hasImages) && (
         <>
           {isSourceVisible ? (
             <CodeBlock
@@ -155,7 +158,10 @@ export function PlaygroundMessageContent({
               variant='flat'
               className={cn(getMessageContentStyles())}
             >
-              <Response final={isMessageFinal}>{displayContent}</Response>
+              <PlaygroundMessageAttachments message={message} />
+              {displayContent && (
+                <Response final={isMessageFinal}>{displayContent}</Response>
+              )}
             </MessageContent>
           )}
           <MessageMetadata alignment={alignment} message={message} />

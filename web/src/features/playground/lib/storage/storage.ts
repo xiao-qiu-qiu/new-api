@@ -28,6 +28,11 @@ import {
 import { completeAssistantTiming } from '../message/message-timing-utils'
 import { hasMessageContent } from '../message/message-utils'
 import {
+  deleteMessageRecord,
+  readMessageRecord,
+  writeMessageRecord,
+} from './message-database'
+import {
   MAX_LOADED_MESSAGE_CHARS,
   MAX_LOADED_MESSAGES_CHARS,
   MAX_STORED_MESSAGES,
@@ -48,13 +53,15 @@ const MIN_PREFIX_COLLAPSE_LENGTH = 2000
 const MIN_REPEATED_SECTION_COUNT = 3
 const SECTION_HEADING_LINE_PATTERN = /^#{2,6}\s+\d+\.\s+.+$/gm
 
-function getUserStorageKey(key: string): string | null {
+function getUserStorageKey(
+  key: string,
+  ownerId: number | null = useAuthStore.getState().auth.user?.id ?? null
+): string | null {
   // Legacy data has no owner; never assign it to the next signed-in account.
   for (const legacyKey of Object.values(STORAGE_KEYS)) {
     localStorage.removeItem(legacyKey)
   }
-  const userId = useAuthStore.getState().auth.user?.id
-  return userId == null ? null : `${key}:${userId}`
+  return ownerId === null ? null : `${key}:${ownerId}`
 }
 
 function readStoredValue(baseKey: string): unknown | null {
@@ -66,14 +73,11 @@ function readStoredValue(baseKey: string): unknown | null {
   return JSON.parse(saved) as unknown
 }
 
-function readStoredMessagesValue(): unknown | null {
-  const key = getUserStorageKey(STORAGE_KEYS.MESSAGES)
-  if (!key) return null
+function readStoredMessagesValue(key: string): unknown | null {
   const saved = localStorage.getItem(key)
   if (!saved) return null
 
   if (saved.length > MAX_STORED_MESSAGES_BYTES) {
-    localStorage.removeItem(key)
     return null
   }
 
@@ -289,7 +293,7 @@ function trimMessagesByContentSize(messages: Message[]): Message[] {
     result.push(message)
   }
 
-  return result.reverse()
+  return result.length === messages.length ? messages : result.reverse()
 }
 
 /**
@@ -353,62 +357,94 @@ export function saveParameterEnabled(
 }
 
 /**
- * Load messages from localStorage
+ * Load messages from browser storage and migrate account-owned localStorage data.
+ * Missing records return null; storage failures reject without replacing history.
  */
-export function loadMessages(): Message[] | null {
-  try {
-    const saved = readStoredMessagesValue()
-    if (!saved) return null
+export async function loadMessages(
+  ownerId?: number | null
+): Promise<Message[] | null> {
+  const key = getUserStorageKey(STORAGE_KEYS.MESSAGES, ownerId)
+  if (!key) return null
 
-    const parsed = messagesSchema.parse(unwrapStoredValue(saved)) as Message[]
-    const normalized = parsed.map(normalizeStoredMessageForLoad)
-    const normalizedChanged = normalized.some(
-      (message, index) => message !== parsed[index]
-    )
-    const trimmed = trimMessages(normalized)
-    const sizeTrimmed = trimMessagesByContentSize(trimmed)
-    const sanitized = sanitizeMessagesOnLoad(sizeTrimmed)
+  const legacySaved = readStoredMessagesValue(key)
+  const saved = legacySaved ?? (await readMessageRecord(key))
+  if (!saved) return null
 
-    if (
-      normalizedChanged ||
-      trimmed !== normalized ||
-      sizeTrimmed !== trimmed ||
-      sanitized !== sizeTrimmed
-    ) {
-      saveMessages(sanitized)
-    }
+  const parsed = messagesSchema.parse(unwrapStoredValue(saved)) as Message[]
+  const normalized = parsed.map(normalizeStoredMessageForLoad)
+  const normalizedChanged = normalized.some(
+    (message, index) => message !== parsed[index]
+  )
+  const trimmed = trimMessages(normalized)
+  const sizeTrimmed = trimMessagesByContentSize(trimmed)
+  const sanitized = sanitizeMessagesOnLoad(sizeTrimmed)
 
-    return sanitized
-  } catch (error) {
-    // eslint-disable-next-line no-console
-    console.error('Failed to load messages:', error)
+  if (
+    legacySaved ||
+    normalizedChanged ||
+    trimmed !== normalized ||
+    sizeTrimmed !== trimmed ||
+    sanitized !== sizeTrimmed
+  ) {
+    await persistMessageRecord(key, sanitized)
   }
-  return null
+
+  return sanitized
 }
 
 /**
- * Save messages to localStorage
+ * Save messages to browser storage with a bounded localStorage fallback.
+ * Reject if neither storage backend can preserve the complete message list.
  */
-export function saveMessages(messages: Message[]): void {
+export async function saveMessages(
+  messages: Message[],
+  ownerId?: number | null
+): Promise<void> {
+  const key = getUserStorageKey(STORAGE_KEYS.MESSAGES, ownerId)
+  if (!key) return
+  const trimmed = trimMessages(messages)
+  const parsed = messagesSchema.parse(trimmed) as Message[]
+  await persistMessageRecord(key, parsed)
+}
+
+async function persistMessageRecord(
+  key: string,
+  messages: Message[]
+): Promise<void> {
+  const previousLocalValue = localStorage.getItem(key)
+  const payload: StoredEnvelope<Message[]> = {
+    version: STORAGE_VERSION,
+    data: messages,
+  }
+
   try {
-    const trimmed = trimMessages(messages)
-    const parsed = messagesSchema.parse(trimmed) as Message[]
-    writeStoredValue(STORAGE_KEYS.MESSAGES, parsed)
+    await writeMessageRecord(key, payload)
+    if (localStorage.getItem(key) === previousLocalValue) {
+      localStorage.removeItem(key)
+    }
   } catch (error) {
-    // eslint-disable-next-line no-console
-    console.error('Failed to save messages:', error)
+    // Retain small conversations when IndexedDB is unavailable. Large
+    // image records stay out of localStorage and never replace existing data.
+    const serialized = JSON.stringify(payload)
+    if (serialized.length <= MAX_STORED_MESSAGES_BYTES) {
+      localStorage.setItem(key, serialized)
+      return
+    }
+    throw error
   }
 }
 
 /**
  * Clear the signed-in user's playground data
  */
-export function clearPlaygroundData(): void {
+export async function clearPlaygroundData(): Promise<void> {
   try {
+    const messageKey = getUserStorageKey(STORAGE_KEYS.MESSAGES)
     for (const baseKey of Object.values(STORAGE_KEYS)) {
       const key = getUserStorageKey(baseKey)
       if (key) localStorage.removeItem(key)
     }
+    if (messageKey) await deleteMessageRecord(messageKey)
   } catch (error) {
     // eslint-disable-next-line no-console
     console.error('Failed to clear playground data:', error)

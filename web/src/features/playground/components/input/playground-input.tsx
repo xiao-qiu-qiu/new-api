@@ -18,17 +18,24 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 
 import {
   PromptInput,
+  PromptInputAttachment,
+  PromptInputAttachments,
   PromptInputFooter,
+  PromptInputHeader,
   PromptInputTextarea,
+  usePromptInputAttachments,
+  type PromptInputProps,
   type PromptInputMessage,
 } from '@/components/ai-elements/prompt-input'
 
 import { getSubmittableInputText } from '../../lib'
 import type {
   ModelOption,
+  MessageAttachment,
   GroupOption,
   ParameterEnabled,
   PlaygroundConfig,
@@ -38,7 +45,7 @@ import { PlaygroundInputTools } from './playground-input-tools'
 
 interface PlaygroundInputProps {
   config: PlaygroundConfig
-  onSubmit: (text: string) => void
+  onSubmit: (text: string, attachments?: MessageAttachment[]) => void
   onStop?: () => void
   disabled?: boolean
   isGenerating?: boolean
@@ -60,6 +67,26 @@ interface PlaygroundInputProps {
     value: boolean
   ) => void
   parameterEnabled: ParameterEnabled
+}
+
+function PlaygroundInputAttachments(props: { disabled?: boolean }) {
+  const attachments = usePromptInputAttachments()
+
+  if (attachments.files.length === 0) return null
+
+  return (
+    <PromptInputHeader className='gap-2 px-4 pt-3 pb-0'>
+      <PromptInputAttachments>
+        {(attachment) => (
+          <PromptInputAttachment
+            className='max-w-full'
+            data={attachment}
+            disabled={props.disabled}
+          />
+        )}
+      </PromptInputAttachments>
+    </PromptInputHeader>
+  )
 }
 
 export function PlaygroundInput({
@@ -87,18 +114,45 @@ export function PlaygroundInput({
   const handleSubmit = (message: PromptInputMessage) => {
     const submittableText = getSubmittableInputText(message, disabled)
 
-    if (!submittableText) return
-    onSubmit(submittableText)
-    setText('')
+    if (submittableText === null) return
+    onSubmit(submittableText, message.files)
+    setText((currentText) =>
+      currentText === submittableText ? '' : currentText
+    )
+  }
+
+  const handleAttachmentError: NonNullable<PromptInputProps['onError']> = (
+    error
+  ) => {
+    if (error.code === 'accept') {
+      toast.error(t('Use PNG, JPEG, GIF or WebP images.'))
+      return
+    }
+    if (error.code === 'max_file_size') {
+      toast.error(t('Each image must be 5 MB or smaller.'))
+      return
+    }
+    if (error.code === 'max_files') {
+      toast.error(t('You can attach up to 4 images per message.'))
+      return
+    }
+    toast.error(error.message)
   }
 
   return (
     <div className='grid shrink-0 gap-4 px-1 md:pb-4'>
       <PromptInput
+        accept='image/png,image/jpeg,image/gif,image/webp'
         className='relative'
+        disabled={disabled}
         groupClassName='bg-background/95 dark:bg-background/80 border-border/70 shadow-[0_18px_60px_-32px_rgba(0,0,0,0.65)] ring-1 ring-foreground/5 rounded-xl overflow-hidden transition-all duration-200 focus-within:border-primary/45 focus-within:ring-primary/15 focus-within:shadow-[0_22px_70px_-34px_rgba(0,0,0,0.75)]'
+        maxFiles={4}
+        maxFileSize={5 * 1024 * 1024}
+        multiple
+        onError={handleAttachmentError}
         onSubmit={handleSubmit}
       >
+        <PlaygroundInputAttachments disabled={disabled} />
         <PromptInputTextarea
           autoComplete='off'
           autoCorrect='off'

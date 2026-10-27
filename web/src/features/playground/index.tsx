@@ -16,6 +16,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { useTranslation } from 'react-i18next'
+
+import { ErrorState } from '@/components/error-state'
+import { useAuthStore } from '@/stores/auth-store'
+
 import { PlaygroundChat } from './components/chat/playground-chat'
 import { PlaygroundInput } from './components/input/playground-input'
 import {
@@ -26,11 +31,19 @@ import {
 } from './hooks'
 
 export function Playground() {
+  const userId = useAuthStore((state) => state.auth.user?.id)
+
+  return <PlaygroundSession key={userId ?? 'signed-out'} />
+}
+
+function PlaygroundSession() {
+  const { t } = useTranslation()
   const {
     config,
     parameterEnabled,
     messages,
     isLoadingMessages,
+    isMessageStorageReady,
     models,
     groups,
     updateMessages,
@@ -78,26 +91,35 @@ export function Playground() {
     <div className='relative flex size-full min-h-0 flex-col overflow-hidden'>
       {/* Full-width scroll container: scrolling works even over side whitespace */}
       <div className='flex min-h-0 flex-1 flex-col overflow-hidden'>
-        <PlaygroundChat
-          messages={messages}
-          isLoadingMessages={isLoadingMessages}
-          onRegenerateMessage={handleRegenerateMessage}
-          onEditMessage={handleEditMessage}
-          onDeleteMessage={handleDeleteMessage}
-          onSelectPrompt={handleSendMessage}
-          isGenerating={isGenerating}
-          editingKey={editingMessageKey}
-          onCancelEdit={handleEditOpenChange}
-          onSaveEdit={(newContent) => applyEdit(newContent, false)}
-          onSaveEditAndSubmit={(newContent) => applyEdit(newContent, true)}
-        />
+        {!isLoadingMessages && !isMessageStorageReady ? (
+          <ErrorState
+            title={t(
+              'Failed to load conversation history. Reload to try again.'
+            )}
+            onRetry={() => window.location.reload()}
+          />
+        ) : (
+          <PlaygroundChat
+            messages={messages}
+            isLoadingMessages={isLoadingMessages}
+            onRegenerateMessage={handleRegenerateMessage}
+            onEditMessage={handleEditMessage}
+            onDeleteMessage={handleDeleteMessage}
+            onSelectPrompt={handleSendMessage}
+            isGenerating={isGenerating}
+            editingKey={editingMessageKey}
+            onCancelEdit={handleEditOpenChange}
+            onSaveEdit={(newContent) => applyEdit(newContent, false)}
+            onSaveEditAndSubmit={(newContent) => applyEdit(newContent, true)}
+          />
+        )}
       </div>
 
       {/* Input area: center content and constrain to the same container width */}
       <div className='mx-auto w-full max-w-4xl'>
         <PlaygroundInput
           config={config}
-          disabled={isGenerating}
+          disabled={isGenerating || !isMessageStorageReady}
           groups={groups}
           groupValue={config.group}
           isGenerating={isGenerating}
