@@ -24,7 +24,8 @@ import { useAuthStore } from '@/stores/auth-store'
 
 import { STORAGE_KEYS } from '../../../constants'
 import { usePlaygroundState } from '../../../hooks/use-playground-state'
-import type { Message } from '../../../types'
+import type { Message, PlaygroundServiceTier } from '../../../types'
+import { getInitialPlaygroundConfig } from '../../state/playground-state-utils'
 import {
   clearPlaygroundData,
   loadConfig,
@@ -118,6 +119,64 @@ afterEach(() => {
   useAuthStore.getState().auth.reset()
   vi.unstubAllGlobals()
 })
+
+test.each<PlaygroundServiceTier>(['default', 'priority', 'ultrafast', 'flex'])(
+  'saving the %s speed tier restores the selection with the other config',
+  (serviceTier) => {
+    useAuthStore.getState().auth.setUser({ id: 1, username: 'A', role: 1 })
+    const config = {
+      model: 'gpt-5',
+      group: 'custom',
+      temperature: 0.3,
+      service_tier: serviceTier,
+    }
+
+    saveConfig(config)
+
+    expect(loadConfig()).toEqual(config)
+    expect(getInitialPlaygroundConfig()).toMatchObject(config)
+  }
+)
+
+test.each(['plain', 'versioned'] as const)(
+  'loading an older %s config without a speed tier uses default and preserves other config',
+  (format) => {
+    useAuthStore.getState().auth.setUser({ id: 1, username: 'A', role: 1 })
+    const config = { model: 'gpt-5', group: 'custom', temperature: 0.3 }
+    localStorage.setItem(
+      `${STORAGE_KEYS.CONFIG}:1`,
+      JSON.stringify(format === 'plain' ? config : { version: 1, data: config })
+    )
+
+    expect(loadConfig()).toEqual(config)
+    expect(getInitialPlaygroundConfig()).toMatchObject({
+      ...config,
+      service_tier: 'default',
+    })
+  }
+)
+
+test.each(['unsupported', 'fast', null, 2, { tier: 'ultrafast' }])(
+  'loading an invalid stored speed tier %j falls back to default without discarding other config',
+  (serviceTier) => {
+    useAuthStore.getState().auth.setUser({ id: 1, username: 'A', role: 1 })
+    const config = {
+      model: 'gpt-5',
+      group: 'custom',
+      temperature: 0.3,
+      service_tier: serviceTier,
+    }
+    localStorage.setItem(
+      `${STORAGE_KEYS.CONFIG}:1`,
+      JSON.stringify({ version: 1, data: config })
+    )
+
+    expect(getInitialPlaygroundConfig()).toMatchObject({
+      ...config,
+      service_tier: 'default',
+    })
+  }
+)
 
 test('switching accounts isolates config, messages and parameter toggles and preserves returning account data', async () => {
   useAuthStore.getState().auth.setUser({ id: 1, username: 'A', role: 1 })

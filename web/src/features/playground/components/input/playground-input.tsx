@@ -176,7 +176,11 @@ export function PlaygroundInput({
             modelValue={modelValue}
             onGroupChange={onGroupChange}
             onModelChange={onModelChange}
+            onServiceTierChange={(value) =>
+              onConfigChange('service_tier', value)
+            }
             onStop={onStop}
+            serviceTier={config.service_tier}
             text={text}
             tools={
               <PlaygroundInputTools

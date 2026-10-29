@@ -16,6 +16,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { supportsOpenAITierPolicy } from '@/lib/openai-service-tier'
+
 import type {
   ChatCompletionRequest,
   Message,
@@ -42,6 +44,10 @@ export function buildChatCompletionPayload(
     group: config.group,
     messages: processedMessages,
     stream: config.stream,
+  }
+
+  if (supportsOpenAITierPolicy(config.model)) {
+    payload.service_tier = config.service_tier
   }
 
   if (parameterEnabled.temperature) {

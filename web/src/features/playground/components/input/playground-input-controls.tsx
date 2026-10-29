@@ -27,7 +27,12 @@ import {
 import { ModelGroupSelector } from '@/components/model-group-selector'
 
 import { getInputControlState } from '../../lib'
-import type { GroupOption, ModelOption } from '../../types'
+import type {
+  GroupOption,
+  ModelOption,
+  PlaygroundServiceTier,
+} from '../../types'
+import { PlaygroundSpeedTierSelect } from './playground-speed-tier-select'
 
 type PlaygroundInputControlsProps = {
   disabled?: boolean
@@ -39,7 +44,9 @@ type PlaygroundInputControlsProps = {
   modelValue: string
   onGroupChange: (value: string) => void
   onModelChange: (value: string) => void
+  onServiceTierChange: (value: PlaygroundServiceTier) => void
   onStop?: () => void
+  serviceTier: PlaygroundServiceTier
   text: string
   tools: ReactNode
 }
@@ -54,7 +61,9 @@ export function PlaygroundInputControls({
   modelValue,
   onGroupChange,
   onModelChange,
+  onServiceTierChange,
   onStop,
+  serviceTier,
   text,
   tools,
 }: PlaygroundInputControlsProps) {
@@ -73,15 +82,23 @@ export function PlaygroundInputControls({
     })
 
   const renderSelector = () => (
-    <ModelGroupSelector
-      selectedModel={modelValue}
-      models={models}
-      onModelChange={onModelChange}
-      selectedGroup={groupValue}
-      groups={groups}
-      onGroupChange={onGroupChange}
-      disabled={isSelectorDisabled}
-    />
+    <>
+      <ModelGroupSelector
+        selectedModel={modelValue}
+        models={models}
+        onModelChange={onModelChange}
+        selectedGroup={groupValue}
+        groups={groups}
+        onGroupChange={onGroupChange}
+        disabled={isSelectorDisabled}
+      />
+      <PlaygroundSpeedTierSelect
+        model={modelValue}
+        value={serviceTier}
+        onChange={onServiceTierChange}
+        disabled={isSelectorDisabled}
+      />
+    </>
   )
 
   const renderSubmitButton = () =>
@@ -110,7 +127,7 @@ export function PlaygroundInputControls({
 
   return (
     <div className='flex w-full flex-col gap-2.5 md:flex-row md:items-center md:justify-between'>
-      <div className='flex min-w-0 items-center justify-end md:hidden'>
+      <div className='flex min-w-0 items-center justify-end gap-2 md:hidden'>
         {renderSelector()}
       </div>
 

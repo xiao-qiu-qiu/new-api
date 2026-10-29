@@ -73,6 +73,7 @@ export interface ContentPart {
 export interface ChatCompletionRequest {
   model: string
   group?: string
+  service_tier?: PlaygroundServiceTier
   messages: ChatCompletionMessage[]
   stream: boolean
   temperature?: number
@@ -123,9 +124,16 @@ export interface ChatCompletionResponse {
 }
 
 // Configuration types
+export type PlaygroundServiceTier =
+  | 'default'
+  | 'priority'
+  | 'ultrafast'
+  | 'flex'
+
 export interface PlaygroundConfig {
   model: string
   group: string
+  service_tier: PlaygroundServiceTier
   temperature: number
   top_p: number
   max_tokens: number
