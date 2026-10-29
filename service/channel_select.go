@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -26,6 +27,26 @@ func GetChannelConstraints(c *gin.Context) *dto.ChannelConstraints {
 	constraints := &dto.ChannelConstraints{}
 	common.SetContextKey(c, constant.ContextKeyChannelConstraints, constraints)
 	return constraints
+}
+
+// SetRequestServiceTierFilter replaces the request's tier constraint for each
+// HTTP request or WebSocket create. Model matching happens per candidate after
+// channel mapping, so aliases and mixed-provider channels keep their semantics.
+func SetRequestServiceTierFilter(c *gin.Context, modelName, tier string) {
+	if c == nil {
+		return
+	}
+	if tier == "" {
+		tier = "default"
+	}
+	constraints := GetChannelConstraints(c)
+	constraints.Filters = slices.DeleteFunc(constraints.Filters, func(filter dto.ChannelFilter) bool {
+		return filter.Kind == dto.FilterServiceTier
+	})
+	constraints.AddFilter(dto.ChannelFilter{
+		Kind: dto.FilterServiceTier, ModelName: modelName, ServiceTier: tier,
+		OpenAITierPolicy: common.GetContextKeyString(c, constant.ContextKeyTokenOpenAITierPolicy),
+	})
 }
 
 func AppendTaskPluginIdentityFilter(c *gin.Context, pluginKey string) {

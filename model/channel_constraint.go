@@ -3,19 +3,22 @@ package model
 import (
 	"slices"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
+	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/setting/reasoning"
 )
 
 var filterEvalOrder = []dto.ChannelFilterKind{
 	dto.FilterRequestPath,
 	dto.FilterTaskPluginIdentity,
 	dto.FilterResponsesWebSocket,
+	dto.FilterServiceTier,
 }
 
 // ChannelSatisfiesFilters reports whether ch passes every filter.
-// On false, it returns the kind of the first violated filter (request_path
-// then task_plugin_identity) for error attribution.
+// On false, it returns the kind of the first violated filter in evaluation order.
 func ChannelSatisfiesFilters(ch *Channel, modelName string, filters []dto.ChannelFilter) (bool, dto.ChannelFilterKind) {
 	if ch == nil {
 		return false, ""
@@ -89,6 +92,11 @@ func candidatePassesKindFilters(ch *Channel, exists bool, modelName string, kind
 
 func channelMatchesFilter(ch *Channel, modelName string, filter dto.ChannelFilter) bool {
 	switch filter.Kind {
+	case dto.FilterServiceTier:
+		if filter.ModelName != "" {
+			modelName = filter.ModelName
+		}
+		return ChannelSupportsServiceTier(ch, modelName, filter.ServiceTier, filter.OpenAITierPolicy)
 	case dto.FilterRequestPath:
 		if filter.RequestPath == "" {
 			return true
@@ -127,4 +135,65 @@ func channelMatchesFilter(ch *Channel, modelName string, filter dto.ChannelFilte
 	default:
 		return true
 	}
+}
+
+// IsGPTTextModel matches the final upstream model's last namespace component.
+// Keep both routing and outbound key policy decisions on this shared rule.
+func IsGPTTextModel(modelName string) bool {
+	return kitdto.IsGPTTextModel(modelName)
+}
+
+// ResolveServiceTierModel predicts the final model for candidate filtering.
+// Conditional parameter operations need the full request and are checked again
+// against the actual outgoing payload by the relay boundary.
+func (ch *Channel) ResolveServiceTierModel(modelName string) string {
+	if ch == nil {
+		return modelName
+	}
+	if mappingJSON := ch.GetModelMapping(); mappingJSON != "" && mappingJSON != "{}" {
+		var mapping map[string]string
+		if err := common.UnmarshalJsonStr(mappingJSON, &mapping); err == nil {
+			visited := map[string]bool{modelName: true}
+			for {
+				mapped := mapping[modelName]
+				if mapped == "" {
+					mapped = mapping[reasoning.BaseModelName(modelName)]
+				}
+				if mapped == "" || visited[mapped] {
+					break
+				}
+				visited[mapped] = true
+				modelName = mapped
+			}
+		}
+	}
+	if ch.ParamOverride != nil && *ch.ParamOverride != "" {
+		var override struct {
+			Model string `json:"model"`
+		}
+		if err := common.UnmarshalJsonStr(*ch.ParamOverride, &override); err == nil && override.Model != "" {
+			modelName = override.Model
+		}
+	}
+	return modelName
+}
+
+// ChannelSupportsServiceTier applies explicit GPT capabilities before priority
+// or weight selection. Empty declarations retain unrestricted legacy routing.
+func ChannelSupportsServiceTier(ch *Channel, modelName, serviceTier, keyPolicy string) bool {
+	if ch == nil {
+		return false
+	}
+	if !IsGPTTextModel(ch.ResolveServiceTierModel(modelName)) {
+		return true
+	}
+	tier := kitdto.NormalizeServiceTier(serviceTier)
+	if keyPolicy == OpenAITierPolicyPriority || keyPolicy == OpenAITierPolicyUltrafast {
+		tier = keyPolicy
+	}
+	if tier == "" {
+		return true
+	}
+	supported := ch.GetOtherSettings().SupportedServiceTiers
+	return len(supported) == 0 || slices.Contains(supported, tier)
 }

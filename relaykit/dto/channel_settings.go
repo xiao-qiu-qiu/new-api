@@ -103,12 +103,15 @@ const (
 )
 
 type ChannelOtherSettings struct {
-	AzureResponsesVersion                 string                `json:"azure_responses_version,omitempty"`
-	VertexKeyType                         VertexKeyType         `json:"vertex_key_type,omitempty"`   // "json" or "api_key"
-	VertexProjectID                       string                `json:"vertex_project_id,omitempty"` // 仅当 vertex_key_type=api_key 时使用；JSON 模式下从 service account 解析
-	OpenRouterEnterprise                  *bool                 `json:"openrouter_enterprise,omitempty"`
-	ClaudeBetaQuery                       bool                  `json:"claude_beta_query,omitempty"`          // Claude 渠道是否强制追加 ?beta=true
-	AllowServiceTier                      bool                  `json:"allow_service_tier,omitempty"`         // 是否允许 service_tier 透传（默认过滤以避免额外计费）
+	AzureResponsesVersion string        `json:"azure_responses_version,omitempty"`
+	VertexKeyType         VertexKeyType `json:"vertex_key_type,omitempty"`   // "json" or "api_key"
+	VertexProjectID       string        `json:"vertex_project_id,omitempty"` // 仅当 vertex_key_type=api_key 时使用；JSON 模式下从 service account 解析
+	OpenRouterEnterprise  *bool         `json:"openrouter_enterprise,omitempty"`
+	ClaudeBetaQuery       bool          `json:"claude_beta_query,omitempty"`  // Claude 渠道是否强制追加 ?beta=true
+	AllowServiceTier      bool          `json:"allow_service_tier,omitempty"` // 是否允许 service_tier 透传（默认过滤以避免额外计费）
+	// SupportedServiceTiers declares GPT text tier capabilities. Empty preserves
+	// unrestricted legacy routing; non-empty values are canonical after validation.
+	SupportedServiceTiers                 []string              `json:"supported_service_tiers,omitempty"`
 	AllowInferenceGeo                     bool                  `json:"allow_inference_geo,omitempty"`        // 是否允许 inference_geo 透传（仅 Claude，默认过滤以满足数据驻留合规
 	AllowSpeed                            bool                  `json:"allow_speed,omitempty"`                // 是否允许 speed 透传（仅 Claude，默认过滤以避免意外切换推理速度模式）
 	AllowSafetyIdentifier                 bool                  `json:"allow_safety_identifier,omitempty"`    // 是否允许 safety_identifier 透传（默认过滤以保护用户隐私）
@@ -138,6 +141,59 @@ func (s *ChannelOtherSettings) IsOpenRouterEnterprise() bool {
 		return false
 	}
 	return *s.OpenRouterEnterprise
+}
+
+// NormalizeServiceTier returns a canonical OpenAI tier, or empty for an unknown
+// or absent value. Callers distinguish an absent request from an explicit default.
+func NormalizeServiceTier(tier string) string {
+	switch strings.ToLower(strings.TrimSpace(tier)) {
+	case "default", "standard", "auto", "scale":
+		return "default"
+	case "fast", "priority":
+		return "priority"
+	case "ultrafast":
+		return "ultrafast"
+	case "flex":
+		return "flex"
+	default:
+		return ""
+	}
+}
+
+// IsGPTTextModel matches the final upstream model's last namespace component.
+// Both routing and outbound key policy decisions use this rule.
+func IsGPTTextModel(modelName string) bool {
+	name := strings.ToLower(strings.TrimSpace(modelName))
+	name = name[strings.LastIndex(name, "/")+1:]
+	if len(name) <= 4 || !strings.HasPrefix(name, "gpt-") || name[4] < '0' || name[4] > '9' {
+		return false
+	}
+	for _, excluded := range []string{"image", "audio", "tts", "embed", "transcrib", "realtime"} {
+		if strings.Contains(name, excluded) {
+			return false
+		}
+	}
+	return true
+}
+
+// ValidateSupportedServiceTiers normalizes recognized aliases and removes
+// duplicates. An invalid item rejects the entire declaration without mutating it.
+func (s *ChannelOtherSettings) ValidateSupportedServiceTiers() error {
+	if s == nil || len(s.SupportedServiceTiers) == 0 {
+		return nil
+	}
+	normalized := make([]string, 0, len(s.SupportedServiceTiers))
+	for _, value := range s.SupportedServiceTiers {
+		tier := NormalizeServiceTier(value)
+		if tier == "" {
+			return fmt.Errorf("invalid supported_service_tiers value: %q", value)
+		}
+		if !slices.Contains(normalized, tier) {
+			normalized = append(normalized, tier)
+		}
+	}
+	s.SupportedServiceTiers = normalized
+	return nil
 }
 
 // ValidateToolLossPolicy validates the channel-level request-phase tool-loss

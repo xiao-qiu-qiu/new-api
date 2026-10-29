@@ -39,6 +39,7 @@ const (
 	FilterRequestPath        ChannelFilterKind = "request_path"
 	FilterTaskPluginIdentity ChannelFilterKind = "task_plugin_identity"
 	FilterResponsesWebSocket ChannelFilterKind = "responses_websocket"
+	FilterServiceTier        ChannelFilterKind = "service_tier"
 )
 
 type ChannelFilter struct {
@@ -47,6 +48,11 @@ type ChannelFilter struct {
 	TaskPluginKey          string
 	TaskPluginKeys         []string
 	TaskPluginChannelTypes []int
+	// ServiceTier is the original request tier; empty leaves it unconstrained.
+	// ModelName preserves the request model when routing matches an alias.
+	ServiceTier      string
+	ModelName        string
+	OpenAITierPolicy string
 }
 
 type ChannelConstraints struct {

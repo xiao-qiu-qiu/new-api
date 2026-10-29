@@ -185,6 +185,11 @@ func filterAbilitiesByConstraints(abilities []Ability, modelName string, filters
 		if identityFilterRequiresKey(filters) {
 			return nil
 		}
+		for _, filter := range filters {
+			if filter.Kind == dto.FilterServiceTier {
+				return nil
+			}
+		}
 		return abilities
 	}
 

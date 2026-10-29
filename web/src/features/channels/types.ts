@@ -94,6 +94,15 @@ export interface ChannelSettings {
   tls_insecure_skip_verify?: boolean
 }
 
+export const channelServiceTierSchema = z.enum([
+  'default',
+  'priority',
+  'ultrafast',
+  'flex',
+])
+
+export type ChannelServiceTier = z.infer<typeof channelServiceTierSchema>
+
 export interface ChannelOtherSettings {
   azure_responses_version?: string
   vertex_key_type?: 'json' | 'api_key'
@@ -101,6 +110,7 @@ export interface ChannelOtherSettings {
   openrouter_enterprise?: boolean
   aws_key_type?: 'ak_sk' | 'api_key'
   allow_service_tier?: boolean
+  supported_service_tiers?: ChannelServiceTier[]
   disable_store?: boolean
   allow_safety_identifier?: boolean
   allow_include_obfuscation?: boolean

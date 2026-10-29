@@ -208,6 +208,7 @@ import {
 import type { Channel } from '../../types'
 import { ChannelPluginExtensions } from '../channel-plugin-extensions'
 import { ChannelQuickOptions } from '../channel-quick-options'
+import { ChannelServiceTiersSetting } from '../channel-service-tiers-setting'
 import { ChannelTypeLogo } from '../channel-type-badge'
 import { useChannels } from '../channels-provider'
 import { AdvancedCustomEditorDialog } from '../dialogs/advanced-custom-editor-dialog'
@@ -306,6 +307,7 @@ const SENSITIVE_FORM_FIELDS = [
   'system_prompt',
   'system_prompt_override',
   'allow_service_tier',
+  'supported_service_tiers',
   'disable_store',
   'allow_safety_identifier',
   'allow_include_obfuscation',
@@ -2202,6 +2204,7 @@ export function ChannelMutateDrawer({
         icon={<Route className='h-3.5 w-3.5' />}
         iconTone='info'
       />
+      <ChannelServiceTiersSetting disabled={sensitiveLocked || isSubmitting} />
       <div className='grid gap-4 sm:grid-cols-2'>
         <FormField
           control={form.control}

@@ -19,6 +19,8 @@ For commercial licensing, please contact support@quantumnous.com
 import type { TFunction } from 'i18next'
 import { describe, expect, test } from 'vitest'
 
+import { supportsOpenAITierPolicy } from '@/lib/openai-service-tier'
+
 import { apiKeySchema, type ApiKey } from '../../types'
 import {
   getApiKeyFormDefaultValues,
@@ -26,7 +28,6 @@ import {
   transformApiKeyToFormDefaults,
   transformFormDataToPayload,
 } from '../api-key-form'
-import { supportsOpenAITierPolicy } from '../openai-tier-policy'
 
 const t = ((key: string, options?: Record<string, unknown>) => {
   if (options?.max !== undefined) {

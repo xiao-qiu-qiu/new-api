@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,7 +16,9 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	appdto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/i18n"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
+	relaychannel "github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -689,5 +692,166 @@ func TestResponsesWSErrorAttribution(t *testing.T) {
 			assert.Equal(t, tc.ambiguous, ambiguous)
 			assert.Equal(t, tc.controlError, controlError)
 		})
+	}
+}
+
+func TestServiceTierHTTPRoutingAndOutboundValidation(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	database := setupRelayChannelDB(t)
+	require.NoError(t, database.AutoMigrate(&model.Ability{}))
+	var hits atomic.Int32
+	var forwardedTier string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		var request struct {
+			ServiceTier string `json:"service_tier"`
+		}
+		require.NoError(t, common.Unmarshal(body, &request))
+		forwardedTier = request.ServiceTier
+		hits.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	var high, low *model.Channel
+	for _, spec := range []struct {
+		name     string
+		priority int64
+		tiers    []string
+	}{
+		{"normal", 100, []string{"default", "priority"}},
+		{"ultrafast", 0, []string{"ultrafast"}},
+	} {
+		channel := &model.Channel{Name: spec.name, Key: "sk-test", Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled, Group: "default", Models: "gpt-6,deepseek-chat", Priority: &spec.priority, Weight: common.GetPointer(uint(100))}
+		channel.SetOtherSettings(dto.ChannelOtherSettings{SupportedServiceTiers: spec.tiers})
+		require.NoError(t, database.Create(channel).Error)
+		for _, name := range []string{"gpt-6", "deepseek-chat"} {
+			require.NoError(t, database.Create(&model.Ability{ChannelId: channel.Id, Model: name, Group: "default", Enabled: true, Priority: &spec.priority}).Error)
+		}
+		if spec.name == "normal" {
+			high = channel
+		} else {
+			low = channel
+		}
+	}
+	common.MemoryCacheEnabled = true
+	t.Cleanup(func() {
+		ids := []int{high.Id, low.Id}
+		require.NoError(t, database.Where("channel_id IN ?", ids).Delete(&model.Ability{}).Error)
+		require.NoError(t, database.Where("id IN ?", ids).Delete(&model.Channel{}).Error)
+		model.InitChannelCache()
+	})
+	for _, tc := range []struct {
+		name, model, tier, policy, override, wantTier string
+		wantChannel                                   int
+		blocked                                       bool
+	}{
+		{name: "default", model: "gpt-6", wantChannel: high.Id},
+		{name: "fast alias passes without legacy switch", model: "gpt-6", tier: "fast", wantTier: "priority", wantChannel: high.Id},
+		{name: "UF bypasses higher priority", model: "gpt-6", tier: "ultrafast", wantTier: "ultrafast", wantChannel: low.Id},
+		{name: "key lock applies with absent tier", model: "gpt-6", policy: "ultrafast", wantTier: "ultrafast", wantChannel: low.Id},
+		{name: "override conflict stops before dispatch", model: "gpt-6", tier: "ultrafast", override: `{"service_tier":"priority"}`, wantChannel: low.Id, blocked: true},
+		{name: "key lock wins over override", model: "gpt-6", policy: "ultrafast", override: `{"service_tier":"priority"}`, wantTier: "ultrafast", wantChannel: low.Id},
+		{name: "dynamic model cannot silently drop UF", model: "deepseek-chat", tier: "ultrafast", override: `{"operations":[{"path":"model","mode":"set","value":"gpt-6"}]}`, wantChannel: high.Id, blocked: true},
+		{name: "non GPT keeps legacy filtering", model: "deepseek-chat", tier: "ultrafast", policy: "ultrafast", wantChannel: high.Id},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, database.Model(&model.Channel{}).Where("id IN ?", []int{high.Id, low.Id}).Update("param_override", tc.override).Error)
+			model.InitChannelCache()
+			before := hits.Load()
+			router := gin.New()
+			router.POST("/v1/responses", func(c *gin.Context) {
+				common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+				common.SetContextKey(c, constant.ContextKeyTokenOpenAITierPolicy, tc.policy)
+			}, middleware.Distribute(), func(c *gin.Context) {
+				assert.Equal(t, tc.wantChannel, common.GetContextKeyInt(c, constant.ContextKeyChannelId))
+				var request dto.OpenAIResponsesRequest
+				require.NoError(t, common.UnmarshalBodyReusable(c, &request))
+				info := relaycommon.GenRelayInfoResponses(c, &request)
+				_, body, closer, apiErr := PrepareResponsesRequest(c, info, &request)
+				require.Nil(t, apiErr)
+				defer closer.Close()
+				upstreamRequest, err := http.NewRequest(http.MethodPost, upstream.URL, body)
+				require.NoError(t, err)
+				relaychannel.ApplyUpstreamBodyMetadata(upstreamRequest, body)
+				response, err := relaychannel.DoRequest(c, upstreamRequest, info)
+				assert.Equal(t, tc.tier, info.RequestedServiceTier, "original request remains frozen")
+				if tc.blocked {
+					var tierErr *types.NewAPIError
+					require.ErrorAs(t, err, &tierErr)
+					assert.Equal(t, http.StatusBadRequest, tierErr.StatusCode)
+					assert.False(t, service.ShouldRetryRelayError(c, tierErr, 2))
+					c.Status(tierErr.StatusCode)
+					return
+				}
+				require.NoError(t, err)
+				defer response.Body.Close()
+				c.Status(response.StatusCode)
+			})
+			fields := map[string]any{"model": tc.model, "input": "hi"}
+			if tc.tier != "" {
+				fields["service_tier"] = tc.tier
+			}
+			body, err := common.Marshal(fields)
+			require.NoError(t, err)
+			request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(string(body)))
+			request.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			router.ServeHTTP(recorder, request)
+			if tc.blocked {
+				assert.Equal(t, http.StatusBadRequest, recorder.Code)
+				assert.Equal(t, before, hits.Load())
+				return
+			}
+			assert.Equal(t, http.StatusNoContent, recorder.Code)
+			assert.Equal(t, before+1, hits.Load())
+			assert.Equal(t, tc.wantTier, forwardedTier)
+		})
+	}
+}
+
+func TestResponsesWSServiceTierRevalidatesEachCreate(t *testing.T) {
+	database := setupRelayChannelDB(t)
+	baseURL := "http://upstream.example"
+	channel := &model.Channel{Name: "ws-tier", Key: "sk-test", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeOpenAI, BaseURL: &baseURL}
+	channel.SetSetting(dto.ChannelSettings{ResponsesWebSocketEnabled: true})
+	channel.SetOtherSettings(dto.ChannelOtherSettings{SupportedServiceTiers: []string{"default", "priority"}})
+	require.NoError(t, database.Create(channel).Error)
+	session := &responsesWSSession{lockedChannelID: channel.Id, lockedModel: "gpt-6", lockedKey: channel.Key,
+		lockedContext: map[constant.ContextKey]any{constant.ContextKeyChannelBaseUrl: channel.GetBaseURL(), constant.ContextKeyChannelHeaderOverride: channel.GetHeaderOverride()}}
+	for _, tc := range []struct {
+		tier, policy string
+		rejected     bool
+	}{
+		{tier: "default"},
+		{tier: "ultrafast", rejected: true},
+		{tier: "priority"},
+		{tier: "default", policy: "ultrafast", rejected: true},
+	} {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+		common.SetContextKey(c, constant.ContextKeyOriginalModel, "gpt-6")
+		common.SetContextKey(c, constant.ContextKeyTokenOpenAITierPolicy, tc.policy)
+		service.GetChannelConstraints(c).AddPin(appdto.ChannelPin{ChannelId: channel.Id, Source: appdto.PinSourceToken})
+		service.SetRequestServiceTierFilter(c, "gpt-6", tc.tier)
+		apiErr := session.restoreConnectionContext(c, "gpt-6")
+		if tc.rejected {
+			require.NotNil(t, apiErr)
+			assert.Equal(t, http.StatusBadRequest, apiErr.StatusCode)
+			assert.ErrorContains(t, apiErr, "reconnect required")
+			continue
+		}
+		require.Nil(t, apiErr)
+		common.SetContextKey(c, constant.ContextKeyChannelType, channel.Type)
+		request := dto.OpenAIResponsesRequest{Model: "gpt-6", ServiceTier: tc.tier, Input: common.RawMessage(`"hi"`)}
+		info := relaycommon.GenRelayInfoResponses(c, &request)
+		payload, apiErr := buildResponsesWSCreatePayload(c, info, request, nil, "")
+		require.Nil(t, apiErr)
+		var outgoing struct {
+			ServiceTier string `json:"service_tier"`
+		}
+		require.NoError(t, common.Unmarshal(payload, &outgoing))
+		assert.Equal(t, tc.tier, outgoing.ServiceTier)
+		assert.Equal(t, tc.tier, info.OutboundServiceTier)
 	}
 }

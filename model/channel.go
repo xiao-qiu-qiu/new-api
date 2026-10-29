@@ -1012,6 +1012,9 @@ func (channel *Channel) ValidateSettings() error {
 	if err := channelOtherSettings.ValidateToolLossPolicy(); err != nil {
 		return err
 	}
+	if err := channelOtherSettings.ValidateSupportedServiceTiers(); err != nil {
+		return err
+	}
 	if preset := common.GetAdvancedCustomPreset(channel.Type); preset != nil {
 		channelOtherSettings.AdvancedCustom = preset
 	}
@@ -1029,6 +1032,23 @@ func (channel *Channel) ValidateSettings() error {
 		if _, ok := channelOtherSettings.AdvancedCustom.ModelListRoute(); !ok {
 			return fmt.Errorf("advanced custom channels require a %s route when upstream model update checks are enabled", dto.AdvancedCustomModelListPath)
 		}
+	}
+	if len(channelOtherSettings.SupportedServiceTiers) > 0 {
+		// Persist canonical tiers without dropping unrelated or future settings.
+		var fields map[string]common.RawMessage
+		if err := common.UnmarshalJsonStr(channel.OtherSettings, &fields); err != nil {
+			return err
+		}
+		encodedTiers, err := common.Marshal(channelOtherSettings.SupportedServiceTiers)
+		if err != nil {
+			return err
+		}
+		fields["supported_service_tiers"] = encodedTiers
+		encodedSettings, err := common.Marshal(fields)
+		if err != nil {
+			return err
+		}
+		channel.OtherSettings = string(encodedSettings)
 	}
 	return nil
 }

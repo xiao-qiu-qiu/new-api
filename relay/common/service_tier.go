@@ -2,12 +2,15 @@ package common
 
 import (
 	"fmt"
+	"net/http"
+	"slices"
 	"strings"
 
 	appcommon "github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
@@ -15,18 +18,7 @@ import (
 // NormalizeServiceTier accepts OpenAI's documented tiers and the common Fast
 // alias. Unknown values cannot become billing multipliers.
 func NormalizeServiceTier(tier string) string {
-	switch strings.ToLower(strings.TrimSpace(tier)) {
-	case "fast", "priority":
-		return "priority"
-	case "ultrafast":
-		return "ultrafast"
-	case "flex":
-		return "flex"
-	case "default", "standard", "auto", "scale":
-		return "default"
-	default:
-		return ""
-	}
+	return dto.NormalizeServiceTier(tier)
 }
 
 func requestedServiceTier(request dto.Request) string {
@@ -59,17 +51,8 @@ func (info *RelayInfo) ApplyOutboundServiceTierPolicy(c *gin.Context, payload []
 		model = info.UpstreamModelName
 	}
 	// The actual outgoing model wins, including passthrough and model overrides.
-	// Only the last namespace component is matched. Keep this rule aligned with
-	// the API-key editor: gpt- followed by a digit, excluding non-text families.
-	model = strings.ToLower(strings.TrimSpace(model))
-	model = model[strings.LastIndex(model, "/")+1:]
-	gptText := len(model) > 4 && strings.HasPrefix(model, "gpt-") && model[4] >= '0' && model[4] <= '9'
-	for _, excluded := range []string{"image", "audio", "tts", "embed", "transcrib", "realtime"} {
-		if strings.Contains(model, excluded) {
-			gptText = false
-			break
-		}
-	}
+	gptText := dto.IsGPTTextModel(model)
+	textRequest := info.RelayMode == relayconstant.RelayModeChatCompletions || info.RelayMode == relayconstant.RelayModeResponses || info.RelayMode == relayconstant.RelayModeResponsesCompact
 	var locked string
 	if c != nil && gptText {
 		switch info.RelayMode {
@@ -86,10 +69,36 @@ func (info *RelayInfo) ApplyOutboundServiceTierPolicy(c *gin.Context, payload []
 			return nil, "", err
 		}
 	}
-	if locked == "" && !strings.EqualFold(strings.TrimSpace(tier), "fast") {
+	explicitCapabilities := gptText && textRequest && info.ChannelMeta != nil && len(info.ChannelOtherSettings.SupportedServiceTiers) > 0
+	if explicitCapabilities {
+		if locked == "" && len(metadata.ServiceTier) == 0 && !info.ChannelOtherSettings.AllowServiceTier {
+			requestedTier := NormalizeServiceTier(info.RequestedServiceTier)
+			if requestedTier != "" && requestedTier != "default" {
+				// A conditional model override can turn a non-GPT candidate
+				// into GPT after the legacy field filter already ran. Reject
+				// that configuration conflict instead of silently downgrading.
+				return nil, "", types.NewErrorWithStatusCode(
+					fmt.Errorf("the selected channel removed requested service_tier %q; review model mapping and overrides", requestedTier),
+					types.ErrorCode("service_tier"), http.StatusBadRequest, types.ErrOptionWithSkipRetry(),
+				)
+			}
+		}
+		canonicalTier := NormalizeServiceTier(tier)
+		if tier == "" {
+			canonicalTier = "default"
+		}
+		if canonicalTier != "" && !slices.Contains(info.ChannelOtherSettings.SupportedServiceTiers, canonicalTier) {
+			return nil, "", types.NewErrorWithStatusCode(
+				fmt.Errorf("the selected channel does not support service_tier %q", canonicalTier),
+				types.ErrorCode("service_tier"), http.StatusBadRequest, types.ErrOptionWithSkipRetry(),
+			)
+		}
+	}
+	fastAlias := strings.EqualFold(strings.TrimSpace(tier), "fast")
+	if locked == "" && !fastAlias && (!explicitCapabilities || len(metadata.ServiceTier) == 0) {
 		return payload, tier, nil
 	}
-	if locked == "" {
+	if locked == "" && fastAlias {
 		tier = "priority"
 	}
 	// Re-encode the top-level object when rewriting so duplicate/escaped tier
@@ -101,11 +110,13 @@ func (info *RelayInfo) ApplyOutboundServiceTierPolicy(c *gin.Context, payload []
 	if fields == nil {
 		return nil, "", fmt.Errorf("outbound request must be a JSON object")
 	}
-	encodedTier, err := appcommon.Marshal(tier)
-	if err != nil {
-		return nil, "", err
+	if locked != "" || fastAlias {
+		encodedTier, err := appcommon.Marshal(tier)
+		if err != nil {
+			return nil, "", err
+		}
+		fields["service_tier"] = encodedTier
 	}
-	fields["service_tier"] = encodedTier
 	updated, err := appcommon.Marshal(fields)
 	return updated, tier, err
 }

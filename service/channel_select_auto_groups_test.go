@@ -8,8 +8,11 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	appdto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
@@ -126,4 +129,101 @@ func TestCacheGetRandomSatisfiedChannelUsesTokenAutoGroupsWhenGlobalAutoIsEmpty(
 	assert.Equal(t, 2102, second.Id)
 	assert.Equal(t, "default", selectedGroup)
 	assert.Equal(t, "default", common.GetContextKeyString(ctx, constant.ContextKeyAutoGroup))
+}
+
+func TestSelectChannelServiceTierBeforePriorityAndBindings(t *testing.T) {
+	db := setupChannelSelectAutoGroupsTest(t)
+	const modelName = "gpt-6"
+	for _, spec := range []struct {
+		id       int
+		group    string
+		priority int64
+		tiers    []string
+	}{
+		{2201, "vip", 100, []string{"default", "priority"}},
+		{2202, "default", 100, []string{"default", "priority"}},
+		{2203, "default", 0, []string{"ultrafast"}},
+	} {
+		createChannelSelectAutoGroupsChannel(t, db, spec.id, spec.group, modelName)
+		var channel model.Channel
+		require.NoError(t, db.First(&channel, spec.id).Error)
+		channel.SetOtherSettings(dto.ChannelOtherSettings{SupportedServiceTiers: spec.tiers})
+		require.NoError(t, db.Model(&channel).Updates(map[string]any{"settings": channel.OtherSettings, "priority": spec.priority}).Error)
+		require.NoError(t, db.Model(&model.Ability{}).Where("channel_id = ?", spec.id).Update("priority", spec.priority).Error)
+	}
+	model.InitChannelCache()
+	for _, tc := range []struct {
+		name, group, tier, policy string
+		want                      int
+		retry                     int
+		pin                       bool
+	}{
+		{name: "ultrafast bypasses higher priority", group: "default", tier: "ultrafast", want: 2203},
+		{name: "ultrafast retry stays eligible", group: "default", tier: "ultrafast", retry: 1, want: 2203},
+		{name: "auto skips incompatible first group", group: "auto", tier: "ultrafast", want: 2203},
+		{name: "key lock overrides default", group: "default", tier: "default", policy: "ultrafast", want: 2203},
+		{name: "ordinary requests require default", group: "default", want: 2202},
+		{name: "fast alias", group: "default", tier: "fast", want: 2202},
+		{name: "unknown preserves existing selection", group: "default", tier: "future-tier", want: 2202},
+		{name: "pin cannot bypass tier", group: "default", tier: "ultrafast", pin: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+			common.SetContextKey(c, constant.ContextKeyUsingGroup, tc.group)
+			common.SetContextKey(c, constant.ContextKeyUserGroup, "default")
+			common.SetContextKey(c, constant.ContextKeyTokenAutoGroups, []string{"vip", "default"})
+			common.SetContextKey(c, constant.ContextKeyTokenOpenAITierPolicy, tc.policy)
+			SetRequestServiceTierFilter(c, modelName, tc.tier)
+			if tc.pin {
+				GetChannelConstraints(c).AddPin(appdto.ChannelPin{ChannelId: 2202, Source: appdto.PinSourceToken})
+			}
+			channel, group, err := SelectChannelForRequest(c, modelName, &RetryParam{Ctx: c, ModelName: modelName, TokenGroup: tc.group, Retry: &tc.retry})
+			if tc.want == 0 {
+				require.NotNil(t, err)
+				assert.Equal(t, appdto.FilterServiceTier, err.FilterKind)
+				assert.Nil(t, channel)
+				return
+			}
+			require.Nil(t, err)
+			require.NotNil(t, channel)
+			assert.Equal(t, tc.want, channel.Id)
+			assert.Equal(t, "default", group)
+		})
+	}
+
+	// A stored binding cannot reintroduce a channel filtered out by the tier.
+	affinity := operation_setting.GetChannelAffinitySetting()
+	previousAffinity := *affinity
+	t.Cleanup(func() { *affinity = previousAffinity })
+	snapshot, err := model.BuildRequestPolicy(map[string]string{
+		"channel_affinity_setting.enabled":      "true",
+		"channel_affinity_setting.session_mode": "prefer",
+		"channel_affinity_setting.rules":        `[{"name":"tier-session","model_regex":[".*"],"key_sources":[{"type":"request_header","key":"X-Session"}],"session_mode":"inherit"}]`,
+	})
+	require.NoError(t, err)
+	*affinity = snapshot.Affinity
+	for _, mode := range []string{"prefer", "strict"} {
+		t.Run("affinity "+mode, func(t *testing.T) {
+			affinity.SessionMode = mode
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+			c.Request.Header.Set("X-Session", t.Name())
+			_, found := GetPreferredChannelByAffinity(c, modelName, "default")
+			require.False(t, found)
+			RecordChannelAffinity(c, 2202)
+			t.Cleanup(func() { ClearCurrentChannelAffinityCache(c) })
+			SetRequestServiceTierFilter(c, modelName, "ultrafast")
+			channel, _, selectErr := SelectChannelForRequest(c, modelName, &RetryParam{Ctx: c, ModelName: modelName, TokenGroup: "default"})
+			if mode == "strict" {
+				require.NotNil(t, selectErr)
+				assert.Equal(t, "strict_session_binding_unavailable", selectErr.Message)
+				assert.Nil(t, channel)
+				return
+			}
+			require.Nil(t, selectErr)
+			require.NotNil(t, channel)
+			assert.Equal(t, 2203, channel.Id)
+		})
+	}
 }

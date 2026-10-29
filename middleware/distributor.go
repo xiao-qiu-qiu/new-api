@@ -50,6 +50,30 @@ func Distribute() func(c *gin.Context) {
 			abortWithOpenAiMessage(c, invalidRequestStatus(err), i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
 			return
 		}
+		if strings.HasSuffix(c.Request.URL.Path, "/chat/completions") || strings.HasSuffix(c.Request.URL.Path, "/responses") || strings.HasSuffix(c.Request.URL.Path, "/responses/compact") {
+			storage, bodyErr := common.GetBodyStorage(c)
+			if bodyErr != nil {
+				abortWithOpenAiMessage(c, invalidRequestStatus(bodyErr), i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": bodyErr.Error()}))
+				return
+			}
+			body, bodyErr := storage.Bytes()
+			if bodyErr != nil {
+				abortWithOpenAiMessage(c, invalidRequestStatus(bodyErr), i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": bodyErr.Error()}))
+				return
+			}
+			var request struct {
+				ServiceTier common.RawMessage `json:"service_tier"`
+			}
+			if common.Unmarshal(body, &request) == nil {
+				var tier string
+				if common.Unmarshal(request.ServiceTier, &tier) != nil {
+					// Preserve unknown or non-string values for the upstream's
+					// existing validation rather than inventing a routing tier.
+					tier = string(request.ServiceTier)
+				}
+				service.SetRequestServiceTierFilter(c, modelRequest.Model, tier)
+			}
+		}
 		_, pinned, _ := constraints.ResolvedPin()
 		if !pinned {
 			// Select a channel for the user
@@ -588,7 +612,13 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	common.SetContextKey(c, constant.ContextKeyChannelType, channel.Type)
 	common.SetContextKey(c, constant.ContextKeyChannelCreateTime, channel.CreatedTime)
 	common.SetContextKey(c, constant.ContextKeyChannelSetting, channel.GetSetting())
-	common.SetContextKey(c, constant.ContextKeyChannelOtherSetting, channel.GetOtherSettings())
+	otherSettings := channel.GetOtherSettings()
+	if len(otherSettings.SupportedServiceTiers) > 0 && model.IsGPTTextModel(channel.ResolveServiceTierModel(modelName)) {
+		// An explicit capability declaration also opts this GPT request into
+		// tier passthrough. Empty legacy declarations retain AllowServiceTier.
+		otherSettings.AllowServiceTier = true
+	}
+	common.SetContextKey(c, constant.ContextKeyChannelOtherSetting, otherSettings)
 	switch channel.Type {
 	case constant.ChannelTypeTaskPlugin:
 		c.Set("task_plugin_key", channel.GetSetting().TaskPluginKey)

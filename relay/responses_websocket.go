@@ -283,6 +283,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 	common.SetContextKey(c, appconstant.ContextKeyOriginalModel, modelName)
 	common.SetContextKey(c, appconstant.ContextKeyRequestStartTime, time.Now())
 	service.GetChannelConstraints(c).AddFilter(appdto.ChannelFilter{Kind: appdto.FilterRequestPath, RequestPath: c.Request.URL.Path})
+	service.SetRequestServiceTierFilter(c, modelName, create.Request.ServiceTier)
 
 	groupProbes = service.PassiveGroupProbes("", modelName)
 	if len(groupProbes) > 0 {
@@ -588,6 +589,9 @@ func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model stri
 	if err != nil || channel == nil || channel.Status != common.ChannelStatusEnabled || !channel.GetSetting().ResponsesWebSocketEnabled {
 		return types.NewErrorWithStatusCode(errors.New("Responses WebSocket is disabled for this channel"), types.ErrorCode(appdto.FilterResponsesWebSocket), http.StatusForbidden, types.ErrOptionWithSkipRetry())
 	}
+	if ok, kind := appmodel.ChannelSatisfiesFilters(channel, model, service.GetChannelConstraints(c).Filters); !ok {
+		return types.NewErrorWithStatusCode(errors.New("the connection channel does not support this request; reconnect required"), types.ErrorCode(kind), http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+	}
 	keyEnabled := channel.Key == s.lockedKey
 	if channel.ChannelInfo.IsMultiKey {
 		keys := channel.GetKeys()
@@ -637,7 +641,11 @@ func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model stri
 		c.Set(string(key), value)
 	}
 	common.SetContextKey(c, appconstant.ContextKeyChannelSetting, channel.GetSetting())
-	common.SetContextKey(c, appconstant.ContextKeyChannelOtherSetting, channel.GetOtherSettings())
+	otherSettings := channel.GetOtherSettings()
+	if len(otherSettings.SupportedServiceTiers) > 0 && appmodel.IsGPTTextModel(channel.ResolveServiceTierModel(model)) {
+		otherSettings.AllowServiceTier = true
+	}
+	common.SetContextKey(c, appconstant.ContextKeyChannelOtherSetting, otherSettings)
 	common.SetContextKey(c, appconstant.ContextKeyChannelParamOverride, channel.GetParamOverride())
 	common.SetContextKey(c, appconstant.ContextKeyChannelModelMapping, channel.GetModelMapping())
 	common.SetContextKey(c, appconstant.ContextKeyChannelStatusCodeMapping, channel.GetStatusCodeMapping())
@@ -659,6 +667,10 @@ func buildResponsesWSCreatePayload(c *gin.Context, info *relaycommon.RelayInfo, 
 	}
 	jsonData, tier, err := info.ApplyOutboundServiceTierPolicy(c, jsonData)
 	if err != nil {
+		var apiErr *types.NewAPIError
+		if errors.As(err, &apiErr) {
+			return nil, apiErr
+		}
 		return nil, types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
 	}
 	if apiErr := service.PrepareServiceTierBilling(c, info, tier); apiErr != nil {

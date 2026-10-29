@@ -31,7 +31,11 @@ import {
   MODEL_FETCHABLE_TYPES,
   OPENAI_FIELD_PASSTHROUGH_TYPES,
 } from '../constants'
-import type { Channel } from '../types'
+import {
+  channelServiceTierSchema,
+  type Channel,
+  type ChannelServiceTier,
+} from '../types'
 import {
   CHANNEL_TYPE_ADVANCED_CUSTOM,
   advancedCustomConfigUsesRelativeUpstreamPath,
@@ -282,6 +286,7 @@ export const channelFormSchema = z
     azure_responses_version: z.string().optional(), // Azure specific
     // Field passthrough controls (stored in settings JSON)
     allow_service_tier: z.boolean().optional(), // OpenAI/Anthropic
+    supported_service_tiers: z.array(channelServiceTierSchema).optional(),
     disable_store: z.boolean().optional(), // OpenAI only
     allow_safety_identifier: z.boolean().optional(), // OpenAI only
     allow_include_obfuscation: z.boolean().optional(), // OpenAI: include usage obfuscation
@@ -475,6 +480,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   azure_responses_version: '',
   // Field passthrough controls
   allow_service_tier: false,
+  supported_service_tiers: [],
   disable_store: false,
   allow_safety_identifier: false,
   allow_include_obfuscation: false,
@@ -550,6 +556,7 @@ export function transformChannelToFormDefaults(
   let isEnterpriseAccount = false
   let awsKeyType: 'ak_sk' | 'api_key' = 'ak_sk'
   let allowServiceTier = false
+  let supportedServiceTiers: ChannelServiceTier[] = []
   let disableStore = false
   let allowSafetyIdentifier = false
   let allowIncludeObfuscation = false
@@ -572,6 +579,10 @@ export function transformChannelToFormDefaults(
       isEnterpriseAccount = parsed.openrouter_enterprise === true
       awsKeyType = parsed.aws_key_type || 'ak_sk'
       allowServiceTier = parsed.allow_service_tier === true
+      const tiers = z
+        .array(channelServiceTierSchema)
+        .safeParse(parsed.supported_service_tiers ?? [])
+      if (tiers.success) supportedServiceTiers = tiers.data
       disableStore = parsed.disable_store === true
       allowSafetyIdentifier = parsed.allow_safety_identifier === true
       allowIncludeObfuscation = parsed.allow_include_obfuscation === true
@@ -633,6 +644,7 @@ export function transformChannelToFormDefaults(
     azure_responses_version: azureResponsesVersion,
     aws_key_type: awsKeyType,
     allow_service_tier: allowServiceTier,
+    supported_service_tiers: supportedServiceTiers,
     disable_store: disableStore,
     allow_include_obfuscation: allowIncludeObfuscation,
     allow_inference_geo: allowInferenceGeo,
@@ -708,6 +720,12 @@ function buildSettingsJSON(formData: ChannelFormValues): string {
       // eslint-disable-next-line no-console
       console.error('Failed to parse existing settings:', error)
     }
+  }
+
+  if (formData.supported_service_tiers?.length) {
+    settingsObj.supported_service_tiers = formData.supported_service_tiers
+  } else {
+    delete settingsObj.supported_service_tiers
   }
 
   // Add vertex_key_type for Vertex AI channels (type 41)

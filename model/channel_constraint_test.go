@@ -216,3 +216,49 @@ func TestChannelSatisfiesFilters(t *testing.T) {
 	assert.False(t, ok)
 	assert.Equal(t, dto.FilterRequestPath, kind)
 }
+
+func TestChannelServiceTierCapabilities(t *testing.T) {
+	type testCase struct {
+		name, model, tier, policy string
+		mapping, override         string
+		supported                 []string
+		allowed                   bool
+	}
+	tests := []testCase{
+		{name: "legacy is unrestricted", model: "gpt-6", tier: "ultrafast", allowed: true},
+		{name: "default is supported", model: "gpt-6", tier: "default", supported: []string{"default"}, allowed: true},
+		{name: "standard alias", model: "gpt-6", tier: "standard", supported: []string{"default"}, allowed: true},
+		{name: "auto alias", model: "gpt-6", tier: "auto", supported: []string{"default"}, allowed: true},
+		{name: "scale alias", model: "gpt-6", tier: "scale", supported: []string{"default"}, allowed: true},
+		{name: "fast alias", model: "gpt-6", tier: " FAST ", supported: []string{"priority"}, allowed: true},
+		{name: "UF cannot use fast channel", model: "gpt-6", tier: "ultrafast", supported: []string{"default", "priority"}},
+		{name: "flex requires capability", model: "gpt-6", tier: "flex", supported: []string{"default", "priority"}},
+		{name: "missing filter tier is unconstrained", model: "gpt-6", supported: []string{"priority"}, allowed: true},
+		{name: "unknown request tier is unconstrained", model: "gpt-6", tier: "future-tier", supported: []string{"priority"}, allowed: true},
+		{name: "key UF overrides default", model: "gpt-6", tier: "default", policy: "ultrafast", supported: []string{"default", "priority"}},
+		{name: "key UF overrides absent tier", model: "gpt-6", policy: "ultrafast", supported: []string{"ultrafast"}, allowed: true},
+		{name: "key fast overrides UF", model: "gpt-6", tier: "ultrafast", policy: "priority", supported: []string{"priority"}, allowed: true},
+		{name: "non GPT stays unchanged", model: "deepseek-v4", tier: "ultrafast", policy: "ultrafast", supported: []string{"default"}, allowed: true},
+		{name: "namespaced GPT", model: "provider/team/GPT-6", tier: "ultrafast", supported: []string{"default"}},
+		{name: "GPT chain mapping applies lock", model: "alias", mapping: `{"alias":"middle","middle":"org/gpt-6"}`, tier: "default", policy: "ultrafast", supported: []string{"default"}},
+		{name: "mapping base modifiers", model: "alias@thinking:on", mapping: `{"alias":"gpt-6"}`, tier: "ultrafast", supported: []string{"priority"}},
+		{name: "non GPT mapping ignores lock", model: "gpt-6", mapping: `{"gpt-6":"deepseek-v4"}`, tier: "default", policy: "ultrafast", supported: []string{"default"}, allowed: true},
+		{name: "GPT override applies lock", model: "deepseek-v4", override: `{"model":"gpt-6"}`, tier: "default", policy: "ultrafast", supported: []string{"default"}},
+		{name: "non GPT override ignores lock", model: "gpt-6", override: `{"model":"deepseek-v4"}`, tier: "default", policy: "ultrafast", supported: []string{"default"}, allowed: true},
+	}
+	for _, excluded := range []string{"image", "audio", "tts", "embed", "transcrib", "realtime"} {
+		tests = append(tests, testCase{name: excluded + " is not text", model: "provider/gpt-6-" + excluded, tier: "ultrafast", policy: "ultrafast", supported: []string{"default"}, allowed: true})
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ch := &Channel{Type: constant.ChannelTypeOpenAI, ModelMapping: &tt.mapping, ParamOverride: &tt.override}
+			ch.SetOtherSettings(kitdto.ChannelOtherSettings{SupportedServiceTiers: tt.supported})
+			filters := []dto.ChannelFilter{{Kind: dto.FilterServiceTier, ModelName: tt.model, ServiceTier: tt.tier, OpenAITierPolicy: tt.policy}}
+			allowed, kind := ChannelSatisfiesFilters(ch, "routing-alias", filters)
+			assert.Equal(t, tt.allowed, allowed)
+			if !tt.allowed {
+				assert.Equal(t, dto.FilterServiceTier, kind)
+			}
+		})
+	}
+}

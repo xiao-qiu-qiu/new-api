@@ -79,6 +79,7 @@ import { useStatus } from '@/hooks/use-status'
 import { getUserModels, getUserGroups } from '@/lib/api'
 import { getCurrencyDisplay, getCurrencyLabel } from '@/lib/currency'
 import { handleServerError } from '@/lib/handle-server-error'
+import { supportsOpenAITierPolicy } from '@/lib/openai-service-tier'
 import {
   requireServerSuccess,
   translateServerText,
@@ -99,7 +100,6 @@ import {
   transformFormDataToPayload,
   transformApiKeyToFormDefaults,
 } from '../lib'
-import { supportsOpenAITierPolicy } from '../lib/openai-tier-policy'
 import type { ApiKey } from '../types'
 import {
   ApiKeyGroupCombobox,

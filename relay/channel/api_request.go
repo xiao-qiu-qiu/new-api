@@ -542,8 +542,9 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		policy = common2.GetContextKeyString(c, appconstant.ContextKeyTokenOpenAITierPolicy)
 	}
 	lockedTextRequest := textRequest && (policy == "priority" || policy == "ultrafast")
+	tierConstrainedTextRequest := textRequest && info.ChannelMeta != nil && len(info.ChannelOtherSettings.SupportedServiceTiers) > 0
 	openAIFormat := finalFormat == types.RelayFormatOpenAI || finalFormat == types.RelayFormatOpenAIResponses || finalFormat == types.RelayFormatOpenAIResponsesCompaction
-	if openAIFormat && (req.GetBody != nil || lockedTextRequest || info.DeferServiceTierReservation) {
+	if openAIFormat && (req.GetBody != nil || lockedTextRequest || tierConstrainedTextRequest || info.DeferServiceTierReservation) {
 		body := req.Body
 		if req.GetBody != nil {
 			var err error
@@ -560,7 +561,18 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		if readErr != nil {
 			return nil, readErr
 		}
+		if req.GetBody == nil {
+			// Preserve the consumed transport body even when an unknown tier
+			// is left to the existing upstream validation path.
+			req.Body = io.NopCloser(bytes.NewReader(data))
+			req.ContentLength = int64(len(data))
+			req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(data)), nil }
+		}
 		updated, tier, decodeErr := info.ApplyOutboundServiceTierPolicy(c, data)
+		var tierErr *types.NewAPIError
+		if errors.As(decodeErr, &tierErr) {
+			return nil, tierErr
+		}
 		if decodeErr != nil && (info.DeferServiceTierReservation || lockedTextRequest) {
 			return nil, types.NewErrorWithStatusCode(decodeErr, types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 		}
