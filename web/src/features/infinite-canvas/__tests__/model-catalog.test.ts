@@ -24,7 +24,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { getUserModels } from '@/features/playground/api'
 import type { GroupOption } from '@/features/playground/types'
 import type { PricingData, PricingModel } from '@/features/pricing/types'
-import { api } from '@/lib/api'
+import { api, type ApiRequestConfig } from '@/lib/api'
 
 import {
   buildCanvasChannels,
@@ -569,6 +569,19 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
+function getRequestedModelGroup(config?: ApiRequestConfig): string | undefined {
+  const params = config?.params
+  if (
+    typeof params !== 'object' ||
+    params === null ||
+    !('group' in params) ||
+    typeof params.group !== 'string'
+  ) {
+    return undefined
+  }
+  return params.group
+}
+
 const clients: QueryClient[] = []
 
 function renderCatalog() {
@@ -637,7 +650,7 @@ it('starts groups and pricing together, then fetches all groups without waiting 
   const get = vi.spyOn(api, 'get').mockImplementation((url, config) => {
     if (url === '/api/user/self/groups') return groupsResponse.promise
     if (url === '/api/pricing') return pricingResponse.promise
-    return config?.params.group === 'default'
+    return getRequestedModelGroup(config) === 'default'
       ? defaultResponse.promise
       : vipResponse.promise
   })
@@ -658,7 +671,7 @@ it('starts groups and pricing together, then fetches all groups without waiting 
   expect(
     get.mock.calls
       .filter(([url]) => url === '/api/user/models')
-      .map(([, config]) => config?.params.group)
+      .map(([, config]) => getRequestedModelGroup(config))
   ).toEqual(['default', 'vip'])
   expect(result.current.isLoading).toBe(true)
   await act(async () => {
@@ -742,7 +755,7 @@ it('exposes a pricing business failure and refetches models for newly added grou
   expect(
     get.mock.calls.some(
       ([url, config]) =>
-        url === '/api/user/models' && config?.params.group === 'vip'
+        url === '/api/user/models' && getRequestedModelGroup(config) === 'vip'
     )
   ).toBe(true)
 })

@@ -75,7 +75,12 @@ beforeEach(() => {
     if (String(url).includes('/fetch_models/')) {
       return { data: { success: true, data: ['upstream-discovered'] } }
     }
-    const next = config?.params?.p === 2
+    const params = config?.params
+    const next =
+      typeof params === 'object' &&
+      params !== null &&
+      'p' in params &&
+      params.p === 2
     return {
       data: {
         success: true,
