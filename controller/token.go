@@ -36,7 +36,8 @@ type tokenRequest struct {
 	model.Token
 	AutoGroups tokenAutoGroupsInput `json:"auto_groups"`
 	// 指针区分“未传”和显式 false：新建时未传即开启，更新时未传则保留原值。
-	AllowUserQuotaQuery *bool `json:"allow_user_quota_query"`
+	AllowUserQuotaQuery *bool   `json:"allow_user_quota_query"`
+	OpenAITierPolicy    *string `json:"openai_tier_policy"`
 }
 
 type tokenResponse struct {
@@ -60,6 +61,7 @@ func buildMaskedTokenResponse(token *model.Token) *tokenResponse {
 	}
 	maskedToken := *token
 	maskedToken.Key = token.GetMaskedKey()
+	maskedToken.OpenAITierPolicy = token.GetOpenAITierPolicy()
 	autoGroups, err := token.GetAutoGroups()
 	if err != nil {
 		common.SysError(common.LogText("failed to parse auto groups for token %d: %v", token.Id, err))
@@ -304,6 +306,14 @@ func AddToken(c *gin.Context) {
 		return
 	}
 	token := request.Token
+	token.OpenAITierPolicy = model.OpenAITierPolicyFollow
+	if request.OpenAITierPolicy != nil {
+		if !model.IsValidOpenAITierPolicy(*request.OpenAITierPolicy) {
+			common.ApiErrorT(c, "Invalid OpenAI tier policy")
+			return
+		}
+		token.OpenAITierPolicy = *request.OpenAITierPolicy
+	}
 	if len(token.Name) > 50 {
 		common.ApiErrorT(c, "Token name is too long")
 		return
@@ -362,6 +372,7 @@ func AddToken(c *gin.Context) {
 		Group:              token.Group,
 		CrossGroupRetry:    token.CrossGroupRetry,
 		AutoGroups:         token.AutoGroups,
+		OpenAITierPolicy:   token.OpenAITierPolicy,
 	}
 	cleanToken.AllowUserQuotaQuery = request.AllowUserQuotaQuery == nil || *request.AllowUserQuotaQuery
 	err = cleanToken.Insert()
@@ -413,6 +424,10 @@ func UpdateToken(c *gin.Context) {
 	if token.Id > 0 {
 		params["id"] = token.Id
 	}
+	if request.OpenAITierPolicy != nil && !model.IsValidOpenAITierPolicy(*request.OpenAITierPolicy) {
+		common.ApiErrorT(c, "Invalid OpenAI tier policy")
+		return
+	}
 	if len(token.Name) > 50 {
 		common.ApiErrorT(c, "Token name is too long")
 		return
@@ -455,6 +470,9 @@ func UpdateToken(c *gin.Context) {
 		cleanToken.UnlimitedQuota = token.UnlimitedQuota
 		cleanToken.ModelLimitsEnabled = token.ModelLimitsEnabled
 		cleanToken.ModelLimits = token.ModelLimits
+		if request.OpenAITierPolicy != nil {
+			cleanToken.OpenAITierPolicy = *request.OpenAITierPolicy
+		}
 		cleanToken.AllowIps = token.AllowIps
 		if request.AllowUserQuotaQuery != nil {
 			cleanToken.AllowUserQuotaQuery = *request.AllowUserQuotaQuery
@@ -493,6 +511,7 @@ func UpdateToken(c *gin.Context) {
 			{"allow_ips", (previous.AllowIps == nil) != (cleanToken.AllowIps == nil) ||
 				(previous.AllowIps != nil && cleanToken.AllowIps != nil && *previous.AllowIps != *cleanToken.AllowIps)},
 			{"allow_user_quota_query", previous.AllowUserQuotaQuery != cleanToken.AllowUserQuotaQuery},
+			{"openai_tier_policy", previous.GetOpenAITierPolicy() != cleanToken.GetOpenAITierPolicy()},
 			{"group", previous.Group != cleanToken.Group},
 			{"cross_group_retry", previous.CrossGroupRetry != cleanToken.CrossGroupRetry},
 			{"auto_groups", previous.AutoGroups != cleanToken.AutoGroups},

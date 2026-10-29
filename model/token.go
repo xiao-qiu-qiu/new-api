@@ -29,9 +29,32 @@ type Token struct {
 	Group              string         `json:"group" gorm:"default:''"`
 	CrossGroupRetry    bool           `json:"cross_group_retry"` // 跨分组重试，仅auto分组有效
 	AutoGroups         string         `json:"-" gorm:"type:text"`
+	OpenAITierPolicy   string         `json:"openai_tier_policy" gorm:"column:openai_tier_policy;type:varchar(16);default:follow"`
 	DeletedAt          gorm.DeletedAt `gorm:"index"`
 	// 允许用此令牌查询所属用户的额度；新建令牌默认开启，已有令牌升级后保持关闭
 	AllowUserQuotaQuery bool `json:"allow_user_quota_query"`
+}
+
+const (
+	OpenAITierPolicyFollow    = "follow"
+	OpenAITierPolicyPriority  = "priority"
+	OpenAITierPolicyUltrafast = "ultrafast"
+)
+
+func IsValidOpenAITierPolicy(policy string) bool {
+	return policy == OpenAITierPolicyFollow || policy == OpenAITierPolicyPriority || policy == OpenAITierPolicyUltrafast
+}
+
+func (token *Token) GetOpenAITierPolicy() string {
+	if token.OpenAITierPolicy == "" {
+		return OpenAITierPolicyFollow
+	}
+	return token.OpenAITierPolicy
+}
+
+func (token *Token) AfterFind(_ *gorm.DB) error {
+	token.OpenAITierPolicy = token.GetOpenAITierPolicy()
+	return nil
 }
 
 func (token *Token) GetAutoGroups() ([]string, error) {
@@ -310,13 +333,14 @@ func (token *Token) Insert() error {
 
 // Update Make sure your token's fields is completed, because this will update non-zero values
 func (token *Token) Update() (err error) {
+	token.OpenAITierPolicy = token.GetOpenAITierPolicy()
 	// 写库前失效缓存并设置 fence，防止并发读者把过期快照重新写回缓存。
 	if cacheErr := invalidateTokenCacheForMutation(token.Key); cacheErr != nil {
 		common.SysLog(common.LogText("failed to invalidate token cache before update: %s", cacheErr.Error()))
 	}
 	return DB.Model(token).Select("name", "status", "expired_time", "remain_quota", "unlimited_quota",
 		"model_limits_enabled", "model_limits", "allow_ips", "group", "cross_group_retry", "auto_groups",
-		"allow_user_quota_query").Updates(token).Error
+		"allow_user_quota_query", "openai_tier_policy").Updates(token).Error
 }
 
 func (token *Token) SelectUpdate() (err error) {

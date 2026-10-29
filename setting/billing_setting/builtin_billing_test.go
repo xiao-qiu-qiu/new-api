@@ -3,6 +3,7 @@ package billing_setting_test
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
@@ -19,6 +21,7 @@ import (
 	"github.com/QuantumNous/new-api/relay/channel/openai"
 	"github.com/QuantumNous/new-api/relay/channel/xunfei"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -192,17 +195,24 @@ func TestServiceTierForwardReservationAndSettlement(t *testing.T) {
 		name, requested, observed, mode, sent, effective string
 		allow                                            bool
 		reserve, charge, limit                           int
+		policy                                           string
 	}{
-		{"filtered priority", "priority", "default", "responses", "", "default", false, 5000, 7500, 0},
-		{"fast alias", "fast", "priority", "chat", "priority", "priority", true, 10000, 15000, 0},
-		{"chat SSE final downgrade without object", "priority", "default", "chat-stream", "priority", "default", true, 10000, 7500, 0},
-		{"upstream downgrade", "priority", "default", "responses", "priority", "default", true, 10000, 7500, 0},
-		{"ultrafast SSE", "ultrafast", "ultrafast", "stream", "ultrafast", "ultrafast", true, 30000, 45000, 0},
-		{"SSE downgrade", "priority", "default", "stream", "priority", "default", true, 10000, 7500, 0},
-		{"auto is not a downgrade", "priority", "auto", "responses", "priority", "priority", true, 10000, 15000, 0},
-		{"unsolicited upgrade", "default", "ultrafast", "responses", "default", "default", true, 5000, 7500, 0},
-		{"flex reserves discounted price", "flex", "flex", "responses", "flex", "flex", true, 2500, 3750, 3000},
-		{"reject expensive tier before upstream", "ultrafast", "ultrafast", "responses", "", "", true, 0, 0, 10000},
+		{"filtered priority", "priority", "default", "responses", "", "default", false, 5000, 7500, 0, ""},
+		{"fast alias", "fast", "priority", "chat", "priority", "priority", true, 10000, 15000, 0, ""},
+		{"chat SSE final downgrade without object", "priority", "default", "chat-stream", "priority", "default", true, 10000, 7500, 0, ""},
+		{"upstream downgrade", "priority", "default", "responses", "priority", "default", true, 10000, 7500, 0, ""},
+		{"ultrafast SSE", "ultrafast", "ultrafast", "stream", "ultrafast", "ultrafast", true, 30000, 45000, 0, ""},
+		{"SSE downgrade", "priority", "default", "stream", "priority", "default", true, 10000, 7500, 0, ""},
+		{"auto is not a downgrade", "priority", "auto", "responses", "priority", "priority", true, 10000, 15000, 0, ""},
+		{"unsolicited upgrade", "default", "ultrafast", "responses", "default", "default", true, 5000, 7500, 0, ""},
+		{"flex reserves discounted price", "flex", "flex", "responses", "flex", "flex", true, 2500, 3750, 3000, "follow"},
+		{"reject expensive tier before upstream", "ultrafast", "ultrafast", "responses", "", "", true, 0, 0, 10000, ""},
+		{"key priority survives channel filtering", "flex", "priority", "responses", "priority", "priority", false, 10000, 15000, 0, "priority"},
+		{"key ultrafast wins over Fast alias", "fast", "ultrafast", "chat", "ultrafast", "ultrafast", true, 30000, 45000, 0, "ultrafast"},
+		{"key priority caps client ultrafast", "ultrafast", "priority", "responses", "priority", "priority", true, 10000, 15000, 0, "priority"},
+		{"locked tier still accepts terminal downgrade", "flex", "default", "stream", "ultrafast", "default", false, 30000, 7500, 0, "ultrafast"},
+		{"key ultrafast requires funds before dispatch", "flex", "ultrafast", "responses", "", "", false, 0, 0, 10000, "ultrafast"},
+		{"key lock beats channel override on retries", "flex", "ultrafast", "override", "ultrafast", "ultrafast", false, 30000, 45000, 0, "ultrafast"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			forwarded := make(chan string, 1)
@@ -234,13 +244,15 @@ func TestServiceTierForwardReservationAndSettlement(t *testing.T) {
 			}))
 			defer upstream.Close()
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			common.SetContextKey(c, constant.ContextKeyTokenOpenAITierPolicy, tc.policy)
 			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 			request := []byte(fmt.Sprintf(`{"model":"gpt-6-astra","service_tier":%q}`, tc.requested))
 			request, err := relaycommon.RemoveDisabledFields(request, dto.ChannelOtherSettings{AllowServiceTier: tc.allow}, false)
 			require.NoError(t, err)
 			reservation := &serviceTierReservation{limit: tc.limit}
 			info := &relaycommon.RelayInfo{
-				RelayFormat: types.RelayFormatOpenAIResponses, RequestedServiceTier: tc.requested, ReasoningEffort: "high",
+				RelayFormat: types.RelayFormatOpenAIResponses, RelayMode: relayconstant.RelayModeResponses,
+				RequestedServiceTier: tc.requested, ReasoningEffort: "high",
 				ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-6-astra"}, OriginModelName: "gpt-6-astra",
 				IsStream: strings.Contains(tc.mode, "stream"), DisablePing: true, StartTime: time.Now(),
 				Billing: reservation, DeferServiceTierReservation: true, ForcePreConsume: true,
@@ -251,9 +263,18 @@ func TestServiceTierForwardReservationAndSettlement(t *testing.T) {
 			}
 			if strings.HasPrefix(tc.mode, "chat") {
 				info.RelayFormat = types.RelayFormatOpenAI
+				info.RelayMode = relayconstant.RelayModeChatCompletions
+			}
+			if tc.mode == "override" {
+				info.ParamOverride = map[string]any{"service_tier": "fast"}
+				request, err = relaycommon.ApplyParamOverrideWithRelayInfo(request, info)
+				require.NoError(t, err)
 			}
 			req, err := http.NewRequest(http.MethodPost, upstream.URL, strings.NewReader(string(request)))
 			require.NoError(t, err)
+			if tc.policy == "priority" && !tc.allow {
+				req.GetBody = nil // A passthrough reader must still reserve the locked tier.
+			}
 			response, err := channel.DoRequest(c, req, info)
 			if tc.charge == 0 {
 				require.Error(t, err)
@@ -263,6 +284,21 @@ func TestServiceTierForwardReservationAndSettlement(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, tc.sent, <-forwarded)
 			assert.Equal(t, tc.reserve, reservation.quota)
+			if tc.mode == "override" {
+				require.NoError(t, response.Body.Close())
+				info.RetryIndex++
+				retry, err := http.NewRequest(http.MethodPost, upstream.URL, strings.NewReader(string(request)))
+				require.NoError(t, err)
+				response, err = channel.DoRequest(c, retry, info)
+				require.NoError(t, err)
+				assert.Equal(t, tc.sent, <-forwarded)
+				assert.Equal(t, tc.reserve, reservation.quota)
+			}
+			outbound := relaycommon.NormalizeServiceTier(tc.sent)
+			if outbound == "" {
+				outbound = "default"
+			}
+			assert.Equal(t, outbound, info.OutboundServiceTier)
 			var usage *dto.Usage
 			var apiErr *types.NewAPIError
 			switch tc.mode {
@@ -287,6 +323,10 @@ func TestServiceTierForwardReservationAndSettlement(t *testing.T) {
 			require.NoError(t, common.UnmarshalJsonStr(other.JSONString(), &logged))
 			assert.Equal(t, tc.effective, logged["service_tier"])
 			assert.Equal(t, tc.requested, logged["requested_service_tier"])
+			if tc.observed != "auto" {
+				assert.Equal(t, tc.observed, logged["observed_service_tier"])
+			}
+			assert.JSONEq(t, fmt.Sprintf(`{"service_tier":%q}`, tc.requested), string(info.BillingRequestInput.Body))
 			assert.Equal(t, "high", logged["reasoning_effort"])
 		})
 	}
@@ -309,6 +349,87 @@ func TestServiceTierChatResponsesConversion(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "priority", chatResponse.ServiceTier)
 	assert.Equal(t, "priority", (&dto.ChatCompletionsStreamResponse{ServiceTier: "priority"}).Copy().ServiceTier)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	common.SetContextKey(c, constant.ContextKeyTokenOpenAITierPolicy, "priority")
+	for _, converted := range []dto.Request{request, chat} {
+		body, err := common.Marshal(converted)
+		require.NoError(t, err)
+		info := &relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeChatCompletions}
+		body, tier, err := info.ApplyOutboundServiceTierPolicy(c, body)
+		require.NoError(t, err)
+		assert.Equal(t, "priority", tier)
+		var outbound map[string]any
+		require.NoError(t, common.Unmarshal(body, &outbound))
+		assert.Equal(t, "priority", outbound["service_tier"])
+	}
+}
+
+func TestTokenServiceTierFinalRequestScope(t *testing.T) {
+	for _, tc := range []struct {
+		name, upstreamModel, body, want string
+		mode                            int
+	}{
+		{"namespace and case", "gpt-6-astra", `{"model":"vendor/OpenAI/GPT-6-ASTRA","service_tier":"flex"}`, "ultrafast", relayconstant.RelayModeResponses},
+		{"mapped opaque alias", "openai/gpt-6-astra", `{"input":"hi"}`, "ultrafast", relayconstant.RelayModeResponses},
+		{"final model override to GPT", "claude-opus", `{"model":"gpt-6-astra"}`, "ultrafast", relayconstant.RelayModeChatCompletions},
+		{"final model override away from GPT", "gpt-6-astra", `{"model":"deepseek-v4","service_tier":"flex"}`, "flex", relayconstant.RelayModeResponses},
+		{"Claude", "gpt-6-astra", `{"model":"anthropic/claude-opus"}`, "", relayconstant.RelayModeChatCompletions},
+		{"Gemini", "gpt-6-astra", `{"model":"google/gemini-3"}`, "", relayconstant.RelayModeChatCompletions},
+		{"GPT image", "gpt-image-2", `{"model":"gpt-image-2"}`, "", relayconstant.RelayModeResponses},
+		{"GPT audio", "gpt-4o-audio-preview", `{"model":"gpt-4o-audio-preview"}`, "", relayconstant.RelayModeChatCompletions},
+		{"GPT TTS", "gpt-4o-mini-tts", `{"model":"gpt-4o-mini-tts"}`, "", relayconstant.RelayModeChatCompletions},
+		{"GPT transcribe", "gpt-4o-transcribe", `{"model":"gpt-4o-transcribe"}`, "", relayconstant.RelayModeChatCompletions},
+		{"GPT embedding model", "gpt-6-embedding", `{"model":"gpt-6-embedding"}`, "", relayconstant.RelayModeChatCompletions},
+		{"embedding endpoint", "gpt-6-astra", `{"model":"gpt-6-astra"}`, "", relayconstant.RelayModeEmbeddings},
+		{"realtime endpoint", "gpt-6-astra", `{"model":"gpt-6-astra"}`, "", relayconstant.RelayModeRealtime},
+		{"compact", "gpt-6-astra", `{"model":"gpt-6-astra"}`, "ultrafast", relayconstant.RelayModeResponsesCompact},
+		{"duplicate tier keys", "gpt-6-astra", `{"model":"gpt-6-astra","service_tier":"priority","service_tier":"flex"}`, "ultrafast", relayconstant.RelayModeResponses},
+		{"non-string tier cannot bypass lock", "gpt-6-astra", `{"model":"gpt-6-astra","service_tier":false}`, "ultrafast", relayconstant.RelayModeResponses},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			forwarded := make(chan []byte, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				sent, err := io.ReadAll(r.Body)
+				assert.NoError(t, err)
+				forwarded <- sent
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer upstream.Close()
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			common.SetContextKey(c, constant.ContextKeyTokenOpenAITierPolicy, "ultrafast")
+			info := &relaycommon.RelayInfo{RelayMode: tc.mode, RelayFormat: types.RelayFormatOpenAIResponses,
+				ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: tc.upstreamModel}}
+			// A plain reader intentionally supplies no GetBody: the transport
+			// must still enforce the policy and install a replayable final body.
+			req, err := http.NewRequest(http.MethodPost, upstream.URL, io.NopCloser(strings.NewReader(tc.body)))
+			require.NoError(t, err)
+			if tc.want == "" || tc.want == "flex" {
+				// Non-text modes retain the normal replayable transport contract.
+				req, err = http.NewRequest(http.MethodPost, upstream.URL, strings.NewReader(tc.body))
+				require.NoError(t, err)
+			}
+			response, err := channel.DoRequest(c, req, info)
+			require.NoError(t, err)
+			require.NoError(t, response.Body.Close())
+			sent := <-forwarded
+			var body map[string]any
+			require.NoError(t, common.Unmarshal(sent, &body))
+			if tc.want == "" {
+				assert.NotContains(t, body, "service_tier")
+				assert.JSONEq(t, tc.body, string(sent))
+			} else {
+				assert.Equal(t, tc.want, body["service_tier"])
+				replay, err := req.GetBody()
+				require.NoError(t, err)
+				replayed, err := io.ReadAll(replay)
+				require.NoError(t, err)
+				require.NoError(t, replay.Close())
+				assert.Equal(t, sent, replayed)
+				assert.Equal(t, tc.want, info.OutboundServiceTier)
+			}
+		})
+	}
 }
 
 func TestServiceTierPreconsumeDefersUntilFinalRequest(t *testing.T) {

@@ -26,7 +26,6 @@ import (
 	"github.com/bytedance/gopkg/util/gopool"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
-	"github.com/tidwall/sjson"
 )
 
 // ApplyUpstreamBodyMetadata restores metadata that net/http cannot infer from
@@ -537,42 +536,44 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	// Inspect the replayable final JSON body after conversion, field filtering
 	// and parameter overrides. Never use the incoming tier for this reservation.
 	finalFormat := info.GetFinalRequestRelayFormat()
-	if req.GetBody != nil && (finalFormat == types.RelayFormatOpenAI || finalFormat == types.RelayFormatOpenAIResponses || finalFormat == types.RelayFormatOpenAIResponsesCompaction) {
-		body, readErr := req.GetBody()
+	textRequest := info.RelayMode == constant.RelayModeChatCompletions || info.RelayMode == constant.RelayModeResponses || info.RelayMode == constant.RelayModeResponsesCompact
+	var policy string
+	if c != nil {
+		policy = common2.GetContextKeyString(c, appconstant.ContextKeyTokenOpenAITierPolicy)
+	}
+	lockedTextRequest := textRequest && (policy == "priority" || policy == "ultrafast")
+	openAIFormat := finalFormat == types.RelayFormatOpenAI || finalFormat == types.RelayFormatOpenAIResponses || finalFormat == types.RelayFormatOpenAIResponsesCompaction
+	if openAIFormat && (req.GetBody != nil || lockedTextRequest || info.DeferServiceTierReservation) {
+		body := req.Body
+		if req.GetBody != nil {
+			var err error
+			body, err = req.GetBody()
+			if err != nil {
+				return nil, err
+			}
+		}
+		if body == nil {
+			body = http.NoBody
+		}
+		data, readErr := io.ReadAll(body)
+		_ = body.Close()
 		if readErr != nil {
 			return nil, readErr
 		}
-		var metadata struct {
-			ServiceTier string `json:"service_tier"`
-		}
-		decodeErr := common2.DecodeJson(body, &metadata)
-		_ = body.Close()
-		if decodeErr != nil && info.DeferServiceTierReservation {
+		updated, tier, decodeErr := info.ApplyOutboundServiceTierPolicy(c, data)
+		if decodeErr != nil && (info.DeferServiceTierReservation || lockedTextRequest) {
 			return nil, types.NewErrorWithStatusCode(decodeErr, types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
 		}
 		if decodeErr == nil {
-			if strings.EqualFold(strings.TrimSpace(metadata.ServiceTier), "fast") {
-				body, readErr = req.GetBody()
-				if readErr != nil {
-					return nil, readErr
-				}
-				data, readErr := io.ReadAll(body)
-				_ = body.Close()
-				if readErr != nil {
-					return nil, readErr
-				}
-				data, readErr = sjson.SetBytes(data, "service_tier", "priority")
-				if readErr != nil {
-					return nil, readErr
-				}
+			if req.GetBody == nil || !bytes.Equal(updated, data) {
 				if req.Body != nil {
 					_ = req.Body.Close()
 				}
-				req.Body = io.NopCloser(bytes.NewReader(data))
-				req.ContentLength = int64(len(data))
-				req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(data)), nil }
+				req.Body = io.NopCloser(bytes.NewReader(updated))
+				req.ContentLength = int64(len(updated))
+				req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(updated)), nil }
 			}
-			if apiErr := service.PrepareServiceTierBilling(c, info, metadata.ServiceTier); apiErr != nil {
+			if apiErr := service.PrepareServiceTierBilling(c, info, tier); apiErr != nil {
 				return nil, apiErr
 			}
 		}

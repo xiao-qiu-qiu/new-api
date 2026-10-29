@@ -641,6 +641,88 @@ func TestTokenAllowUserQuotaQueryOnCreateAndUpdate(t *testing.T) {
 	}
 }
 
+func TestTokenOpenAITierPolicyCRUD(t *testing.T) {
+	for _, tc := range []struct {
+		name, stored, want                  string
+		field                               any
+		create, statusOnly, reject, foreign bool
+	}{
+		{name: "create default", create: true, want: "follow"},
+		{name: "create null", create: true, field: nil, want: "follow"},
+		{name: "create follow", create: true, field: "follow", want: "follow"},
+		{name: "create priority", create: true, field: "priority", want: "priority"},
+		{name: "create ultrafast", create: true, field: "ultrafast", want: "ultrafast"},
+		{name: "create unknown", create: true, field: "fast", reject: true},
+		{name: "create empty", create: true, field: "", reject: true},
+		{name: "create wrong type", create: true, field: true, reject: true},
+		{name: "update omitted", stored: "priority", want: "priority"},
+		{name: "update ultrafast", stored: "priority", field: "ultrafast", want: "ultrafast"},
+		{name: "update follow", stored: "ultrafast", field: "follow", want: "follow"},
+		{name: "update legacy empty", stored: "", want: "follow"},
+		{name: "update unknown", stored: "priority", field: "auto", reject: true, want: "priority"},
+		{name: "status only preserves", stored: "ultrafast", field: "follow", statusOnly: true, want: "ultrafast"},
+		{name: "status only rejects unknown", stored: "priority", field: "fast", statusOnly: true, reject: true, want: "priority"},
+		{name: "foreign update denied", stored: "priority", field: "ultrafast", foreign: true, reject: true, want: "priority"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := setupTokenControllerTestDB(t)
+			body := map[string]any{"name": "tier-token", "expired_time": -1, "unlimited_quota": true, "status": common.TokenStatusEnabled, "model_limits_enabled": true, "model_limits": "allowed-model"}
+			if tc.field != nil || tc.name == "create null" {
+				body["openai_tier_policy"] = tc.field
+			}
+			method, target := http.MethodPut, "/api/token/"
+			if tc.statusOnly {
+				target += "?status_only=true"
+			}
+			var token *model.Token
+			if tc.create {
+				method = http.MethodPost
+			} else {
+				owner := 1
+				if tc.foreign {
+					owner = 2
+				}
+				token = seedToken(t, db, owner, "tier-token", "tier-token-secret")
+				require.NoError(t, db.Model(token).Update("openai_tier_policy", tc.stored).Error)
+				body["id"] = token.Id
+			}
+			ctx, recorder := newAuthenticatedContext(t, method, target, body, 1)
+			if tc.create {
+				AddToken(ctx)
+			} else {
+				UpdateToken(ctx)
+			}
+			response := decodeAPIResponse(t, recorder)
+			require.Equal(t, !tc.reject, response.Success, response.Message)
+			if tc.create && tc.reject {
+				var count int64
+				require.NoError(t, db.Model(&model.Token{}).Count(&count).Error)
+				assert.Zero(t, count)
+				return
+			}
+			var saved model.Token
+			require.NoError(t, db.Where("name = ?", "tier-token").First(&saved).Error)
+			assert.Equal(t, tc.want, saved.OpenAITierPolicy)
+			if tc.reject {
+				return
+			}
+			if !tc.statusOnly {
+				assert.True(t, saved.ModelLimitsEnabled)
+				assert.Equal(t, "allowed-model", saved.ModelLimits)
+			}
+			readCtx, readRecorder := newAuthenticatedContext(t, http.MethodGet, "/api/token/"+strconv.Itoa(saved.Id), nil, 1)
+			readCtx.Params = gin.Params{{Key: "id", Value: strconv.Itoa(saved.Id)}}
+			GetToken(readCtx)
+			readResponse := decodeAPIResponse(t, readRecorder)
+			require.True(t, readResponse.Success, readResponse.Message)
+			var returned model.Token
+			require.NoError(t, common.Unmarshal(readResponse.Data, &returned))
+			assert.Equal(t, tc.want, returned.OpenAITierPolicy)
+			assert.NotEqual(t, saved.Key, returned.Key)
+		})
+	}
+}
+
 func TestGetTokenUsageFollowsTheUserQuotaSwitchAndIPWhitelist(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -736,7 +818,8 @@ func TestAPITokenAuditDatabaseMatrix(t *testing.T) {
 				db, _ := newAuditTestDatabase(t, database.name, dsn)
 				model.DB = db
 				common.SetDatabaseTypes(database.typ, database.typ)
-				require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.Token{}))
+				require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.Token{}, &model.Option{}))
+				require.NoError(t, model.EnsureLegacyAccessTokenRetireAt(time.Now().Unix()))
 				// Initialize production column quoting as well as the existing audit table.
 				require.NoError(t, model.InitLogDB())
 				if separateLog {
@@ -809,6 +892,8 @@ func verifyAPITokenAudit(t *testing.T) {
 		{name: "configuration values stay private", method: "PUT", path: "/", body: `{"id":$id,"name":"owned","expired_time":42,"remain_quota":100,"unlimited_quota":false,"model_limits_enabled":true,"model_limits":"private-model-configuration","allow_ips":"203.0.113.57","group":"auto","cross_group_retry":true}`, action: "token.update", success: true, params: `{"id":$id,"name":"owned","changed_fields":["expired_time","unlimited_quota","model_limits_enabled","model_limits","allow_ips"]}`},
 		{name: "unchanged update", method: "PUT", path: "/", body: `{"id":$id,"name":"owned","expired_time":-1,"remain_quota":100,"unlimited_quota":true,"group":"auto","cross_group_retry":true,"allow_ips":""}`, action: "token.update", success: true, params: `{"id":$id,"name":"owned","changed_fields":[]}`},
 		{name: "user quota query update", method: "PUT", path: "/", body: `{"id":$id,"name":"owned","expired_time":-1,"remain_quota":100,"unlimited_quota":true,"group":"auto","cross_group_retry":true,"allow_ips":"","allow_user_quota_query":true}`, action: "token.update", success: true, params: `{"id":$id,"name":"owned","changed_fields":["allow_user_quota_query"]}`},
+		{name: "tier policy update", method: "PUT", path: "/", body: `{"id":$id,"name":"owned","expired_time":-1,"remain_quota":100,"unlimited_quota":true,"group":"auto","cross_group_retry":true,"allow_ips":"","openai_tier_policy":"ultrafast"}`, action: "token.update", success: true, params: `{"id":$id,"name":"owned","changed_fields":["openai_tier_policy"]}`},
+		{name: "invalid tier update", method: "PUT", path: "/", body: `{"id":$id,"openai_tier_policy":"raw-body-secret"}`, action: "token.update", params: `{"id":$id}`},
 		{name: "successful response exceeds audit buffer", method: "PUT", path: "/", body: `{"id":$id,"name":"owned","expired_time":-1,"remain_quota":100,"unlimited_quota":true,"group":"auto","cross_group_retry":true,"allow_ips":"","model_limits":"` + strings.Repeat("m", 64*1024-128) + `"}`, action: "token.update", success: true, params: `{"id":$id,"name":"owned","changed_fields":["model_limits"]}`},
 		{name: "update storage failure", method: "PUT", path: "/", body: `{"id":$id,"name":"failed-rename","unlimited_quota":true}`, action: "token.update", params: `{"id":$id,"name":"owned"}`, failWrite: true},
 		{name: "foreign update", method: "PUT", path: "/", body: `{"id":$other,"name":"forged-name","unlimited_quota":true}`, action: "token.update", params: `{"id":$other}`},

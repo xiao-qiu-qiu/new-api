@@ -528,120 +528,139 @@ func assertResponsesWSAccounting(t *testing.T, fixture *responsesWSBillingTest, 
 }
 
 func TestResponsesWebSocketReusesConnectionAndSettlesEachRequest(t *testing.T) {
-	type upstreamRequest struct {
-		Authorization      string
-		Type               string `json:"type"`
-		Model              string `json:"model"`
-		PreviousResponseID string `json:"previous_response_id"`
-		ServiceTier        string `json:"service_tier"`
-	}
-	received := make(chan upstreamRequest, 3)
-	fixture := newResponsesWSBillingTest(t, `param("service_tier") == "priority" ? tier("priority", p * 4) : tier("base", p * 2)`, func(ws *websocket.Conn, r *http.Request) {
-		for index := 1; ; index++ {
-			_, data, err := ws.ReadMessage()
-			if err != nil {
-				return
+	for _, tc := range []struct {
+		name, policy string
+		tiers        [2]string
+		quotas       [2]int
+	}{
+		{"follow request", model.OpenAITierPolicyFollow, [2]string{"default", "priority"}, [2]int{1000, 2000}},
+		{"locked ultrafast overrides channel on every turn", model.OpenAITierPolicyUltrafast, [2]string{"ultrafast", "ultrafast"}, [2]int{1500, 1500}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			type upstreamRequest struct {
+				Authorization      string
+				Type               string `json:"type"`
+				Model              string `json:"model"`
+				PreviousResponseID string `json:"previous_response_id"`
+				ServiceTier        string `json:"service_tier"`
 			}
-			var event upstreamRequest
-			if !assert.NoError(t, common.Unmarshal(data, &event)) {
-				return
+			received := make(chan upstreamRequest, 3)
+			fixture := newResponsesWSBillingTest(t, `service_tier == "ultrafast" ? tier("ultrafast", p * 3) : param("service_tier") == "priority" ? tier("priority", p * 4) : tier("base", p * 2)`, func(ws *websocket.Conn, r *http.Request) {
+				for index := 1; ; index++ {
+					_, data, err := ws.ReadMessage()
+					if err != nil {
+						return
+					}
+					var event upstreamRequest
+					if !assert.NoError(t, common.Unmarshal(data, &event)) {
+						return
+					}
+					event.Authorization = r.Header.Get("Authorization")
+					received <- event
+					if index == 2 {
+						duplicate := `{"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":1000,"output_tokens":10,"total_tokens":1010}}}`
+						if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(duplicate))) {
+							return
+						}
+					}
+					terminal := fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_%d","status":"completed","model":"ws-billing","output":[],"usage":{"input_tokens":1000,"output_tokens":10,"total_tokens":1010}}}`, index)
+					if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(terminal))) {
+						return
+					}
+				}
+			})
+			client, user, token := fixture.client, fixture.user, fixture.token
+			token.OpenAITierPolicy = tc.policy
+			require.NoError(t, token.Update())
+			if tc.policy == model.OpenAITierPolicyUltrafast {
+				require.NoError(t, model.DB.Model(fixture.channel).Update("param_override", `{"service_tier":"flex"}`).Error)
 			}
-			event.Authorization = r.Header.Get("Authorization")
-			received <- event
-			if index == 2 {
-				duplicate := `{"type":"response.completed","response":{"id":"resp_1","status":"completed","usage":{"input_tokens":1000,"output_tokens":10,"total_tokens":1010}}}`
-				if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(duplicate))) {
-					return
+
+			for index, payload := range []string{
+				`{"type":"response.create","model":"ws-billing","input":"first","service_tier":"default"}`,
+				`{"type":"response.create","model":"ws-billing","input":"second","previous_response_id":"resp_1","service_tier":"priority"}`,
+			} {
+				require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(payload)))
+				require.NoError(t, client.SetReadDeadline(time.Now().Add(3*time.Second)))
+				_, data, err := client.ReadMessage()
+				require.NoError(t, err)
+				var terminal struct {
+					Type     string `json:"type"`
+					Response struct {
+						ID string `json:"id"`
+					} `json:"response"`
+				}
+				require.NoError(t, common.Unmarshal(data, &terminal))
+				require.Equal(t, "response.completed", terminal.Type, "unexpected response: %s", data)
+				assert.Equal(t, fmt.Sprintf("resp_%d", index+1), terminal.Response.ID)
+				observed := <-received
+				assert.Equal(t, "Bearer upstream-first", observed.Authorization)
+				assert.Equal(t, "gpt-4o", observed.Model)
+				assert.Equal(t, "response.create", observed.Type)
+				assert.Equal(t, tc.tiers[index], observed.ServiceTier)
+				if index == 0 {
+					assert.Empty(t, observed.PreviousResponseID)
+				} else {
+					assert.Equal(t, "resp_1", observed.PreviousResponseID)
 				}
 			}
-			terminal := fmt.Sprintf(`{"type":"response.completed","response":{"id":"resp_%d","status":"completed","model":"ws-billing","output":[],"usage":{"input_tokens":1000,"output_tokens":10,"total_tokens":1010}}}`, index)
-			if !assert.NoError(t, ws.WriteMessage(websocket.TextMessage, []byte(terminal))) {
-				return
+
+			require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":"exhausted"}`)))
+			require.NoError(t, client.SetReadDeadline(time.Now().Add(3*time.Second)))
+			_, data, err := client.ReadMessage()
+			require.NoError(t, err)
+			var rejection struct {
+				Type   string `json:"type"`
+				Status int    `json:"status"`
 			}
-		}
-	})
-	client, user, token := fixture.client, fixture.user, fixture.token
-
-	for index, payload := range []string{
-		`{"type":"response.create","model":"ws-billing","input":"first","service_tier":"default"}`,
-		`{"type":"response.create","model":"ws-billing","input":"second","previous_response_id":"resp_1","service_tier":"priority"}`,
-	} {
-		require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(payload)))
-		require.NoError(t, client.SetReadDeadline(time.Now().Add(3*time.Second)))
-		_, data, err := client.ReadMessage()
-		require.NoError(t, err)
-		var terminal struct {
-			Type     string `json:"type"`
-			Response struct {
-				ID string `json:"id"`
-			} `json:"response"`
-		}
-		require.NoError(t, common.Unmarshal(data, &terminal))
-		require.Equal(t, "response.completed", terminal.Type, "unexpected response: %s", data)
-		assert.Equal(t, fmt.Sprintf("resp_%d", index+1), terminal.Response.ID)
-		observed := <-received
-		assert.Equal(t, "Bearer upstream-first", observed.Authorization)
-		assert.Equal(t, "gpt-4o", observed.Model)
-		assert.Equal(t, "response.create", observed.Type)
-		if index == 0 {
-			assert.Empty(t, observed.PreviousResponseID)
-			assert.Equal(t, "default", observed.ServiceTier)
-		} else {
-			assert.Equal(t, "resp_1", observed.PreviousResponseID)
-			assert.Equal(t, "priority", observed.ServiceTier)
-		}
+			require.NoError(t, common.Unmarshal(data, &rejection))
+			assert.Equal(t, "error", rejection.Type)
+			assert.Equal(t, http.StatusUnauthorized, rejection.Status)
+			assert.Equal(t, int32(1), fixture.connections.Load())
+			assert.Empty(t, received, "exhausted token must be rejected before contacting upstream")
+			var logs []model.Log
+			require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeConsume).Order("id").Find(&logs).Error)
+			require.Len(t, logs, 2)
+			for index, expectedQuota := range tc.quotas {
+				assert.Equal(t, expectedQuota, logs[index].Quota)
+				assert.Equal(t, fmt.Sprintf("responses-ws-billing-ws-%d", index), logs[index].RequestId)
+				assert.Equal(t, 1000, logs[index].PromptTokens)
+				assert.Equal(t, 10, logs[index].CompletionTokens)
+			}
+			// Routing decisions are persisted per request: the first create selects a
+			// channel, later creates on the same connection reuse it as a pin.
+			for index, wantDecision := range []string{"attempt:channel_selected", "select:pinned_channel"} {
+				var other struct {
+					RequestedServiceTier string `json:"requested_service_tier"`
+					ServiceTier          string `json:"service_tier"`
+					AdminInfo            struct {
+						RequestPolicy []struct {
+							ChannelID int `json:"channel_id"`
+							Decision  struct {
+								Action string `json:"action"`
+								Reason string `json:"reason"`
+							} `json:"decision"`
+						} `json:"request_policy"`
+					} `json:"admin_info"`
+				}
+				require.NoError(t, common.UnmarshalJsonStr(logs[index].Other, &other))
+				assert.Equal(t, []string{"default", "priority"}[index], other.RequestedServiceTier)
+				assert.Equal(t, tc.tiers[index], other.ServiceTier)
+				var decisions []string
+				for _, event := range other.AdminInfo.RequestPolicy {
+					assert.Equal(t, fixture.channel.Id, event.ChannelID)
+					decisions = append(decisions, event.Decision.Action+":"+event.Decision.Reason)
+				}
+				assert.Contains(t, decisions, wantDecision, "request %d policy events: %v", index, decisions)
+			}
+			require.NoError(t, model.DB.First(token, token.Id).Error)
+			require.NoError(t, model.DB.First(user, user.Id).Error)
+			assert.Zero(t, token.RemainQuota)
+			assert.Equal(t, 3000, token.UsedQuota)
+			assert.Equal(t, 97000, user.Quota)
+			assert.Equal(t, 3000, user.UsedQuota)
+		})
 	}
-
-	require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":"exhausted"}`)))
-	require.NoError(t, client.SetReadDeadline(time.Now().Add(3*time.Second)))
-	_, data, err := client.ReadMessage()
-	require.NoError(t, err)
-	var rejection struct {
-		Type   string `json:"type"`
-		Status int    `json:"status"`
-	}
-	require.NoError(t, common.Unmarshal(data, &rejection))
-	assert.Equal(t, "error", rejection.Type)
-	assert.Equal(t, http.StatusUnauthorized, rejection.Status)
-	assert.Equal(t, int32(1), fixture.connections.Load())
-	assert.Empty(t, received, "exhausted token must be rejected before contacting upstream")
-	var logs []model.Log
-	require.NoError(t, model.LOG_DB.Where("type = ?", model.LogTypeConsume).Order("id").Find(&logs).Error)
-	require.Len(t, logs, 2)
-	for index, expectedQuota := range []int{1000, 2000} {
-		assert.Equal(t, expectedQuota, logs[index].Quota)
-		assert.Equal(t, fmt.Sprintf("responses-ws-billing-ws-%d", index), logs[index].RequestId)
-		assert.Equal(t, 1000, logs[index].PromptTokens)
-		assert.Equal(t, 10, logs[index].CompletionTokens)
-	}
-	// Routing decisions are persisted per request: the first create selects a
-	// channel, later creates on the same connection reuse it as a pin.
-	for index, wantDecision := range []string{"attempt:channel_selected", "select:pinned_channel"} {
-		var other struct {
-			AdminInfo struct {
-				RequestPolicy []struct {
-					ChannelID int `json:"channel_id"`
-					Decision  struct {
-						Action string `json:"action"`
-						Reason string `json:"reason"`
-					} `json:"decision"`
-				} `json:"request_policy"`
-			} `json:"admin_info"`
-		}
-		require.NoError(t, common.UnmarshalJsonStr(logs[index].Other, &other))
-		var decisions []string
-		for _, event := range other.AdminInfo.RequestPolicy {
-			assert.Equal(t, fixture.channel.Id, event.ChannelID)
-			decisions = append(decisions, event.Decision.Action+":"+event.Decision.Reason)
-		}
-		assert.Contains(t, decisions, wantDecision, "request %d policy events: %v", index, decisions)
-	}
-	require.NoError(t, model.DB.First(token, token.Id).Error)
-	require.NoError(t, model.DB.First(user, user.Id).Error)
-	assert.Zero(t, token.RemainQuota)
-	assert.Equal(t, 3000, token.UsedQuota)
-	assert.Equal(t, 97000, user.Quota)
-	assert.Equal(t, 3000, user.UsedQuota)
 }
 
 // Both transports must reach the same upstream target with the same

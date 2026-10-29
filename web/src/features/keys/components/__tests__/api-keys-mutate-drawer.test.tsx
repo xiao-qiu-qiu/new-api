@@ -23,6 +23,7 @@ import {
   waitFor,
   within,
 } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, test } from 'vitest'
 
 const { createInstance } = await import('i18next')
@@ -53,13 +54,22 @@ const originalGet = apiClient.get
 const originalPost = apiClient.post
 let renderedDrawer: RenderedDrawer | null = null
 
-function installApiFixtures(createdPayloads: Array<Record<string, unknown>>) {
+function installApiFixtures(
+  createdPayloads: Array<Record<string, unknown>>,
+  models: string[] = [],
+  groupModels: Record<string, string[]> = {}
+) {
   apiClient.get = async (url) => {
+    if (url.startsWith('/api/user/models?group=')) {
+      const group =
+        new URL(url, 'http://localhost').searchParams.get('group') || ''
+      return { data: { success: true, data: groupModels[group] ?? models } }
+    }
     switch (url) {
       case '/api/status':
         return { data: { data: { default_use_auto_group: true } } }
       case '/api/user/models':
-        return { data: { success: true, data: [] } }
+        return { data: { success: true, data: models } }
       case '/api/user/self/groups':
         return {
           data: {
@@ -90,7 +100,10 @@ function installApiFixtures(createdPayloads: Array<Record<string, unknown>>) {
   }
 }
 
-async function renderCreateDrawer(defaultUseAutoGroup = true): Promise<void> {
+async function renderCreateDrawer(
+  defaultUseAutoGroup = true,
+  models: string[] = []
+): Promise<void> {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
@@ -102,7 +115,7 @@ async function renderCreateDrawer(defaultUseAutoGroup = true): Promise<void> {
   )
   queryClient.setQueryData(
     ['user-models'],
-    { success: true, data: [] },
+    { success: true, data: models },
     { updatedAt: freshAt }
   )
   queryClient.setQueryData(
@@ -158,7 +171,9 @@ function findButton(text: string, required = true): HTMLButtonElement | null {
 }
 
 function getControlByLabel(labelText: 'Name' | 'Quantity'): HTMLInputElement
-function getControlByLabel(labelText: 'Group'): HTMLButtonElement
+function getControlByLabel(
+  labelText: 'Group' | 'Model Limits'
+): HTMLButtonElement
 function getControlByLabel(labelText: 'Selected groups'): HTMLElement
 function getControlByLabel(labelText: string): HTMLElement {
   const label = [...document.querySelectorAll<HTMLLabelElement>('label')].find(
@@ -330,5 +345,91 @@ describe('API keys mutate drawer user quota query switch', () => {
     fireEvent.click(findButton('Save changes', true))
     await waitFor(() => expect(createdPayloads).toHaveLength(1))
     expect(createdPayloads[0]?.allow_user_quota_query).toBe(false)
+  })
+})
+
+describe('API keys mutate drawer GPT speed tier', () => {
+  test('hides the tier control when only non-GPT or media models are available', async () => {
+    const models = [
+      'deepseek-chat',
+      'claude-sonnet',
+      'gpt-image-1',
+      'gpt-4o-audio-preview',
+    ]
+    installApiFixtures([], models)
+    await renderCreateDrawer(true, models)
+
+    expect(
+      screen.queryByRole('radiogroup', { name: 'GPT speed tier' })
+    ).not.toBeInTheDocument()
+  })
+
+  test('allows keyboard selection and sends the locked tier for every batch-created key', async () => {
+    const user = userEvent.setup()
+    const payloads: Array<Record<string, unknown>> = []
+    const models = ['openai/gpt-6-astra', 'deepseek-chat']
+    installApiFixtures(payloads, models)
+    await renderCreateDrawer(true, models)
+
+    const follow = await screen.findByRole('radio', { name: 'Follow request' })
+    expect(follow).toBeChecked()
+    follow.focus()
+    await user.keyboard('{ArrowRight}')
+    expect(screen.getByRole('radio', { name: 'Lock Fast' })).toBeChecked()
+
+    changeInput(getControlByLabel('Name'), 'fast-batch')
+    changeInput(getControlByLabel('Quantity'), '2')
+    await user.click(findButton('Save changes', true))
+    await waitFor(() => expect(payloads).toHaveLength(2))
+    expect(payloads.map((payload) => payload.openai_tier_policy)).toEqual([
+      'priority',
+      'priority',
+    ])
+  })
+
+  test('hides the tier for non-GPT model limits and restores the choice when the limit is removed', async () => {
+    const user = userEvent.setup()
+    const models = ['gpt-6-astra', 'deepseek-chat']
+    installApiFixtures([], models)
+    await renderCreateDrawer(true, models)
+    await user.click(await screen.findByRole('radio', { name: 'Lock UF' }))
+    expect(screen.getByRole('radio', { name: 'Lock UF' })).toBeChecked()
+
+    await user.click(findButton('Advanced Settings', true))
+    await user.click(
+      screen.getByRole('combobox', {
+        name: 'Select models (empty for allow all)',
+      })
+    )
+    await user.click(
+      await screen.findByRole('option', { name: 'deepseek-chat' })
+    )
+    expect(
+      screen.queryByRole('radiogroup', { name: 'GPT speed tier' })
+    ).not.toBeInTheDocument()
+
+    const modelOption = screen.getByRole('option', { name: /deepseek-chat/ })
+    await user.click(modelOption)
+    expect(screen.getByRole('radio', { name: 'Lock UF' })).toBeChecked()
+  })
+
+  test('hides the tier after switching from a GPT group to a non-GPT group', async () => {
+    const models = ['gpt-6-astra', 'deepseek-chat']
+    installApiFixtures([], models, {
+      default: ['deepseek-chat'],
+      vip: ['gpt-6-astra'],
+    })
+    await renderCreateDrawer(false, models)
+    selectComboboxOption(getControlByLabel('Group'), 'Priority access')
+    expect(
+      await screen.findByRole('radiogroup', { name: 'GPT speed tier' })
+    ).toBeVisible()
+
+    selectComboboxOption(getControlByLabel('Group'), 'Standard access')
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('radiogroup', { name: 'GPT speed tier' })
+      ).not.toBeInTheDocument()
+    )
   })
 })

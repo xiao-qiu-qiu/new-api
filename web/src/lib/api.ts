@@ -48,12 +48,15 @@ export async function getSelf() {
   return res.data
 }
 
-export async function getUserModels(): Promise<{
+export async function getUserModels(group?: string): Promise<{
   success: boolean
   message?: string
   data?: string[]
 }> {
-  const res = await api.get('/api/user/models')
+  const url = group
+    ? `/api/user/models?group=${encodeURIComponent(group)}`
+    : '/api/user/models'
+  const res = await api.get(url)
   return res.data
 }
 

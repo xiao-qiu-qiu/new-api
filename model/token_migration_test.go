@@ -16,6 +16,128 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+// Token schema from v1.0.0-rc.44, before the quota-query and tier-policy fields.
+type releasedTokenBeforeTierPolicy struct {
+	Id                 int
+	UserId             int    `gorm:"index"`
+	Key                string `gorm:"type:varchar(128);uniqueIndex"`
+	Status             int    `gorm:"default:1"`
+	Name               string `gorm:"index"`
+	CreatedTime        int64  `gorm:"bigint"`
+	AccessedTime       int64  `gorm:"bigint"`
+	ExpiredTime        int64  `gorm:"bigint;default:-1"`
+	RemainQuota        int    `gorm:"default:0"`
+	UnlimitedQuota     bool
+	ModelLimitsEnabled bool
+	ModelLimits        string  `gorm:"type:text"`
+	AllowIps           *string `gorm:"default:''"`
+	UsedQuota          int     `gorm:"default:0"`
+	Group              string  `gorm:"default:''"`
+	CrossGroupRetry    bool
+	AutoGroups         string         `gorm:"type:text"`
+	DeletedAt          gorm.DeletedAt `gorm:"index"`
+}
+
+func TestTokenOpenAITierPolicyMigration(t *testing.T) {
+	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(dialect, func(t *testing.T) {
+			var dialector gorm.Dialector
+			switch dialect {
+			case "sqlite":
+				dialector = sqlite.Open(":memory:")
+			case "mysql":
+				dsn := os.Getenv("TEST_MYSQL_DSN")
+				if dsn == "" {
+					t.Skip("TEST_MYSQL_DSN is not configured")
+				}
+				dialector = mysql.Open(dsn)
+			case "postgres":
+				dsn := os.Getenv("TEST_POSTGRES_DSN")
+				if dsn == "" {
+					t.Skip("TEST_POSTGRES_DSN is not configured")
+				}
+				dialector = postgres.Open(dsn)
+			}
+			db, err := gorm.Open(dialector, &gorm.Config{})
+			require.NoError(t, err)
+			sqlDB, err := db.DB()
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, sqlDB.Close()) })
+			var version string
+			versionSQL := "SELECT version()"
+			if dialect == "sqlite" {
+				versionSQL = "SELECT sqlite_version()"
+			}
+			require.NoError(t, db.Raw(versionSQL).Scan(&version).Error)
+			t.Logf("database version: %s", version)
+			for _, legacy := range []bool{false, true} {
+				t.Run(fmt.Sprintf("released_schema=%v", legacy), func(t *testing.T) {
+					table := fmt.Sprintf("token_tier_%d", time.Now().UnixNano())
+					t.Cleanup(func() { require.NoError(t, db.Migrator().DropTable(table)) })
+					recorder := &migrationSQLRecorder{}
+					tableDB := db.Table(table).Session(&gorm.Session{Logger: recorder})
+					if legacy {
+						require.NoError(t, tableDB.AutoMigrate(&releasedTokenBeforeTierPolicy{}))
+						require.NoError(t, tableDB.Create(&releasedTokenBeforeTierPolicy{UserId: 7, Key: "preserved-key", Name: "preserved-name", RemainQuota: 120, UsedQuota: 30, ModelLimitsEnabled: true, ModelLimits: "allowed-model", Group: "auto", AutoGroups: `["vip"]`}).Error)
+						assert.False(t, tableDB.Migrator().HasColumn(&releasedTokenBeforeTierPolicy{}, "openai_tier_policy"))
+					}
+					for round := range 2 {
+						recorder.reset()
+						require.NoError(t, tableDB.AutoMigrate(&Token{}))
+						if round == 1 {
+							assert.Empty(t, recorder.schemaMutations(), "second migration must not mutate the schema")
+						}
+					}
+					if legacy {
+						var saved Token
+						require.NoError(t, tableDB.First(&saved, 1).Error)
+						assert.Equal(t, "preserved-key", saved.Key)
+						assert.Equal(t, "preserved-name", saved.Name)
+						assert.Equal(t, 7, saved.UserId)
+						assert.Equal(t, 120, saved.RemainQuota)
+						assert.Equal(t, 30, saved.UsedQuota)
+						assert.True(t, saved.ModelLimitsEnabled)
+						assert.Equal(t, "allowed-model", saved.ModelLimits)
+						assert.Equal(t, "auto", saved.Group)
+						assert.Equal(t, `["vip"]`, saved.AutoGroups)
+						assert.Equal(t, OpenAITierPolicyFollow, saved.OpenAITierPolicy)
+					}
+					for _, column := range []string{"key", "user_id", "name", "deleted_at"} {
+						assert.True(t, db.Migrator().HasIndex(table, db.NamingStrategy.IndexName(table, column)))
+					}
+					originalDB := DB
+					DB = tableDB
+					t.Cleanup(func() { DB = originalDB })
+					token := Token{UserId: 8, Key: "new-key", UnlimitedQuota: true, ExpiredTime: -1}
+					require.NoError(t, token.Insert())
+					assert.Equal(t, OpenAITierPolicyFollow, token.OpenAITierPolicy)
+					for _, policy := range []string{OpenAITierPolicyPriority, OpenAITierPolicyUltrafast, OpenAITierPolicyFollow} {
+						token.OpenAITierPolicy = policy
+						require.NoError(t, token.Update())
+						var saved Token
+						require.NoError(t, tableDB.First(&saved, token.Id).Error)
+						assert.Equal(t, policy, saved.OpenAITierPolicy)
+					}
+					for _, legacyValue := range []any{"", nil} {
+						require.NoError(t, tableDB.Where("id = ?", token.Id).Update("openai_tier_policy", legacyValue).Error)
+						var saved Token
+						require.NoError(t, tableDB.First(&saved, token.Id).Error)
+						assert.Equal(t, OpenAITierPolicyFollow, saved.OpenAITierPolicy)
+					}
+					require.Error(t, tableDB.Create(&Token{UserId: 9, Key: token.Key}).Error, "key uniqueness must survive migration")
+					var count int64
+					require.NoError(t, tableDB.Model(&Token{}).Count(&count).Error)
+					wantCount := int64(1)
+					if legacy {
+						wantCount++
+					}
+					assert.Equal(t, wantCount, count)
+				})
+			}
+		})
+	}
+}
+
 func requireTokenConstraintExists(t *testing.T, db *gorm.DB, constraintName string) {
 	t.Helper()
 	var count int64

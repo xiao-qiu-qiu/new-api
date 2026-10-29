@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { zodResolver } from '@hookform/resolvers/zod'
-import { useQuery } from '@tanstack/react-query'
+import { useQueries, useQuery } from '@tanstack/react-query'
 import {
   ChevronDown,
   Info,
@@ -99,11 +99,13 @@ import {
   transformFormDataToPayload,
   transformApiKeyToFormDefaults,
 } from '../lib'
+import { supportsOpenAITierPolicy } from '../lib/openai-tier-policy'
 import type { ApiKey } from '../types'
 import {
   ApiKeyGroupCombobox,
   type ApiKeyGroupOption,
 } from './api-key-group-combobox'
+import { ApiKeySpeedTierField } from './api-key-speed-tier-field'
 import { useApiKeys } from './api-keys-provider'
 import { AutoGroupOrderEditor } from './auto-group-order-editor'
 
@@ -277,6 +279,35 @@ export function ApiKeysMutateDrawer({
     isUpdate && currentRow ? `update:${currentRow.id}` : 'create'
   const isFormInitialized = initializedTarget === formTarget
   const selectedGroup = form.watch('group')
+  const selectedModels = form.watch('model_limits')
+  const autoGroupsMode = form.watch('auto_groups_mode')
+  const selectedAutoGroups = form.watch('auto_groups')
+  const hasTierCandidate = (
+    selectedModels.length > 0 ? selectedModels : models
+  ).some(supportsOpenAITierPolicy)
+  let tierGroups = selectedGroup ? [selectedGroup] : []
+  if (selectedGroup === 'auto') {
+    tierGroups =
+      autoGroupsMode === 'custom' ? selectedAutoGroups : globalAutoGroups
+  }
+  const tierModelQueries = useQueries({
+    queries: hasTierCandidate
+      ? tierGroups.map((group) => ({
+          queryKey: ['user-models', group],
+          queryFn: async () => requireServerSuccess(await getUserModels(group)),
+          enabled: open && isFormInitialized,
+          staleTime: 30_000,
+        }))
+      : [],
+  })
+  const selectedModelSet = new Set(selectedModels)
+  const showSpeedTier = tierModelQueries.some((query) =>
+    query.data?.data?.some(
+      (model) =>
+        supportsOpenAITierPolicy(model) &&
+        (selectedModels.length === 0 || selectedModelSet.has(model))
+    )
+  )
 
   // Correct group after groups load: if the form value is not in available groups, fall back
   useEffect(() => {
@@ -376,7 +407,6 @@ export function ApiKeysMutateDrawer({
   const quotaPlaceholder = tokensOnly
     ? t('Enter quota in tokens')
     : t('Enter quota in {{currency}}', { currency: currencyLabel })
-  const autoGroupsMode = form.watch('auto_groups_mode')
   const unlimitedQuota = form.watch('unlimited_quota')
 
   return (
@@ -710,6 +740,8 @@ export function ApiKeysMutateDrawer({
                 />
               )}
             </SideDrawerSection>
+
+            {showSpeedTier && <ApiKeySpeedTierField control={form.control} />}
 
             <SideDrawerSection>
               <SideDrawerSectionHeader

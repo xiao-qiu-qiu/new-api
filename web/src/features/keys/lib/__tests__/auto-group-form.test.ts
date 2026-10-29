@@ -26,6 +26,7 @@ import {
   transformApiKeyToFormDefaults,
   transformFormDataToPayload,
 } from '../api-key-form'
+import { supportsOpenAITierPolicy } from '../openai-tier-policy'
 
 const t = ((key: string, options?: Record<string, unknown>) => {
   if (options?.max !== undefined) {
@@ -222,6 +223,54 @@ describe('API key user quota query form mapping', () => {
       expect(transformFormDataToPayload(defaults).allow_user_quota_query).toBe(
         stored
       )
+    }
+  )
+})
+
+describe('API key GPT speed tier form mapping', () => {
+  test('defaults new and legacy keys to following the request', () => {
+    expect(
+      transformFormDataToPayload(getApiKeyFormDefaultValues(false))
+        .openai_tier_policy
+    ).toBe('follow')
+    for (const stored of [undefined, null, ''] as const) {
+      const legacy = apiKeySchema.parse({
+        ...baseApiKey,
+        openai_tier_policy: stored,
+      })
+      expect(transformApiKeyToFormDefaults(legacy).openai_tier_policy).toBe(
+        'follow'
+      )
+    }
+  })
+
+  test.each(['priority', 'ultrafast'] as const)(
+    'preserves %s when editing and saving a key',
+    (policy) => {
+      const defaults = transformApiKeyToFormDefaults({
+        ...baseApiKey,
+        openai_tier_policy: policy,
+      })
+      expect(transformFormDataToPayload(defaults).openai_tier_policy).toBe(
+        policy
+      )
+    }
+  )
+
+  test.each([
+    ['gpt-6-astra', true],
+    ['openai/GPT-6.1-sol', true],
+    ['gpt-image-1', false],
+    ['gpt-4o-audio-preview', false],
+    ['gpt-4o-mini-tts', false],
+    ['gpt-4o-transcribe', false],
+    ['deepseek-chat', false],
+    ['claude-sonnet', false],
+    ['gemini-pro', false],
+  ])(
+    'shows the tier policy for %s only when it is a GPT text model',
+    (model, expected) => {
+      expect(supportsOpenAITierPolicy(model)).toBe(expected)
     }
   )
 })

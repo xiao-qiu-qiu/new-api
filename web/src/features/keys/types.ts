@@ -18,6 +18,14 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { z } from 'zod'
 
+export const openAITierPolicySchema = z.enum([
+  'follow',
+  'priority',
+  'ultrafast',
+])
+
+export type OpenAITierPolicy = z.infer<typeof openAITierPolicySchema>
+
 // ============================================================================
 // API Key Schema & Types
 // ============================================================================
@@ -47,6 +55,9 @@ export const apiKeySchema = z.object({
   model_limits: z.string().nullish().default(''),
   allow_ips: z.string().nullish().default(''),
   allow_user_quota_query: z.boolean().optional().default(false),
+  openai_tier_policy: z
+    .union([openAITierPolicySchema, z.literal('')])
+    .nullish(),
 })
 
 export type ApiKey = z.infer<typeof apiKeySchema>
@@ -93,6 +104,7 @@ export interface ApiKeyFormData {
   model_limits: string
   allow_ips: string
   allow_user_quota_query: boolean
+  openai_tier_policy: OpenAITierPolicy
   group: string
   auto_groups: string[]
   cross_group_retry: boolean

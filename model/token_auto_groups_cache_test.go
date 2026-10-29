@@ -1,12 +1,48 @@
 package model
 
 import (
+	"context"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestTokenOpenAITierPolicyRedisHashCache(t *testing.T) {
+	server := useUserCacheMiniRedis(t)
+	for _, policy := range []string{"", OpenAITierPolicyFollow, OpenAITierPolicyPriority, OpenAITierPolicyUltrafast} {
+		t.Run("policy="+policy, func(t *testing.T) {
+			token := Token{Id: 44, UserId: 7, Key: "tier-policy-" + policy, OpenAITierPolicy: policy}
+			initialized, err := cacheInitToken(token)
+			require.NoError(t, err)
+			require.Equal(t, 1, initialized)
+			cached, err := cacheGetTokenByKey(token.Key)
+			require.NoError(t, err)
+			assert.Equal(t, token.GetOpenAITierPolicy(), cached.OpenAITierPolicy)
+			assert.Positive(t, server.TTL(getTokenCacheKey(token.Key)))
+			require.NoError(t, common.RDB.HDel(context.Background(), getTokenCacheKey(token.Key), "OpenAITierPolicy").Err())
+			cached, err = cacheGetTokenByKey(token.Key)
+			require.NoError(t, err)
+			assert.Equal(t, OpenAITierPolicyFollow, cached.OpenAITierPolicy)
+		})
+	}
+}
+
+func TestTokenOpenAITierPolicyUpdateInvalidatesCache(t *testing.T) {
+	truncateTables(t)
+	useUserCacheMiniRedis(t)
+	token := Token{UserId: 7, Key: "tier-policy-update", OpenAITierPolicy: OpenAITierPolicyPriority}
+	require.NoError(t, token.Insert())
+	require.NoError(t, cacheSetTokenForTest(token))
+	token.OpenAITierPolicy = OpenAITierPolicyUltrafast
+	require.NoError(t, token.Update())
+	_, err := cacheGetTokenByKey(token.Key)
+	require.Error(t, err)
+	reloaded, err := GetTokenByKey(token.Key, false)
+	require.NoError(t, err)
+	assert.Equal(t, OpenAITierPolicyUltrafast, reloaded.OpenAITierPolicy)
+}
 
 func TestTokenAutoGroupsRoundTripThroughRedisHashCache(t *testing.T) {
 	useUserCacheMiniRedis(t)

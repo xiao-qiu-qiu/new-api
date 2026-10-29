@@ -18,6 +18,19 @@ func newTokenAutoGroupsContext() *gin.Context {
 	return ctx
 }
 
+func TestSetupContextForTokenOpenAITierPolicy(t *testing.T) {
+	for _, policy := range []string{"", model.OpenAITierPolicyFollow, model.OpenAITierPolicyPriority, model.OpenAITierPolicyUltrafast} {
+		t.Run("policy="+policy, func(t *testing.T) {
+			ctx := newTokenAutoGroupsContext()
+			token := &model.Token{Id: 1, UserId: 2, OpenAITierPolicy: policy, ModelLimitsEnabled: true, ModelLimits: "allowed-model"}
+			require.NoError(t, SetupContextForToken(ctx, token))
+			assert.Equal(t, token.GetOpenAITierPolicy(), common.GetContextKeyString(ctx, constant.ContextKeyTokenOpenAITierPolicy))
+			assert.True(t, ctx.GetBool("token_model_limit_enabled"))
+			assert.Equal(t, map[string]bool{"allowed-model": true}, ctx.MustGet("token_model_limit"))
+		})
+	}
+}
+
 func TestSetupContextForTokenPreservesCustomAutoGroupsOrder(t *testing.T) {
 	ctx := newTokenAutoGroupsContext()
 	token := &model.Token{Id: 1, UserId: 2, AutoGroups: `["vip","default"]`}

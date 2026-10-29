@@ -1,9 +1,14 @@
 package common
 
 import (
+	"fmt"
 	"strings"
 
+	appcommon "github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
 
@@ -36,6 +41,73 @@ func requestedServiceTier(request dto.Request) string {
 		return strings.TrimSpace(req.ServiceTier)
 	}
 	return ""
+}
+
+// ApplyOutboundServiceTierPolicy runs after conversion, filtering and channel
+// overrides, before the final tier is reserved. It never changes the original
+// request, RequestedServiceTier or the frozen param() billing input.
+func (info *RelayInfo) ApplyOutboundServiceTierPolicy(c *gin.Context, payload []byte) ([]byte, string, error) {
+	var metadata struct {
+		Model       string               `json:"model"`
+		ServiceTier appcommon.RawMessage `json:"service_tier"`
+	}
+	if err := appcommon.Unmarshal(payload, &metadata); err != nil {
+		return nil, "", err
+	}
+	model := metadata.Model
+	if model == "" && info.ChannelMeta != nil {
+		model = info.UpstreamModelName
+	}
+	// The actual outgoing model wins, including passthrough and model overrides.
+	// Only the last namespace component is matched. Keep this rule aligned with
+	// the API-key editor: gpt- followed by a digit, excluding non-text families.
+	model = strings.ToLower(strings.TrimSpace(model))
+	model = model[strings.LastIndex(model, "/")+1:]
+	gptText := len(model) > 4 && strings.HasPrefix(model, "gpt-") && model[4] >= '0' && model[4] <= '9'
+	for _, excluded := range []string{"image", "audio", "tts", "embed", "transcrib", "realtime"} {
+		if strings.Contains(model, excluded) {
+			gptText = false
+			break
+		}
+	}
+	var locked string
+	if c != nil && gptText {
+		switch info.RelayMode {
+		case relayconstant.RelayModeChatCompletions, relayconstant.RelayModeResponses, relayconstant.RelayModeResponsesCompact:
+			switch policy := appcommon.GetContextKeyString(c, constant.ContextKeyTokenOpenAITierPolicy); policy {
+			case "priority", "ultrafast":
+				locked = policy
+			}
+		}
+	}
+	tier := locked
+	if locked == "" && len(metadata.ServiceTier) > 0 {
+		if err := appcommon.Unmarshal(metadata.ServiceTier, &tier); err != nil {
+			return nil, "", err
+		}
+	}
+	if locked == "" && !strings.EqualFold(strings.TrimSpace(tier), "fast") {
+		return payload, tier, nil
+	}
+	if locked == "" {
+		tier = "priority"
+	}
+	// Re-encode the top-level object when rewriting so duplicate/escaped tier
+	// keys cannot leave a second client-controlled value for upstream decoders.
+	var fields map[string]appcommon.RawMessage
+	if err := appcommon.Unmarshal(payload, &fields); err != nil {
+		return nil, "", err
+	}
+	if fields == nil {
+		return nil, "", fmt.Errorf("outbound request must be a JSON object")
+	}
+	encodedTier, err := appcommon.Marshal(tier)
+	if err != nil {
+		return nil, "", err
+	}
+	fields["service_tier"] = encodedTier
+	updated, err := appcommon.Marshal(fields)
+	return updated, tier, err
 }
 
 // ObserveResponseServiceTier accepts an upstream downgrade, never an unsolicited
