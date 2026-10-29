@@ -14,6 +14,7 @@ type StreamResult struct {
 	status    *relaycommon.StreamStatus
 	stopped   bool
 	lifecycle *relaycommon.StreamLifecycle
+	done      bool
 }
 
 func newStreamResult(status *relaycommon.StreamStatus) *StreamResult {
@@ -55,6 +56,7 @@ func (r *StreamResult) Done() {
 	}
 	r.status.SetEndReason(relaycommon.StreamEndReasonDone, nil)
 	r.stopped = true
+	r.done = true
 }
 
 // IsStopped returns whether Stop() or Done() was called during this chunk.
@@ -65,4 +67,5 @@ func (r *StreamResult) IsStopped() bool {
 // reset clears the per-chunk stopped flag so the object can be reused.
 func (r *StreamResult) reset() {
 	r.stopped = false
+	r.done = false
 }

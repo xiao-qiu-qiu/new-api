@@ -27,9 +27,13 @@ const (
 	InitialScannerBufferSize    = 64 << 10  // 64KB (64*1024)
 	DefaultMaxScannerBufferSize = 128 << 20 // 64MB (64*1024*1024) default SSE buffer size
 	DefaultPingInterval         = 10 * time.Second
-	// Bound a synchronous write to a slow client (full TCP buffer and no
-	// server WriteTimeout), so it cannot keep the handler from cleaning up.
-	streamWriteTimeout = 30 * time.Second
+	// streamWriteTimeout bounds a write blocked on a client that stopped
+	// reading so the unconditional wg.Wait() in cleanup can always finish.
+	// Without it, a connected client with a full TCP buffer (no server
+	// WriteTimeout) could hang the handler forever. StreamWriteBudget adds the
+	// time a client reading at streamMinClientRate needs for the data.
+	streamWriteTimeout  = 30 * time.Second
+	streamMinClientRate = 8 << 10 // bytes per second
 )
 
 func getScannerBufferSize() int {
@@ -69,14 +73,48 @@ func copyCodexSSEHeaders(c *gin.Context, resp *http.Response) {
 	}
 }
 
-// ExtendWriteDeadline pushes the connection write deadline forward before each
-// stream write. Best-effort: writers that don't support deadlines (e.g.
-// httptest recorders) are silently ignored.
-func ExtendWriteDeadline(c *gin.Context) {
-	if c == nil || c.Writer == nil {
-		return
+// StreamWriteBudget gives the writes of one stream a deadline of
+// streamWriteTimeout past the time a client reading at streamMinClientRate
+// needs for everything written so far. A fixed deadline per write cut slow
+// clients off in the middle of a multi-megabyte image event, and the timeout
+// looked like a client disconnect. The budget carries over between writes
+// because the kernel can still hold megabytes of earlier writes and wakes a
+// blocked writer only after a large part of them drains. A client that stops
+// reading is still cut off once the budget runs out. Callers serialize writes.
+type StreamWriteBudget struct {
+	drainBy time.Time
+}
+
+// Deadline returns the write deadline for n more bytes written at now.
+func (b *StreamWriteBudget) Deadline(now time.Time, n int) time.Time {
+	if b.drainBy.Before(now) {
+		b.drainBy = now
 	}
-	_ = http.NewResponseController(c.Writer).SetWriteDeadline(time.Now().Add(streamWriteTimeout))
+	b.drainBy = b.drainBy.Add(time.Duration(n) * time.Second / streamMinClientRate)
+	return b.drainBy.Add(streamWriteTimeout)
+}
+
+// streamResponseWriter sets the connection write deadline from its budget
+// before every write. Writers that don't support deadlines (e.g. httptest
+// recorders) are silently ignored.
+type streamResponseWriter struct {
+	gin.ResponseWriter
+	budget StreamWriteBudget
+}
+
+func (w *streamResponseWriter) Write(p []byte) (int, error) {
+	_ = http.NewResponseController(w.ResponseWriter).SetWriteDeadline(w.budget.Deadline(time.Now(), len(p)))
+	return w.ResponseWriter.Write(p)
+}
+
+func (w *streamResponseWriter) WriteString(s string) (int, error) {
+	_ = http.NewResponseController(w.ResponseWriter).SetWriteDeadline(w.budget.Deadline(time.Now(), len(s)))
+	return w.ResponseWriter.WriteString(s)
+}
+
+// Unwrap lets http.ResponseController reach the connection.
+func (w *streamResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon.RelayInfo, dataHandler func(data string, sr *StreamResult)) {
@@ -84,6 +122,15 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 		return
 	}
 	info.SnapshotStreamDisconnectSettings()
+
+	// Finish the request keepalive before changing headers. The scanner owns
+	// subsequent ping and data writes through its shared write mutex.
+	if writer, ok := c.Writer.(*streamKeepAliveWriter); ok {
+		writer.stop()
+		c.Writer = writer.ResponseWriter
+	}
+
+	// 无条件新建 StreamStatus
 	info.StreamStatus = relaycommon.NewStreamStatus()
 	lifecycle := info.StreamLifecycle
 	if lifecycle == nil {
@@ -91,6 +138,10 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 		info.StreamLifecycle = lifecycle
 	}
 	InstallStreamWriter(c, lifecycle)
+	writer := c.Writer.(*streamWriter)
+	// Cancellation must also release readers whose body is not owned by the
+	// HTTP transport, without abandoning drain mode before its deadline.
+	stopBodyClose := context.AfterFunc(lifecycle.Context, func() { _ = resp.Body.Close() })
 
 	// Only this reader runs concurrently. It never touches Gin, adaptor state,
 	// or stream status. EOF travels through the same FIFO as the final usage.
@@ -129,6 +180,7 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			info.StreamStatus.MarkClientGone(err)
 		}
 		stopReader()
+		stopBodyClose()
 		lifecycle.Close()
 		_ = resp.Body.Close()
 		idle.Stop()
@@ -217,7 +269,6 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonTimeout, nil)
 				return
 			case <-pingC:
-				ExtendWriteDeadline(c)
 				if err := PingData(c); err != nil {
 					lifecycle.Disconnect(err)
 				}
@@ -258,14 +309,13 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 		if payload == "" {
 			continue
 		}
-		if strings.HasPrefix(payload, "[DONE]") {
+		if payload == "[DONE]" {
 			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
 			return
 		}
 		info.SetFirstResponseTime()
 		info.ReceivedResponseCount++
 		sr.reset()
-		ExtendWriteDeadline(c)
 		dataHandler(payload, sr)
 		if err := lifecycle.ClientError(); err != nil {
 			info.StreamStatus.MarkClientGone(err)
@@ -277,6 +327,9 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 			case "response.completed", "response.done", "response.failed", "response.incomplete", "response.cancelled", "response.canceled", "message_stop", "message_end":
 				sr.Done()
 			}
+		}
+		if sr.done && writer.lastFlushSucceeded {
+			info.StreamStatus.MarkTerminalDelivered()
 		}
 		if sr.IsStopped() {
 			return
