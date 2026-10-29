@@ -1,6 +1,8 @@
 package common
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -52,12 +54,13 @@ type StreamStatus struct {
 	Errors     []StreamErrorEntry
 	ErrorCount int
 
-	response         ResponseOutcome
-	errorCode        string
-	errorType        string
-	errorStatus      int
-	incompleteReason string
-	expectsTerminal  bool
+	response          ResponseOutcome
+	errorCode         string
+	errorType         string
+	errorStatus       int
+	incompleteReason  string
+	expectsTerminal   bool
+	terminalDelivered bool
 }
 
 // StreamOutcome holds classification facts only; upstream messages never
@@ -120,6 +123,9 @@ func (s *StreamStatus) MarkClientGone(err error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.terminalDelivered && errors.Is(err, context.Canceled) {
+		return
+	}
 	if s.EndReason != StreamEndReasonNone && s.EndReason != StreamEndReasonClientGone && s.DrainEndReason == StreamEndReasonNone {
 		s.DrainEndReason = s.EndReason
 	}
@@ -127,6 +133,21 @@ func (s *StreamStatus) MarkClientGone(err error) {
 	s.ClientGone = true
 	s.EndReason = StreamEndReasonClientGone
 	s.EndError = err
+}
+
+// MarkTerminalDelivered distinguishes a successfully flushed completion from
+// cancellation racing with that flush. Actual write failures still win later.
+func (s *StreamStatus) MarkTerminalDelivered() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.response != ResponseOutcomeCompleted || s.ErrorCount > 0 {
+		return
+	}
+	s.terminalDelivered = true
+	if s.EndReason == StreamEndReasonClientGone && errors.Is(s.EndError, context.Canceled) {
+		s.EndReason, s.EndError = StreamEndReasonDone, nil
+		s.ClientGone, s.DrainEndReason = false, StreamEndReasonNone
+	}
 }
 
 // RequireTerminal declares that the protocol always ends with an explicit

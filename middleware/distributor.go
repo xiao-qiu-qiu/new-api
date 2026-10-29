@@ -31,6 +31,35 @@ type ModelRequest struct {
 	Group string `json:"group,omitempty"`
 }
 
+// appendRequestServiceTierFilter is shared by endpoint ownership selection and
+// final distribution so neither can choose a channel without tier capability.
+func appendRequestServiceTierFilter(c *gin.Context, modelName string) error {
+	path := c.Request.URL.Path
+	if !strings.HasSuffix(path, "/chat/completions") && !strings.HasSuffix(path, "/responses") && !strings.HasSuffix(path, "/responses/compact") {
+		return nil
+	}
+	storage, err := common.GetBodyStorage(c)
+	if err != nil {
+		return err
+	}
+	body, err := storage.Bytes()
+	if err != nil {
+		return err
+	}
+	var request struct {
+		ServiceTier common.RawMessage `json:"service_tier"`
+	}
+	if common.Unmarshal(body, &request) == nil {
+		var tier string
+		if common.Unmarshal(request.ServiceTier, &tier) != nil {
+			// Leave unknown values to the upstream's validation.
+			tier = string(request.ServiceTier)
+		}
+		service.SetRequestServiceTierFilter(c, modelName, tier)
+	}
+	return nil
+}
+
 func Distribute() func(c *gin.Context) {
 	return func(c *gin.Context) {
 		var channel *model.Channel
@@ -50,29 +79,9 @@ func Distribute() func(c *gin.Context) {
 			abortWithOpenAiMessage(c, invalidRequestStatus(err), i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
 			return
 		}
-		if strings.HasSuffix(c.Request.URL.Path, "/chat/completions") || strings.HasSuffix(c.Request.URL.Path, "/responses") || strings.HasSuffix(c.Request.URL.Path, "/responses/compact") {
-			storage, bodyErr := common.GetBodyStorage(c)
-			if bodyErr != nil {
-				abortWithOpenAiMessage(c, invalidRequestStatus(bodyErr), i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": bodyErr.Error()}))
-				return
-			}
-			body, bodyErr := storage.Bytes()
-			if bodyErr != nil {
-				abortWithOpenAiMessage(c, invalidRequestStatus(bodyErr), i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": bodyErr.Error()}))
-				return
-			}
-			var request struct {
-				ServiceTier common.RawMessage `json:"service_tier"`
-			}
-			if common.Unmarshal(body, &request) == nil {
-				var tier string
-				if common.Unmarshal(request.ServiceTier, &tier) != nil {
-					// Preserve unknown or non-string values for the upstream's
-					// existing validation rather than inventing a routing tier.
-					tier = string(request.ServiceTier)
-				}
-				service.SetRequestServiceTierFilter(c, modelRequest.Model, tier)
-			}
+		if err := appendRequestServiceTierFilter(c, modelRequest.Model); err != nil {
+			abortWithOpenAiMessage(c, invalidRequestStatus(err), i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
+			return
 		}
 		_, pinned, _ := constraints.ResolvedPin()
 		if !pinned {
@@ -125,13 +134,22 @@ func Distribute() func(c *gin.Context) {
 			service.MarkChannelProbeRequestStart(c)
 			usingGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
 			var selectErr *service.ChannelSelectError
-			channel, _, selectErr = service.SelectChannelForRequest(c, modelRequest.Model, &service.RetryParam{
-				Ctx:         c,
-				ModelName:   modelRequest.Model,
-				TokenGroup:  usingGroup,
-				RequestPath: c.Request.URL.Path,
-				Retry:       common.GetPointer(0),
-			})
+			if value, exists := c.Get(contextKeyTaskPluginEndpointSelection); exists && !pinned {
+				if selected, ok := value.(taskPluginEndpointSelection); ok && selected.Model == modelRequest.Model && selected.Channel != nil && selected.Channel.Status == common.ChannelStatusEnabled {
+					if matches, _ := model.ChannelSatisfiesFilters(selected.Channel, modelRequest.Model, constraints.Filters); matches {
+						channel = selected.Channel
+					}
+				}
+			}
+			if channel == nil {
+				channel, _, selectErr = service.SelectChannelForRequest(c, modelRequest.Model, &service.RetryParam{
+					Ctx:         c,
+					ModelName:   modelRequest.Model,
+					TokenGroup:  usingGroup,
+					RequestPath: c.Request.URL.Path,
+					Retry:       common.GetPointer(0),
+				})
+			}
 			if selectErr != nil {
 				service.RecordGroupProbeSelectionFailure(c, usingGroup, modelRequest.Model)
 				if selectErr.FilterKind == taskdto.FilterTaskPluginIdentity {
@@ -483,6 +501,13 @@ func getModelRequest(c *gin.Context) (*ModelRequest, bool, error) {
 		if modelRequest.Model == "" {
 			modelRequest.Model = c.Param("model")
 		}
+	}
+	// The routing name is also the billing name, so a model named in the body
+	// must not replace it: DeepSeek ignores that field.
+	if strings.HasPrefix(c.Request.URL.Path, "/v1/tools/search") {
+		modelRequest.Model = constant.DeepSeekSearchModel
+	} else if strings.HasPrefix(c.Request.URL.Path, "/v1/tools/fetch") {
+		modelRequest.Model = constant.DeepSeekFetchModel
 	}
 	if strings.HasPrefix(c.Request.URL.Path, "/v1/images/generations") {
 		modelRequest.Model = common.GetStringIfEmpty(modelRequest.Model, "dall-e")

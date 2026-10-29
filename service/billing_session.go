@@ -12,7 +12,6 @@ import (
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
-	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -157,18 +156,21 @@ func (s *BillingSession) GetPreConsumedQuota() int {
 }
 
 func (s *BillingSession) Reserve(targetQuota int) error {
+	return s.reserve(targetQuota, false)
+}
+
+// ReserveBeforeSubmit 在发起上游请求前补扣，钱包余额必须覆盖差额。
+func (s *BillingSession) ReserveBeforeSubmit(targetQuota int) error {
+	return s.reserve(targetQuota, true)
+}
+
+func (s *BillingSession) reserve(targetQuota int, requireAvailableQuota bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	imageRequest := false
 	if s.relayInfo != nil {
-		_, imageRequest = s.relayInfo.Request.(*dto.ImageRequest)
-		imageRequest = imageRequest || s.relayInfo.ImageRequestCount > 0
-	}
-	requireAvailableQuota := imageRequest
-	if s.relayInfo != nil && s.relayInfo.TieredBillingSnapshot != nil {
-		snapshot := s.relayInfo.TieredBillingSnapshot
-		requireAvailableQuota = requireAvailableQuota || billingexpr.UsedVarsByHash(snapshot.ExprString, snapshot.ExprHash)["service_tier"]
+		_, imageRequest := s.relayInfo.Request.(*dto.ImageRequest)
+		requireAvailableQuota = requireAvailableQuota || imageRequest || s.relayInfo.ImageRequestCount > 0
 	}
 	if s.settled || s.refunded || s.trusted && !requireAvailableQuota || targetQuota <= s.preConsumedQuota {
 		return nil
@@ -263,18 +265,14 @@ func (s *BillingSession) reserveFunding(delta int, requireAvailableQuota bool) e
 	switch funding := s.funding.(type) {
 	case *WalletFunding:
 		if requireAvailableQuota {
-			// Image quantity and service tier are known before submission,
+			// Image quantity, task retry price and service tier are known before submission,
 			// including retries/overrides. Reserve without admitting wallet debt.
-			previouslyConsumed := funding.consumed
 			if err := funding.PreConsume(delta); err != nil {
 				if errors.Is(err, ErrInsufficientWalletQuota) {
 					return types.NewErrorWithStatusCode(err, types.ErrorCodeInsufficientUserQuota, http.StatusForbidden, types.ErrOptionWithSkipRetry(), types.ErrOptionWithNoRecordErrorLog())
 				}
 				return types.NewError(err, types.ErrorCodeUpdateDataError, types.ErrOptionWithSkipRetry())
 			}
-			// PreConsume records this reservation, while a billing session owns
-			// all prior attempts too. Retain their total for rollback and refund.
-			funding.consumed += previouslyConsumed
 			return nil
 		}
 		// 与结算补扣（SettleBilling 正差额 → WalletFunding.Settle）语义一致：

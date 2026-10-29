@@ -19,7 +19,8 @@ func InstallStreamWriter(c *gin.Context, lifecycle *relaycommon.StreamLifecycle)
 
 type streamWriter struct {
 	gin.ResponseWriter
-	lifecycle *relaycommon.StreamLifecycle
+	lifecycle          *relaycommon.StreamLifecycle
+	lastFlushSucceeded bool
 }
 
 func (w *streamWriter) disconnected() bool {
@@ -28,6 +29,7 @@ func (w *streamWriter) disconnected() bool {
 }
 
 func (w *streamWriter) Write(data []byte) (int, error) {
+	w.lastFlushSucceeded = false
 	if w.disconnected() {
 		return len(data), nil
 	}
@@ -60,6 +62,7 @@ func (w *streamWriter) WriteHeaderNow() {
 func (w *streamWriter) Flush() { _ = w.FlushError() }
 
 func (w *streamWriter) FlushError() error {
+	w.lastFlushSucceeded = false
 	if w.disconnected() {
 		return nil
 	}
@@ -71,6 +74,7 @@ func (w *streamWriter) FlushError() error {
 		target = unwrapper.Unwrap()
 	}
 	err := http.NewResponseController(target).Flush()
+	w.lastFlushSucceeded = err == nil
 	if err != nil {
 		w.lifecycle.Disconnect(err)
 		if w.lifecycle.Drain {

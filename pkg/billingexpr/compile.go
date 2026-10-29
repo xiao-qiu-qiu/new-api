@@ -125,7 +125,6 @@ var (
 
 // compileEnvPrototypeV1 is the v1 type-checking prototype used at compile time.
 var compileEnvPrototypeV1 = map[string]any{
-	"service_tier": "default",
 	"image_count":  float64(1),
 	"p":            float64(0),
 	"c":            float64(0),
@@ -133,6 +132,7 @@ var compileEnvPrototypeV1 = map[string]any{
 	"cr":           float64(0),
 	"cc":           float64(0),
 	"cc1h":         float64(0),
+	"cc12h":        float64(0),
 	"img":          float64(0),
 	"img_cr":       float64(0),
 	"img_o":        float64(0),
@@ -156,6 +156,7 @@ var compileEnvPrototypeV1 = map[string]any{
 	"abs":          math.Abs,
 	"ceil":         math.Ceil,
 	"floor":        math.Floor,
+	"service_tier": "default",
 }
 
 func getCompileEnv(version int) map[string]any {
