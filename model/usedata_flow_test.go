@@ -1,11 +1,99 @@
 package model
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
+
+// This is the quota_data schema before cache-token counters were introduced.
+type quotaDataBeforeCacheTokens struct {
+	Id        int
+	UserID    int    `gorm:"index"`
+	Username  string `gorm:"index:idx_qdt_model_user_name,priority:2;size:64;default:''"`
+	ModelName string `gorm:"index:idx_qdt_model_user_name,priority:1;size:64;default:''"`
+	CreatedAt int64  `gorm:"bigint;index:idx_qdt_created_at,priority:2"`
+	UseGroup  string `gorm:"index;size:64;default:''"`
+	TokenID   int    `gorm:"index;default:0"`
+	ChannelID int    `gorm:"index;default:0"`
+	NodeName  string `gorm:"index;size:64;default:''"`
+	TokenUsed int    `gorm:"default:0"`
+	Count     int    `gorm:"default:0"`
+	Quota     int    `gorm:"default:0"`
+}
+
+func TestQuotaDataCacheTokensDatabaseMatrix(t *testing.T) {
+	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(dialect, func(t *testing.T) {
+			for _, upgrade := range []bool{false, true} {
+				t.Run(fmt.Sprintf("upgrade=%v", upgrade), func(t *testing.T) {
+					db := openChannelSettingsTestDatabase(t, dialect, "")
+					previousDB, previousType := DB, common.MainDatabaseType()
+					DB = db
+					common.SetMainDatabaseType(common.DatabaseType(dialect))
+					initCol()
+					defer func() {
+						DB = previousDB
+						common.SetMainDatabaseType(previousType)
+						initCol()
+					}()
+					t.Cleanup(func() { assert.NoError(t, db.Migrator().DropTable(&QuotaData{})) })
+					seed := quotaDataBeforeCacheTokens{
+						Id: 1, UserID: 7, Username: "cache-user", ModelName: "gpt-test",
+						CreatedAt: 3600, UseGroup: "default", TokenID: 11, ChannelID: 3,
+						NodeName: "test-node", Count: 2, Quota: 100, TokenUsed: 200,
+					}
+					var originalIndexes []gorm.Index
+					if upgrade {
+						require.NoError(t, db.Table("quota_data").AutoMigrate(&quotaDataBeforeCacheTokens{}))
+						require.NoError(t, db.Table("quota_data").Create(&seed).Error)
+						var err error
+						originalIndexes, err = db.Migrator().GetIndexes(&QuotaData{})
+						require.NoError(t, err)
+					}
+					for range 2 {
+						require.NoError(t, db.AutoMigrate(&QuotaData{}))
+					}
+					if !upgrade {
+						require.NoError(t, db.Table("quota_data").Create(&seed).Error)
+					}
+					var stored QuotaData
+					require.NoError(t, db.First(&stored, seed.Id).Error)
+					assert.Equal(t, seed.Count, stored.Count)
+					assert.Equal(t, seed.Quota, stored.Quota)
+					assert.Equal(t, seed.TokenUsed, stored.TokenUsed)
+					assert.Zero(t, stored.CacheReadTokens)
+					assert.Zero(t, stored.CacheCreationTokens)
+					for _, index := range originalIndexes {
+						assert.True(t, db.Migrator().HasIndex(&QuotaData{}, index.Name()), "preserve index %s", index.Name())
+					}
+
+					increaseQuotaData(&QuotaData{
+						UserID: seed.UserID, Username: seed.Username, ModelName: seed.ModelName,
+						CreatedAt: seed.CreatedAt, UseGroup: seed.UseGroup, TokenID: seed.TokenID,
+						ChannelID: seed.ChannelID, NodeName: seed.NodeName, Count: 1, Quota: 20,
+						TokenUsed: 50, CacheReadTokens: 30, CacheCreationTokens: 10,
+					})
+					require.NoError(t, db.First(&stored, seed.Id).Error)
+					assert.Equal(t, 3, stored.Count)
+					assert.Equal(t, 120, stored.Quota)
+					assert.Equal(t, 250, stored.TokenUsed)
+					assert.EqualValues(t, 30, stored.CacheReadTokens)
+					assert.EqualValues(t, 10, stored.CacheCreationTokens)
+					rows, err := GetQuotaDataByUserId(seed.UserID, 0, 7200)
+					require.NoError(t, err)
+					require.Len(t, rows, 1)
+					assert.EqualValues(t, 30, rows[0].CacheReadTokens)
+					assert.EqualValues(t, 10, rows[0].CacheCreationTokens)
+				})
+			}
+		})
+	}
+}
 
 func seedFlowQuotaData(t *testing.T, quotaData QuotaData) {
 	t.Helper()
