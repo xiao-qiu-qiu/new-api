@@ -16,7 +16,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import type { PlaygroundConfig, ParameterEnabled } from './types'
+import type {
+  PlaygroundConfig,
+  PlaygroundReasoningEffort,
+  ParameterEnabled,
+} from './types'
 
 // Message constants
 export const MESSAGE_ROLES = {
@@ -43,11 +47,23 @@ export const API_ENDPOINTS = {
 // only selected when the backend confirms it is available for the user.
 export const DEFAULT_GROUP = 'default' as const
 
+export const REASONING_EFFORT_VALUES = [
+  '',
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+] as const satisfies readonly PlaygroundReasoningEffort[]
+
 // Default configuration
 export const DEFAULT_CONFIG: PlaygroundConfig = {
   model: 'gpt-4o',
   group: DEFAULT_GROUP,
   service_tier: 'default',
+  reasoning_effort: '',
   temperature: 0.7,
   top_p: 1,
   max_tokens: 4096,

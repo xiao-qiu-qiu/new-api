@@ -74,6 +74,7 @@ export interface ChatCompletionRequest {
   model: string
   group?: string
   service_tier?: PlaygroundServiceTier
+  reasoning_effort?: Exclude<PlaygroundReasoningEffort, ''>
   messages: ChatCompletionMessage[]
   stream: boolean
   temperature?: number
@@ -124,6 +125,16 @@ export interface ChatCompletionResponse {
 }
 
 // Configuration types
+export type PlaygroundReasoningEffort =
+  | ''
+  | 'none'
+  | 'minimal'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max'
+
 export type PlaygroundServiceTier =
   | 'default'
   | 'priority'
@@ -134,6 +145,7 @@ export interface PlaygroundConfig {
   model: string
   group: string
   service_tier: PlaygroundServiceTier
+  reasoning_effort: PlaygroundReasoningEffort
   temperature: number
   top_p: number
   max_tokens: number

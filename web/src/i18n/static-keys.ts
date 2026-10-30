@@ -19,6 +19,13 @@ For commercial licensing, please contact support@quantumnous.com
 // Static translation keys that don't get picked up by the t('...') regex.
 // These cover dynamic labels (e.g. constants, configs) that are passed into t at runtime.
 export const STATIC_I18N_KEYS = [
+  // Playground reasoning effort options.
+  'Minimal',
+  'Low',
+  'Medium',
+  'High',
+  'Extra high',
+  'Maximum',
   // Video capability validation and API errors rendered through FormMessage.
   'Enter a whole number between 0 and 100.',
   'Use resolutions such as 480p, 720p or 1080p.',

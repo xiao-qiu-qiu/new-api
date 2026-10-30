@@ -24,7 +24,11 @@ import { useAuthStore } from '@/stores/auth-store'
 
 import { STORAGE_KEYS } from '../../../constants'
 import { usePlaygroundState } from '../../../hooks/use-playground-state'
-import type { Message, PlaygroundServiceTier } from '../../../types'
+import type {
+  Message,
+  PlaygroundReasoningEffort,
+  PlaygroundServiceTier,
+} from '../../../types'
 import { getInitialPlaygroundConfig } from '../../state/playground-state-utils'
 import {
   clearPlaygroundData,
@@ -139,7 +143,7 @@ test.each<PlaygroundServiceTier>(['default', 'priority', 'ultrafast', 'flex'])(
 )
 
 test.each(['plain', 'versioned'] as const)(
-  'loading an older %s config without a speed tier uses default and preserves other config',
+  'loading an older %s config uses default speed and automatic reasoning without losing other config',
   (format) => {
     useAuthStore.getState().auth.setUser({ id: 1, username: 'A', role: 1 })
     const config = { model: 'gpt-5', group: 'custom', temperature: 0.3 }
@@ -152,6 +156,7 @@ test.each(['plain', 'versioned'] as const)(
     expect(getInitialPlaygroundConfig()).toMatchObject({
       ...config,
       service_tier: 'default',
+      reasoning_effort: '',
     })
   }
 )
@@ -174,6 +179,47 @@ test.each(['unsupported', 'fast', null, 2, { tier: 'ultrafast' }])(
     expect(getInitialPlaygroundConfig()).toMatchObject({
       ...config,
       service_tier: 'default',
+    })
+  }
+)
+
+test.each<PlaygroundReasoningEffort>(['', 'none', 'high'])(
+  'saving reasoning effort %j restores the selection with the other config',
+  (reasoningEffort) => {
+    useAuthStore.getState().auth.setUser({ id: 1, username: 'A', role: 1 })
+    const config = {
+      model: 'gpt-5',
+      group: 'custom',
+      temperature: 0.3,
+      reasoning_effort: reasoningEffort,
+    }
+
+    saveConfig(config)
+
+    expect(loadConfig()).toEqual(config)
+    expect(getInitialPlaygroundConfig()).toMatchObject(config)
+  }
+)
+
+test.each(['unsupported', null, 2])(
+  'loading invalid stored reasoning effort %j uses automatic reasoning and preserves other config',
+  (reasoningEffort) => {
+    useAuthStore.getState().auth.setUser({ id: 1, username: 'A', role: 1 })
+    const config = {
+      model: 'gpt-5',
+      group: 'custom',
+      temperature: 0.3,
+      reasoning_effort: reasoningEffort,
+    }
+    localStorage.setItem(
+      `${STORAGE_KEYS.CONFIG}:1`,
+      JSON.stringify({ version: 1, data: config })
+    )
+
+    expect(loadConfig()).toEqual({ ...config, reasoning_effort: '' })
+    expect(getInitialPlaygroundConfig()).toMatchObject({
+      ...config,
+      reasoning_effort: '',
     })
   }
 )

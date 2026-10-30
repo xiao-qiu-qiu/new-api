@@ -22,6 +22,7 @@ import { useTranslation } from 'react-i18next'
 import { PromptInputButton } from '@/components/ai-elements/prompt-input'
 import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
+import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
 import {
   Popover,
   PopoverContent,
@@ -51,7 +52,25 @@ import {
   PLAYGROUND_PARAMETER_PANEL_SCROLL_CLASS,
   type PlaygroundParameterKey,
 } from '../../lib/parameters/playground-parameters'
-import type { ParameterEnabled, PlaygroundConfig } from '../../types'
+import type {
+  ParameterEnabled,
+  PlaygroundConfig,
+  PlaygroundReasoningEffort,
+} from '../../types'
+
+const REASONING_EFFORT_OPTIONS = [
+  { value: '', labelKey: 'Auto' },
+  { value: 'none', labelKey: 'None' },
+  { value: 'minimal', labelKey: 'Minimal' },
+  { value: 'low', labelKey: 'Low' },
+  { value: 'medium', labelKey: 'Medium' },
+  { value: 'high', labelKey: 'High' },
+  { value: 'xhigh', labelKey: 'Extra high' },
+  { value: 'max', labelKey: 'Maximum' },
+] as const satisfies readonly {
+  value: PlaygroundReasoningEffort
+  labelKey: string
+}[]
 
 type PlaygroundParameterPanelProps = {
   config: PlaygroundConfig
@@ -101,6 +120,41 @@ function PlaygroundParameterContent({
         compact ? 'px-4 pb-4' : 'p-1'
       )}
     >
+      <div className='border-border/70 bg-background/60 grid gap-2 rounded-lg border p-3'>
+        <label
+          className='text-sm leading-5 font-medium'
+          htmlFor='playground-reasoning-effort'
+        >
+          {t('Reasoning Effort')}
+        </label>
+        <p
+          className='text-muted-foreground text-xs leading-4'
+          id='playground-reasoning-effort-description'
+        >
+          {t(
+            'Auto uses the model default. Available levels depend on the model.'
+          )}
+        </p>
+        <NativeSelect
+          aria-describedby='playground-reasoning-effort-description'
+          className='w-full'
+          disabled={disabled}
+          id='playground-reasoning-effort'
+          onChange={(event) => {
+            const option = REASONING_EFFORT_OPTIONS.find(
+              (item) => item.value === event.target.value
+            )
+            if (option) onConfigChange('reasoning_effort', option.value)
+          }}
+          value={config.reasoning_effort}
+        >
+          {REASONING_EFFORT_OPTIONS.map((option) => (
+            <NativeSelectOption key={option.value} value={option.value}>
+              {t(option.labelKey)}
+            </NativeSelectOption>
+          ))}
+        </NativeSelect>
+      </div>
       {PLAYGROUND_PARAMETER_CONTROLS.map((control) => {
         const enabled = parameterEnabled[control.key]
         const value = config[control.key]
@@ -198,9 +252,10 @@ function PlaygroundParameterContent({
 export function PlaygroundParameterPanel(props: PlaygroundParameterPanelProps) {
   const { t } = useTranslation()
   const isMobile = useIsMobile()
-  const activeCount = PLAYGROUND_PARAMETER_CONTROLS.filter(
-    (control) => props.parameterEnabled[control.key]
-  ).length
+  const activeCount =
+    PLAYGROUND_PARAMETER_CONTROLS.filter(
+      (control) => props.parameterEnabled[control.key]
+    ).length + (props.config.reasoning_effort ? 1 : 0)
 
   const trigger = (
     <PromptInputButton

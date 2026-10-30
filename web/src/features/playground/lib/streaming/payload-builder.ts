@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { supportsOpenAITierPolicy } from '@/lib/openai-service-tier'
 
+import { REASONING_EFFORT_VALUES } from '../../constants'
 import type {
   ChatCompletionRequest,
   Message,
@@ -48,6 +49,13 @@ export function buildChatCompletionPayload(
 
   if (supportsOpenAITierPolicy(config.model)) {
     payload.service_tier = config.service_tier
+  }
+
+  if (
+    config.reasoning_effort &&
+    REASONING_EFFORT_VALUES.includes(config.reasoning_effort)
+  ) {
+    payload.reasoning_effort = config.reasoning_effort
   }
 
   if (parameterEnabled.temperature) {

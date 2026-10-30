@@ -19,7 +19,11 @@ For commercial licensing, please contact support@quantumnous.com
 import { expect, test } from 'vitest'
 
 import { DEFAULT_CONFIG, DEFAULT_PARAMETER_ENABLED } from '../../../constants'
-import type { Message, PlaygroundServiceTier } from '../../../types'
+import type {
+  Message,
+  PlaygroundReasoningEffort,
+  PlaygroundServiceTier,
+} from '../../../types'
 import { buildChatCompletionPayload } from '../payload-builder'
 
 const messages: Message[] = [
@@ -29,6 +33,50 @@ const messages: Message[] = [
     versions: [{ id: 'question-v1', content: 'Hello' }],
   },
 ]
+
+test('default automatic reasoning omits reasoning_effort from the request', () => {
+  const payload = buildChatCompletionPayload(
+    messages,
+    DEFAULT_CONFIG,
+    DEFAULT_PARAMETER_ENABLED
+  )
+
+  expect(payload).not.toHaveProperty('reasoning_effort')
+})
+
+test.each<Exclude<PlaygroundReasoningEffort, ''>>([
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+])('selected reasoning effort %s is sent in the request', (reasoningEffort) => {
+  const payload = buildChatCompletionPayload(
+    messages,
+    { ...DEFAULT_CONFIG, reasoning_effort: reasoningEffort },
+    DEFAULT_PARAMETER_ENABLED
+  )
+
+  expect(payload.reasoning_effort).toBe(reasoningEffort)
+})
+
+test.each(['unsupported', null, 2])(
+  'invalid reasoning effort %j is omitted from the request',
+  (reasoningEffort) => {
+    const payload = buildChatCompletionPayload(
+      messages,
+      {
+        ...DEFAULT_CONFIG,
+        reasoning_effort: reasoningEffort as PlaygroundReasoningEffort,
+      },
+      DEFAULT_PARAMETER_ENABLED
+    )
+
+    expect(payload).not.toHaveProperty('reasoning_effort')
+  }
+)
 
 test.each<{ serviceTier: PlaygroundServiceTier; stream: boolean }>([
   { serviceTier: 'default', stream: true },
