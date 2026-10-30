@@ -197,7 +197,7 @@ export function UserLeaderboard(props: {
               />
             </div>
           )}
-          {!adminMode && user && preference.data && (
+          {user && preference.data && (
             <Button
               variant='ghost'
               size='sm'
@@ -212,15 +212,9 @@ export function UserLeaderboard(props: {
                 : t('Set nickname')}
             </Button>
           )}
-          {!adminMode && (
-            <Button
-              variant='ghost'
-              size='sm'
-              onClick={() => setRulesOpen(true)}
-            >
-              {t('Ranking rules')}
-            </Button>
-          )}
+          <Button variant='ghost' size='sm' onClick={() => setRulesOpen(true)}>
+            {t('Ranking rules')}
+          </Button>
           {!user ? (
             <Button
               size='sm'
@@ -230,23 +224,21 @@ export function UserLeaderboard(props: {
               <ArrowUpRight className='size-4' aria-hidden />
             </Button>
           ) : (
-            !adminMode && (
-              <Button
-                variant='outline'
-                size='sm'
-                disabled={preference.isLoading || participation.isPending}
-                onClick={() => {
-                  if (preference.isError) void preference.refetch()
-                  else {
-                    participation.reset()
-                    setSettingsOpen(true)
-                  }
-                }}
-              >
-                <Settings2 className='size-3.5' aria-hidden />
-                {preference.isError ? t('Retry') : t('Ranking preferences')}
-              </Button>
-            )
+            <Button
+              variant='outline'
+              size='sm'
+              disabled={preference.isLoading || participation.isPending}
+              onClick={() => {
+                if (preference.isError) void preference.refetch()
+                else {
+                  participation.reset()
+                  setSettingsOpen(true)
+                }
+              }}
+            >
+              <Settings2 className='size-3.5' aria-hidden />
+              {preference.isError ? t('Retry') : t('Ranking preferences')}
+            </Button>
           )}
         </div>
       </div>

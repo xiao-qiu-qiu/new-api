@@ -83,7 +83,11 @@ export function RankingMetricSwitch(props: RankingMetricSwitchProps) {
       <div
         ref={anchor}
         className='min-h-11 min-w-60'
-        style={{ visibility: floating ? 'hidden' : undefined }}
+        style={{
+          visibility: floating ? 'hidden' : undefined,
+          // Descendant transition-all can delay inherited visibility changes.
+          opacity: floating ? 0 : undefined,
+        }}
         aria-hidden={floating || undefined}
         inert={floating}
       >
