@@ -87,7 +87,7 @@ func performManageUserRequest(t *testing.T, body string) *httptest.ResponseRecor
 }
 
 // performVerifiedManageUserRequest drives ManageUser as the root operator from
-// a dashboard login session, carrying the step-up proof status or role changes need.
+// a dashboard login session, carrying a step-up proof when required.
 func performVerifiedManageUserRequest(t *testing.T, body string, identity service.AuthIdentity, proof string) *httptest.ResponseRecorder {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
@@ -140,8 +140,8 @@ func TestManageUserDisableAdvancesAuthVersionOnceAndRevokesSession(t *testing.T)
 		LastActiveAt: now, ExpiresAt: now + 3600,
 	}).Error)
 
-	identity, proof := manageUserProof(t, db, service.VerificationOperation{Scope: service.VerificationScopeAdminUserManage, Context: []byte(fmt.Sprintf(`{"user_id":%d,"action":"disable"}`, user.Id))})
-	recorder := performVerifiedManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"disable"}`, user.Id), identity, proof)
+	createQuotaTestOperator(t, db, common.RoleRootUser)
+	recorder := performManageUserRequest(t, fmt.Sprintf(`{"id":%d,"action":"disable"}`, user.Id))
 	assert.Equal(t, http.StatusOK, recorder.Code)
 	assert.Contains(t, recorder.Body.String(), `"success":true`)
 

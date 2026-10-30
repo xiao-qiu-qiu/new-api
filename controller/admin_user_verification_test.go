@@ -56,6 +56,7 @@ func TestAdminUserRiskOperationsRequireProofBeforeMutation(t *testing.T) {
 		body               func(target *model.User) string
 		params             func(target *model.User) gin.Params
 		handler            gin.HandlerFunc
+		targetRole         int
 		unchanged          func(t *testing.T, target *model.User)
 	}{
 		{
@@ -67,12 +68,13 @@ func TestAdminUserRiskOperationsRequireProofBeforeMutation(t *testing.T) {
 			},
 		},
 		{
-			name: "manage disable", method: http.MethodPost, path: "/api/user/manage", handler: ManageUser,
-			body: func(target *model.User) string { return fmt.Sprintf(`{"id":%d,"action":"disable"}`, target.Id) },
+			name: "manage demote", method: http.MethodPost, path: "/api/user/manage", handler: ManageUser,
+			targetRole: common.RoleAdminUser,
+			body:       func(target *model.User) string { return fmt.Sprintf(`{"id":%d,"action":"demote"}`, target.Id) },
 			unchanged: func(t *testing.T, target *model.User) {
 				stored, err := model.GetUserById(target.Id, false)
 				require.NoError(t, err)
-				assert.Equal(t, common.UserStatusEnabled, stored.Status)
+				assert.Equal(t, common.RoleAdminUser, stored.Role)
 			},
 		},
 		{
@@ -165,6 +167,9 @@ func TestAdminUserRiskOperationsRequireProofBeforeMutation(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, identity, target := setupAdminUserTest(t)
+			if test.targetRole != 0 {
+				require.NoError(t, model.DB.Model(target).Update("role", test.targetRole).Error)
+			}
 			require.NoError(t, model.DB.Create(&model.PasskeyCredential{UserID: target.Id, CredentialID: "managed-passkey", PublicKey: "public-key"}).Error)
 			require.NoError(t, model.DB.Create(&model.TwoFA{UserId: target.Id, Secret: "JBSWY3DPEHPK3PXP", IsEnabled: true}).Error)
 			require.NoError(t, model.DB.Create(&model.UserOAuthBinding{UserId: target.Id, ProviderId: 7, ProviderUserId: "provider-user"}).Error)
@@ -185,6 +190,55 @@ func TestAdminUserRiskOperationsRequireProofBeforeMutation(t *testing.T) {
 			var flows int64
 			require.NoError(t, model.DB.Model(&model.AuthFlow{}).Count(&flows).Error)
 			assert.Zero(t, flows)
+		})
+	}
+}
+
+func TestAdminUserStatusChangesDoNotRequireProofAndRespectRoles(t *testing.T) {
+	for _, test := range []struct {
+		name, action             string
+		operatorRole, targetRole int
+		success                  bool
+	}{
+		{"disable common user", "disable", common.RoleAdminUser, common.RoleCommonUser, true},
+		{"enable common user", "enable", common.RoleAdminUser, common.RoleCommonUser, true},
+		{"cannot disable peer", "disable", common.RoleAdminUser, common.RoleAdminUser, false},
+		{"cannot enable peer", "enable", common.RoleAdminUser, common.RoleAdminUser, false},
+		{"cannot disable higher role", "disable", common.RoleAdminUser, common.RoleRootUser, false},
+		{"cannot enable higher role", "enable", common.RoleAdminUser, common.RoleRootUser, false},
+		{"root cannot disable root", "disable", common.RoleRootUser, common.RoleRootUser, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			operator, identity, target := setupAdminUserTest(t)
+			require.NoError(t, model.DB.Model(operator).Update("role", test.operatorRole).Error)
+			require.NoError(t, model.PublishUserAuthCache(operator.Id))
+			before, after := common.UserStatusEnabled, common.UserStatusDisabled
+			if test.action == "enable" {
+				before, after = after, before
+			}
+			require.NoError(t, model.DB.Model(target).Updates(map[string]any{"role": test.targetRole, "status": before}).Error)
+			body := fmt.Sprintf(`{"id":%d,"action":%q}`, target.Id, test.action)
+			response := adminUserRequest(http.MethodPost, "/api/user/manage", body, "", identity, test.operatorRole, nil, ManageUser)
+			var result securityEnrollmentResponse
+			require.NoError(t, common.Unmarshal(response.Body.Bytes(), &result))
+			assert.Equal(t, http.StatusOK, response.Code)
+			require.Equal(t, test.success, result.Success, response.Body.String())
+			assert.Empty(t, result.Code)
+			stored, err := model.GetUserById(target.Id, false)
+			require.NoError(t, err)
+			assert.Equal(t, test.targetRole, stored.Role)
+			if !test.success {
+				assert.Equal(t, before, stored.Status)
+				return
+			}
+			assert.Equal(t, after, stored.Status)
+			var audit model.AuditLog
+			require.NoError(t, model.LOG_DB.Where("action = ?", "user.manage").Last(&audit).Error)
+			require.NotNil(t, audit.Other.Op)
+			assert.NotContains(t, audit.Other.Op.Params, "verification_method")
+			action, err := common.Marshal(audit.Other.Op.Params["action"])
+			require.NoError(t, err)
+			assert.JSONEq(t, fmt.Sprintf(`%q`, test.action), string(action))
 		})
 	}
 }
@@ -241,39 +295,44 @@ func TestAdminUserProofIsBoundToTargetAndActionAndConsumedOnce(t *testing.T) {
 	_, identity, target := setupAdminUserTest(t)
 	other := &model.User{Username: "other-user", Password: target.Password, Role: common.RoleCommonUser, Status: common.UserStatusEnabled, Group: "default", AuthVersion: 1, AffCode: "other-aff"}
 	require.NoError(t, model.DB.Create(other).Error)
-	disableTarget := service.VerificationOperation{Scope: service.VerificationScopeAdminUserManage, Context: []byte(fmt.Sprintf(`{"user_id":%d,"action":"disable"}`, target.Id))}
-	proof := issueSecurityEnrollmentProof(t, identity, disableTarget, service.VerificationMethodPassword)
+	promoteTarget := service.VerificationOperation{Scope: service.VerificationScopeAdminUserManage, Context: []byte(fmt.Sprintf(`{"user_id":%d,"action":"promote"}`, target.Id))}
+	proof := issueSecurityEnrollmentProof(t, identity, promoteTarget, service.VerificationMethodPassword)
 
 	for _, test := range []struct {
 		name, body, code string
 		params           gin.Params
 		handler          gin.HandlerFunc
+		targetRole       int
 	}{
-		{"different action", fmt.Sprintf(`{"id":%d,"action":"enable"}`, target.Id), "SECURITY_PROOF_CONTEXT_MISMATCH", nil, ManageUser},
-		{"different user", fmt.Sprintf(`{"id":%d,"action":"disable"}`, other.Id), "SECURITY_PROOF_CONTEXT_MISMATCH", nil, ManageUser},
-		{"different scope", "", "SECURITY_PROOF_SCOPE_MISMATCH", gin.Params{{Key: "id", Value: fmt.Sprint(target.Id)}}, DeleteUser},
+		{"different action", fmt.Sprintf(`{"id":%d,"action":"demote"}`, target.Id), "SECURITY_PROOF_CONTEXT_MISMATCH", nil, ManageUser, common.RoleAdminUser},
+		{"different user", fmt.Sprintf(`{"id":%d,"action":"promote"}`, other.Id), "SECURITY_PROOF_CONTEXT_MISMATCH", nil, ManageUser, common.RoleCommonUser},
+		{"different scope", "", "SECURITY_PROOF_SCOPE_MISMATCH", gin.Params{{Key: "id", Value: fmt.Sprint(target.Id)}}, DeleteUser, common.RoleCommonUser},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			require.NoError(t, model.DB.Model(target).Update("role", test.targetRole).Error)
 			response := adminUserRequest(http.MethodPost, "/api/user/manage", test.body, proof, identity, common.RoleRootUser, test.params, test.handler)
 			var result securityEnrollmentResponse
 			require.NoError(t, common.Unmarshal(response.Body.Bytes(), &result))
 			assert.Equal(t, http.StatusForbidden, response.Code)
 			assert.Equal(t, test.code, result.Code)
+			stored, err := model.GetUserById(target.Id, false)
+			require.NoError(t, err)
+			assert.Equal(t, test.targetRole, stored.Role)
 		})
 	}
 	for _, id := range []int{target.Id, other.Id} {
 		stored, err := model.GetUserById(id, false)
 		require.NoError(t, err)
-		assert.Equal(t, common.UserStatusEnabled, stored.Status)
+		assert.Equal(t, common.RoleCommonUser, stored.Role)
 	}
 
-	response := adminUserRequest(http.MethodPost, "/api/user/manage", fmt.Sprintf(`{"id":%d,"action":"disable"}`, target.Id), proof, identity, common.RoleRootUser, nil, ManageUser)
+	response := adminUserRequest(http.MethodPost, "/api/user/manage", fmt.Sprintf(`{"id":%d,"action":"promote"}`, target.Id), proof, identity, common.RoleRootUser, nil, ManageUser)
 	var result securityEnrollmentResponse
 	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &result))
 	require.True(t, result.Success, response.Body.String())
 	stored, err := model.GetUserById(target.Id, false)
 	require.NoError(t, err)
-	assert.Equal(t, common.UserStatusDisabled, stored.Status)
+	assert.Equal(t, common.RoleAdminUser, stored.Role)
 	var audit model.AuditLog
 	require.NoError(t, model.LOG_DB.Where("action = ?", "user.manage").Last(&audit).Error)
 	require.NotNil(t, audit.Other.Op)
@@ -287,10 +346,15 @@ func TestAdminUserProofIsBoundToTargetAndActionAndConsumedOnce(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(auditJSON), proof)
 
-	response = adminUserRequest(http.MethodPost, "/api/user/manage", fmt.Sprintf(`{"id":%d,"action":"disable"}`, target.Id), proof, identity, common.RoleRootUser, nil, ManageUser)
+	// Make promotion eligible again so replay reaches the proof-consumption check.
+	require.NoError(t, model.DB.Model(target).Update("role", common.RoleCommonUser).Error)
+	response = adminUserRequest(http.MethodPost, "/api/user/manage", fmt.Sprintf(`{"id":%d,"action":"promote"}`, target.Id), proof, identity, common.RoleRootUser, nil, ManageUser)
 	require.NoError(t, common.Unmarshal(response.Body.Bytes(), &result))
 	assert.Equal(t, http.StatusForbidden, response.Code)
 	assert.Equal(t, "SECURITY_PROOF_CONSUMED", result.Code)
+	stored, err = model.GetUserById(target.Id, false)
+	require.NoError(t, err)
+	assert.Equal(t, common.RoleCommonUser, stored.Role)
 }
 
 func TestAdminUserBindingProofDistinguishesBuiltInAndCustomBindings(t *testing.T) {

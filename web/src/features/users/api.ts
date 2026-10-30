@@ -146,13 +146,13 @@ export async function deleteUser(
 }
 
 /**
- * Manage user (promote, demote, enable, disable, delete); requires an
- * `admin.user.manage` proof (`admin.user.delete` for deletion)
+ * Manage user. Promote/demote require an `admin.user.manage` proof;
+ * deletion requires `admin.user.delete`. Enable/disable do not require a proof.
  */
 export async function manageUser(
   id: number,
   action: ManageUserAction,
-  proofToken: string
+  proofToken?: string
 ): Promise<ApiResponse<Partial<User>>> {
   const res = await api.post(
     '/api/user/manage',

@@ -159,42 +159,107 @@ it('cancelling verification leaves the user untouched and returns to the confirm
   expect(del).not.toHaveBeenCalled()
 })
 
-it('disabling a user from the row menu binds the proof to the user and action', async () => {
-  const proof = mockVerification('admin.user.manage', 'manage-proof')
-  const post = vi.spyOn(api, 'post').mockImplementation(async (url) => {
-    if (url === '/api/verify') return proof
-    if (url === '/api/user/manage') return { data: { success: true } }
-    throw new Error(`Unexpected POST ${url}`)
-  })
-  renderInProvider(
-    <DataTableRowActions row={{ original: target } as Row<User>} />
-  )
-  await userEvent.click(screen.getByRole('button', { name: 'Open menu' }))
-  await userEvent.click(
-    await screen.findByRole('menuitem', { name: 'Disable' })
-  )
-  expect(post).not.toHaveBeenCalledWith(
-    '/api/user/manage',
-    expect.anything(),
-    expect.anything()
-  )
-  await completeTwoFactorVerification()
-  await waitFor(() =>
-    expect(post).toHaveBeenCalledWith(
-      '/api/user/manage',
-      { id: 2, action: 'disable' },
-      expect.objectContaining({
-        headers: { 'X-Security-Proof': 'manage-proof' },
-        singleUseAuthorization: true,
-      })
+it.each([
+  { action: 'disable', label: 'Disable', status: 1 },
+  { action: 'enable', label: 'Enable', status: 2 },
+])(
+  '$action from the row menu sends the request without verification',
+  async ({ action, label, status }) => {
+    mockVerification('admin.user.manage', 'unused-proof')
+    const get = vi.mocked(api.get)
+    const post = vi
+      .spyOn(api, 'post')
+      .mockResolvedValue({ data: { success: true } })
+    renderInProvider(
+      <DataTableRowActions
+        row={{ original: { ...target, status } } as Row<User>}
+      />
     )
-  )
-  expect(post).toHaveBeenCalledWith(
-    '/api/verify',
-    expect.objectContaining({
-      scope: 'admin.user.manage',
-      context: { user_id: 2, action: 'disable' },
-    }),
-    expect.anything()
-  )
-})
+    await userEvent.click(screen.getByRole('button', { name: 'Open menu' }))
+    await userEvent.click(await screen.findByRole('menuitem', { name: label }))
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith(
+        '/api/user/manage',
+        { id: 2, action },
+        {}
+      )
+    )
+    expect(post).toHaveBeenCalledTimes(1)
+    expect(get).not.toHaveBeenCalledWith(
+      '/api/verify/methods',
+      expect.anything()
+    )
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  }
+)
+
+it.each([
+  { action: 'promote', label: 'Promote', role: 1 },
+  { action: 'demote', label: 'Demote', role: 10 },
+])(
+  '$action from the row menu binds the proof to the user and action',
+  async ({ action, label, role }) => {
+    const proof = mockVerification('admin.user.manage', 'manage-proof')
+    const post = vi.spyOn(api, 'post').mockImplementation(async (url) => {
+      if (url === '/api/verify') return proof
+      if (url === '/api/user/manage') return { data: { success: true } }
+      throw new Error(`Unexpected POST ${url}`)
+    })
+    renderInProvider(
+      <DataTableRowActions
+        row={{ original: { ...target, role } } as Row<User>}
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Open menu' }))
+    await userEvent.click(await screen.findByRole('menuitem', { name: label }))
+    await screen.findByLabelText('Authenticator code or backup code')
+    expect(post).not.toHaveBeenCalledWith(
+      '/api/user/manage',
+      expect.anything(),
+      expect.anything()
+    )
+    await completeTwoFactorVerification()
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledWith(
+        '/api/user/manage',
+        { id: 2, action },
+        expect.objectContaining({
+          headers: { 'X-Security-Proof': 'manage-proof' },
+          singleUseAuthorization: true,
+        })
+      )
+    )
+    expect(post).toHaveBeenCalledWith(
+      '/api/verify',
+      expect.objectContaining({
+        scope: 'admin.user.manage',
+        context: { user_id: 2, action },
+      }),
+      expect.anything()
+    )
+  }
+)
+
+it.each([
+  { action: 'promote', label: 'Promote', role: 1 },
+  { action: 'demote', label: 'Demote', role: 10 },
+])(
+  'cancelling $action verification does not change the user role',
+  async ({ label, role }) => {
+    mockVerification('admin.user.manage', 'unused-proof')
+    const post = vi.spyOn(api, 'post')
+    renderInProvider(
+      <DataTableRowActions
+        row={{ original: { ...target, role } } as Row<User>}
+      />
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Open menu' }))
+    await userEvent.click(await screen.findByRole('menuitem', { name: label }))
+    await screen.findByLabelText('Authenticator code or backup code')
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    )
+    expect(post).not.toHaveBeenCalled()
+  }
+)

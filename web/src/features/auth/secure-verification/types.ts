@@ -47,8 +47,8 @@ export type SecurityProofScope =
   | 'admin.user.2fa.disable'
   | 'admin.user.binding.clear'
 
-/** ManageUser actions that change a user's status or role and need step-up. */
-export type AdminUserManageAction = 'disable' | 'enable' | 'promote' | 'demote'
+/** ManageUser role changes that require step-up verification. */
+export type AdminUserManageAction = 'promote' | 'demote'
 
 export type VerificationOperation =
   | { scope: 'channel.key.read'; context: { channel_id: number } }

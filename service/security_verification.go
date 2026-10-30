@@ -48,9 +48,9 @@ const (
 	verificationScopeAdminUserPrefix       = "admin.user."
 )
 
-// adminUserManageActions are the ManageUser actions that change a user's
-// status or role. Quota adjustments are not gated and deletion has its own scope.
-var adminUserManageActions = []string{"disable", "enable", "promote", "demote"}
+// adminUserManageActions are the ManageUser role changes that require step-up
+// verification. Account status and quota changes are not gated; deletion has its own scope.
+var adminUserManageActions = []string{"promote", "demote"}
 
 var (
 	ErrVerificationFailed         = errors.New("Verification failed. Please try again.")

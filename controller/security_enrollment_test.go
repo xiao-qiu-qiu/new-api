@@ -76,7 +76,7 @@ func setupSecurityEnrollmentTest(t *testing.T) (*model.User, service.AuthIdentit
 	var version string
 	require.NoError(t, db.Raw(versionQuery).Scan(&version).Error)
 	t.Logf("database: %s %s", dialect, version)
-	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.TwoFA{}, &model.TwoFABackupCode{}, &model.PasskeyCredential{}, &model.AuthFlow{}, &model.UserOAuthBinding{}, &model.Option{}, &model.UserAccessToken{}))
+	require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.TwoFA{}, &model.TwoFABackupCode{}, &model.PasskeyCredential{}, &model.AuthFlow{}, &model.UserOAuthBinding{}, &model.Option{}, &model.UserAccessToken{}, &model.UserRankingPreference{}))
 	require.NoError(t, logDB.AutoMigrate(&model.AuditLog{}))
 	model.DB, model.LOG_DB = db, logDB
 	require.NoError(t, model.EnsureLegacyAccessTokenRetireAt(time.Now().Unix()))
@@ -786,6 +786,9 @@ func TestSecurityEnrollmentOperationContext(t *testing.T) {
 		{"admin user zero", "admin.user.delete", `{"user_id":0}`, service.ErrVerificationContextInvalid},
 		{"admin user extra field", "admin.user.update", `{"user_id":7,"password":"x"}`, service.ErrVerificationContextInvalid},
 		{"admin manage", "admin.user.manage", `{"user_id":7,"action":"promote"}`, nil},
+		{"admin manage demote", "admin.user.manage", `{"user_id":7,"action":"demote"}`, nil},
+		{"admin manage disable", "admin.user.manage", `{"user_id":7,"action":"disable"}`, service.ErrVerificationContextInvalid},
+		{"admin manage enable", "admin.user.manage", `{"user_id":7,"action":"enable"}`, service.ErrVerificationContextInvalid},
 		{"admin manage quota", "admin.user.manage", `{"user_id":7,"action":"add_quota"}`, service.ErrVerificationContextInvalid},
 		{"admin manage delete", "admin.user.manage", `{"user_id":7,"action":"delete"}`, service.ErrVerificationContextInvalid},
 		{"admin binding type", "admin.user.binding.clear", `{"user_id":7,"binding_type":"github"}`, nil},

@@ -1180,9 +1180,17 @@ func ManageUser(c *gin.Context) {
 		return
 	}
 
-	authorization := requireAdminUserProof(c, service.VerificationScopeAdminUserManage, service.AdminUserManageContext{UserID: user.Id, Action: req.Action})
-	if authorization == nil {
-		return
+	auditParams := map[string]any{
+		"action":   req.Action,
+		"username": user.Username,
+		"id":       user.Id,
+	}
+	if req.Action == "promote" || req.Action == "demote" {
+		authorization := requireAdminUserProof(c, service.VerificationScopeAdminUserManage, service.AdminUserManageContext{UserID: user.Id, Action: req.Action})
+		if authorization == nil {
+			return
+		}
+		auditParams["verification_method"] = authorization.Method
 	}
 	if req.Action == "demote" {
 		if err := model.DB.Transaction(func(tx *gorm.DB) error {
@@ -1219,12 +1227,7 @@ func ManageUser(c *gin.Context) {
 	if err := model.InvalidateUserTokensCache(user.Id); err != nil {
 		common.SysLog(common.LogText("failed to invalidate tokens cache for user %d: %s", user.Id, err.Error()))
 	}
-	recordManageAuditFor(c, user.Id, "user.manage", map[string]any{
-		"action":              req.Action,
-		"username":            user.Username,
-		"id":                  user.Id,
-		"verification_method": authorization.Method,
-	})
+	recordManageAuditFor(c, user.Id, "user.manage", auditParams)
 	clearUser := model.User{
 		Role:   user.Role,
 		Status: user.Status,

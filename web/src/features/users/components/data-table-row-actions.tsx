@@ -46,7 +46,6 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import type { AdminUserManageAction } from '@/features/auth/secure-verification'
 import { UserSubscriptionsDialog } from '@/features/subscriptions/components/dialogs/user-subscriptions-dialog'
 import { handleServerError } from '@/lib/handle-server-error'
 import { AuthOperationError } from '@/lib/secure-verification'
@@ -59,13 +58,11 @@ import {
   isUserDeleted,
 } from '../constants'
 import { getUserActionMessage } from '../lib'
-import type { User } from '../types'
+import type { ManageUserAction, User } from '../types'
 import { UserBindingDialog } from './dialogs/user-binding-dialog'
 import { useUsers } from './users-provider'
 
-const MANAGE_ACTION_TITLES: Record<AdminUserManageAction, string> = {
-  disable: 'Verify to disable user',
-  enable: 'Verify to enable user',
+const MANAGE_ACTION_TITLES = {
   promote: 'Verify to promote user',
   demote: 'Verify to demote user',
 }
@@ -99,19 +96,28 @@ export function DataTableRowActions({ row }: DataTableRowActionsProps) {
     setOpen('delete')
   }
 
-  const handleManage = async (action: AdminUserManageAction) => {
+  const handleManage = async (
+    action: Extract<
+      ManageUserAction,
+      'disable' | 'enable' | 'promote' | 'demote'
+    >
+  ) => {
     try {
-      const proof = await requestVerification({
-        scope: 'admin.user.manage',
-        context: { user_id: user.id, action },
-        title: t(MANAGE_ACTION_TITLES[action]),
-        description: t(
-          'Confirm your identity before changing the account {{username}}.',
-          { username: user.username }
-        ),
-      })
-      if (!proof) return
-      const result = await manageUser(user.id, action, proof.proof_token)
+      let proofToken: string | undefined
+      if (action === 'promote' || action === 'demote') {
+        const proof = await requestVerification({
+          scope: 'admin.user.manage',
+          context: { user_id: user.id, action },
+          title: t(MANAGE_ACTION_TITLES[action]),
+          description: t(
+            'Confirm your identity before changing the account {{username}}.',
+            { username: user.username }
+          ),
+        })
+        if (!proof) return
+        proofToken = proof.proof_token
+      }
+      const result = await manageUser(user.id, action, proofToken)
       if (result.success) {
         toast.success(t(getUserActionMessage(action)))
         triggerRefresh()
