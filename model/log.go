@@ -14,18 +14,20 @@ import (
 	"gorm.io/gorm"
 )
 
-func applyExplicitLogTextFilter(tx *gorm.DB, column string, value string) (*gorm.DB, error) {
+func applyLogTextFilter(tx *gorm.DB, column string, value string) (*gorm.DB, error) {
 	if value == "" {
 		return tx, nil
 	}
-	if strings.Contains(value, "%") {
-		condition, pattern, err := buildLogLikeCondition(column, value)
-		if err != nil {
-			return nil, err
-		}
-		return tx.Where(condition, pattern), nil
+	condition, pattern, err := buildLogLikeCondition(column, value)
+	if err != nil {
+		return nil, err
 	}
-	return tx.Where(column+" = ?", value), nil
+	// Plain text searches within a name. Explicit % patterns retain their
+	// existing meaning and validation; automatic wrapping also accepts one character.
+	if !strings.Contains(value, "%") {
+		pattern = "%" + pattern + "%"
+	}
+	return tx.Where(condition, pattern), nil
 }
 
 func buildLogLikeCondition(column string, value string) (string, string, error) {
@@ -493,14 +495,14 @@ func (f LogFilter) apply(tx *gorm.DB) (*gorm.DB, error) {
 	if f.Type != LogTypeUnknown {
 		tx = tx.Where("logs.type = ?", f.Type)
 	}
-	if tx, err = applyExplicitLogTextFilter(tx, "logs.model_name", f.ModelName); err != nil {
+	if tx, err = applyLogTextFilter(tx, "logs.model_name", f.ModelName); err != nil {
 		return nil, err
 	}
-	if tx, err = applyExplicitLogTextFilter(tx, "logs.username", f.Username); err != nil {
+	if tx, err = applyLogTextFilter(tx, "logs.username", f.Username); err != nil {
 		return nil, err
 	}
-	if f.TokenName != "" {
-		tx = tx.Where("logs.token_name = ?", f.TokenName)
+	if tx, err = applyLogTextFilter(tx, "logs.token_name", f.TokenName); err != nil {
+		return nil, err
 	}
 	if f.RequestId != "" {
 		tx = tx.Where("logs.request_id = ?", f.RequestId)
@@ -687,47 +689,41 @@ type Stat struct {
 }
 
 func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (stat Stat, err error) {
-	tx := LOG_DB.Table("logs").Select("COALESCE(sum(quota), 0) quota")
+	return sumUsedQuota(LOG_DB, LogFilter{
+		StartTimestamp: startTimestamp,
+		EndTimestamp:   endTimestamp,
+		ModelName:      modelName,
+		Username:       username,
+		TokenName:      tokenName,
+		Channel:        channel,
+		Group:          group,
+	})
+}
 
-	// 为rpm和tpm创建单独的查询
-	rpmTpmQuery := LOG_DB.Table("logs").Select("count(*) rpm, COALESCE(sum(prompt_tokens), 0) + COALESCE(sum(completion_tokens), 0) tpm")
+// SumUserUsedQuota uses the same ownership boundary as the user's log list.
+// A username is a search term, never an identifier for the caller's own logs.
+func SumUserUsedQuota(userId int, filter LogFilter) (Stat, error) {
+	filter.Username = ""
+	return sumUsedQuota(LOG_DB.Where("logs.user_id = ?", userId), filter)
+}
 
-	if tx, err = applyExplicitLogTextFilter(tx, "username", username); err != nil {
+func sumUsedQuota(db *gorm.DB, filter LogFilter) (stat Stat, err error) {
+	filter.Type = LogTypeConsume
+	tx, err := filter.apply(db.Session(&gorm.Session{}).Table("logs"))
+	if err != nil {
 		return stat, err
 	}
-	if rpmTpmQuery, err = applyExplicitLogTextFilter(rpmTpmQuery, "username", username); err != nil {
-		return stat, err
-	}
-	if tokenName != "" {
-		tx = tx.Where("token_name = ?", tokenName)
-		rpmTpmQuery = rpmTpmQuery.Where("token_name = ?", tokenName)
-	}
-	if startTimestamp != 0 {
-		tx = tx.Where("created_at >= ?", startTimestamp)
-	}
-	if endTimestamp != 0 {
-		tx = tx.Where("created_at <= ?", endTimestamp)
-	}
-	if tx, err = applyExplicitLogTextFilter(tx, "model_name", modelName); err != nil {
-		return stat, err
-	}
-	if rpmTpmQuery, err = applyExplicitLogTextFilter(rpmTpmQuery, "model_name", modelName); err != nil {
-		return stat, err
-	}
-	if channel != 0 {
-		tx = tx.Where("channel_id = ?", channel)
-		rpmTpmQuery = rpmTpmQuery.Where("channel_id = ?", channel)
-	}
-	if group != "" {
-		tx = tx.Where(logGroupCol+" = ?", group)
-		rpmTpmQuery = rpmTpmQuery.Where(logGroupCol+" = ?", group)
-	}
+	tx = tx.Select("COALESCE(sum(quota), 0) quota")
 
-	tx = tx.Where("type = ?", LogTypeConsume)
-	rpmTpmQuery = rpmTpmQuery.Where("type = ?", LogTypeConsume)
-
-	// 只统计最近60秒的rpm和tpm
-	rpmTpmQuery = rpmTpmQuery.Where("created_at >= ?", time.Now().Add(-60*time.Second).Unix())
+	// Rates always cover the last 60 seconds, independent of the selected
+	// quota period, while retaining the same name and ownership filters.
+	filter.StartTimestamp = time.Now().Add(-60 * time.Second).Unix()
+	filter.EndTimestamp = 0
+	rpmTpmQuery, err := filter.apply(db.Session(&gorm.Session{}).Table("logs"))
+	if err != nil {
+		return stat, err
+	}
+	rpmTpmQuery = rpmTpmQuery.Select("count(*) rpm, COALESCE(sum(prompt_tokens), 0) + COALESCE(sum(completion_tokens), 0) tpm")
 
 	// 执行查询
 	if err := tx.Scan(&stat).Error; err != nil {
