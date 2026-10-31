@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/setting"
@@ -181,6 +182,27 @@ func BuildRequestPolicy(options map[string]string) (*RequestPolicySnapshot, erro
 		return nil, fmt.Errorf("invalid global session mode")
 	}
 	for _, rule := range snapshot.Affinity.Rules {
+		seenLifetimeIDs := make(map[int]struct{}, len(rule.ChannelLifetimes))
+		for _, lifetime := range rule.ChannelLifetimes {
+			if lifetime.ChannelID <= 0 || lifetime.IdleTTLSeconds <= 0 || lifetime.MaxResidenceSeconds <= 0 ||
+				int64(lifetime.IdleTTLSeconds) > math.MaxInt64/int64(time.Second) || int64(lifetime.MaxResidenceSeconds) > math.MaxInt64/int64(time.Second) {
+				return nil, fmt.Errorf("channel lifetime IDs and durations must be positive and durations must fit time.Duration for rule %q", rule.Name)
+			}
+			if _, duplicate := seenLifetimeIDs[lifetime.ChannelID]; duplicate {
+				return nil, fmt.Errorf("duplicate channel lifetime ID %d for rule %q", lifetime.ChannelID, rule.Name)
+			}
+			seenLifetimeIDs[lifetime.ChannelID] = struct{}{}
+		}
+		seenFallbackIDs := make(map[int]struct{}, len(rule.FallbackChannelIDs))
+		for _, channelID := range rule.FallbackChannelIDs {
+			if channelID <= 0 {
+				return nil, fmt.Errorf("fallback channel IDs must be positive for rule %q", rule.Name)
+			}
+			if _, duplicate := seenFallbackIDs[channelID]; duplicate {
+				return nil, fmt.Errorf("duplicate fallback channel ID %d for rule %q", channelID, rule.Name)
+			}
+			seenFallbackIDs[channelID] = struct{}{}
+		}
 		switch rule.SessionMode {
 		case "", "inherit", "off", "prefer", "strict":
 		default:

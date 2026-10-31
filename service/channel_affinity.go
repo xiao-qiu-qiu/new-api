@@ -4,6 +4,7 @@ import (
 	"hash/fnv"
 	"maps"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -21,12 +22,13 @@ import (
 )
 
 const (
-	ginKeyChannelAffinityCacheKey    = "channel_affinity_cache_key"
-	ginKeyChannelAffinityTTLSeconds  = "channel_affinity_ttl_seconds"
-	ginKeyChannelAffinityMeta        = "channel_affinity_meta"
-	ginKeyChannelAffinityLogInfo     = "channel_affinity_log_info"
-	ginKeyChannelAffinitySkipRetry   = "channel_affinity_skip_retry_on_failure"
-	ginKeyChannelAffinityRetryOffset = "channel_affinity_retry_offset"
+	ginKeyChannelAffinityCacheKey      = "channel_affinity_cache_key"
+	ginKeyChannelAffinityTTLSeconds    = "channel_affinity_ttl_seconds"
+	ginKeyChannelAffinityMeta          = "channel_affinity_meta"
+	ginKeyChannelAffinityLogInfo       = "channel_affinity_log_info"
+	ginKeyChannelAffinitySkipRetry     = "channel_affinity_skip_retry_on_failure"
+	ginKeyChannelAffinityRetryOffset   = "channel_affinity_retry_offset"
+	ginKeyChannelAffinityFallbackIndex = "channel_affinity_fallback_index"
 
 	channelAffinityCacheNamespace           = "new-api:channel_affinity:v1"
 	channelAffinityUsageCacheStatsNamespace = "new-api:channel_affinity_usage_cache_stats:v1"
@@ -43,19 +45,22 @@ var (
 )
 
 type channelAffinityMeta struct {
-	CacheKey       string
-	TTLSeconds     int
-	RuleName       string
-	SkipRetry      bool
-	ParamTemplate  map[string]any
-	KeySourceType  string
-	KeySourceKey   string
-	KeySourcePath  string
-	KeyHint        string
-	KeyFingerprint string
-	UsingGroup     string
-	ModelName      string
-	RequestPath    string
+	FallbackChannelIDs []int
+	ChannelLifetimes   []operation_setting.ChannelAffinityLifetime
+	LifetimeObserved   *channelAffinityLifetimeObservation
+	CacheKey           string
+	TTLSeconds         int
+	RuleName           string
+	SkipRetry          bool
+	ParamTemplate      map[string]any
+	KeySourceType      string
+	KeySourceKey       string
+	KeySourcePath      string
+	KeyHint            string
+	KeyFingerprint     string
+	UsingGroup         string
+	ModelName          string
+	RequestPath        string
 }
 
 type ChannelAffinityStatsContext struct {
@@ -198,18 +203,11 @@ func GetChannelAffinityCacheStats() ChannelAffinityCacheStats {
 }
 
 func ClearChannelAffinityCacheAll() int {
-	cache := getChannelAffinityCache()
-	keys, err := cache.Keys()
+	deleted, err := clearChannelAffinityBindings("")
 	if err != nil {
-		common.SysError(common.LogText("channel affinity cache list keys failed: err=%v", err))
-		keys = nil
+		common.SysError(common.LogText("channel affinity cache clear failed: err=%v", err))
 	}
-	if len(keys) > 0 {
-		if _, err := cache.DeleteMany(keys); err != nil {
-			common.SysError(common.LogText("channel affinity cache delete many failed: err=%v", err))
-		}
-	}
-	return len(keys)
+	return deleted
 }
 
 func ClearChannelAffinityCacheByRuleName(ruleName string) (int, error) {
@@ -239,12 +237,7 @@ func ClearChannelAffinityCacheByRuleName(ruleName string) (int, error) {
 		return 0, common.NewMessage("This rule does not have include_rule_name enabled, so its cache cannot be cleared by rule")
 	}
 
-	cache := getChannelAffinityCache()
-	deleted, err := cache.DeleteByPrefix(ruleName)
-	if err != nil {
-		return 0, err
-	}
-	return deleted, nil
+	return clearChannelAffinityBindings(ruleName + ":")
 }
 
 func matchAnyRegexCached(patterns []string, s string) bool {
@@ -597,29 +590,33 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 		state.SessionMode, state.SessionModeSource = EffectiveSessionMode(setting, rule)
 		state.RuleName = rule.Name
 		setChannelAffinityContext(c, channelAffinityMeta{
-			CacheKey:       cacheKeyFull,
-			TTLSeconds:     ttlSeconds,
-			RuleName:       rule.Name,
-			SkipRetry:      state.SessionMode == "strict",
-			ParamTemplate:  cloneStringAnyMap(rule.ParamOverrideTemplate),
-			KeySourceType:  strings.TrimSpace(usedSource.Type),
-			KeySourceKey:   strings.TrimSpace(usedSource.Key),
-			KeySourcePath:  strings.TrimSpace(usedSource.Path),
-			KeyHint:        buildChannelAffinityKeyHint(affinityValue),
-			KeyFingerprint: affinityFingerprint(affinityValue),
-			UsingGroup:     usingGroup,
-			ModelName:      modelName,
-			RequestPath:    path,
+			FallbackChannelIDs: slices.Clone(rule.FallbackChannelIDs),
+			ChannelLifetimes:   slices.Clone(rule.ChannelLifetimes),
+			CacheKey:           cacheKeyFull,
+			TTLSeconds:         ttlSeconds,
+			RuleName:           rule.Name,
+			SkipRetry:          state.SessionMode == "strict",
+			ParamTemplate:      cloneStringAnyMap(rule.ParamOverrideTemplate),
+			KeySourceType:      strings.TrimSpace(usedSource.Type),
+			KeySourceKey:       strings.TrimSpace(usedSource.Key),
+			KeySourcePath:      strings.TrimSpace(usedSource.Path),
+			KeyHint:            buildChannelAffinityKeyHint(affinityValue),
+			KeyFingerprint:     affinityFingerprint(affinityValue),
+			UsingGroup:         usingGroup,
+			ModelName:          modelName,
+			RequestPath:        path,
 		})
+		c.Set(ginKeyChannelAffinityFallbackIndex, 0)
 
 		state.AddEvent(PolicyEvent{Decision: PolicyDecision{Action: "match", Reason: "session_rule_matched", Source: "session_rule"}})
 		if state.SessionMode == "off" {
 			return 0, false
 		}
-		cache := getChannelAffinityCache()
-		channelID, found, err := cache.Get(cacheKeySuffix)
+		meta, _ := getChannelAffinityMeta(c)
+		channelID, found, err := readChannelAffinityBinding(&meta)
+		setChannelAffinityContext(c, meta)
 		if err != nil {
-			common.SysError(common.LogText("channel affinity cache get failed: key=%s, err=%v", cacheKeyFull, err))
+			common.SysError(common.LogText("channel affinity cache get failed: err=%v", err))
 			return 0, false
 		}
 		if found {
@@ -648,6 +645,20 @@ func ShouldSkipRetryAfterChannelAffinityFailure(c *gin.Context) bool {
 	return meta.SkipRetry
 }
 
+// HasChannelAffinityFallback reports an active, identity-matched ordered chain.
+// Explicit pins retain their existing routing and retry semantics.
+func HasChannelAffinityFallback(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	meta, ok := getChannelAffinityMeta(c)
+	if !ok || len(meta.FallbackChannelIDs) == 0 || RequestPolicy(c).SessionMode == "off" {
+		return false
+	}
+	_, pinned, _ := GetChannelConstraints(c).ResolvedPin()
+	return !pinned
+}
+
 func ClearCurrentChannelAffinityCache(c *gin.Context) bool {
 	if c == nil {
 		return false
@@ -657,19 +668,13 @@ func ClearCurrentChannelAffinityCache(c *gin.Context) bool {
 		return false
 	}
 
-	cache := getChannelAffinityCache()
-	deleted, err := cache.DeleteMany([]string{cacheKey})
+	deleted, err := deleteChannelAffinityBinding(cacheKey)
 	if err != nil {
 		common.SysError(common.LogText("channel affinity cache delete current failed: err=%v", err))
 		return false
 	}
 	c.Set(ginKeyChannelAffinitySkipRetry, false)
-	for _, ok := range deleted {
-		if ok {
-			return true
-		}
-	}
-	return false
+	return deleted
 }
 
 func ShouldKeepChannelAffinityOnChannelDisabled() bool {
@@ -691,6 +696,15 @@ func MarkChannelAffinityUsed(c *gin.Context, selectedGroup string, channelID int
 	c.Set(ginKeyChannelAffinitySkipRetry, meta.SkipRetry)
 	// Affinity consumes an attempt, but does not visit a normal priority tier.
 	c.Set(ginKeyChannelAffinityRetryOffset, 1)
+	if len(meta.FallbackChannelIDs) > 0 {
+		// Keep an existing binding, then visit only its configured successors.
+		// A binding outside the chain has no successor and must not restart it.
+		next := len(meta.FallbackChannelIDs)
+		if index := slices.Index(meta.FallbackChannelIDs, channelID); index >= 0 {
+			next = index + 1
+		}
+		c.Set(ginKeyChannelAffinityFallbackIndex, next)
+	}
 	info := map[string]any{
 		"reason":         meta.RuleName,
 		"rule_name":      meta.RuleName,
@@ -731,7 +745,8 @@ func RecordChannelAffinity(c *gin.Context, channelID int) {
 		return
 	}
 	setting := operation_setting.GetChannelAffinitySetting()
-	if RequestPolicy(c).SessionMode == "off" {
+	policy := RequestPolicy(c)
+	if policy.SessionMode == "off" || policy.FinalLogged || (policy.OutcomeRecorded && !policy.Successful) {
 		return
 	}
 	if setting == nil || !setting.Enabled {
@@ -752,9 +767,10 @@ func RecordChannelAffinity(c *gin.Context, channelID int) {
 	if ttlSeconds <= 0 {
 		ttlSeconds = 3600
 	}
-	cache := getChannelAffinityCache()
-	if err := cache.SetWithTTL(cacheKey, channelID, time.Duration(ttlSeconds)*time.Second); err != nil {
-		common.SysError(common.LogText("channel affinity cache set failed: key=%s, err=%v", cacheKey, err))
+	meta, _ := getChannelAffinityMeta(c)
+	meta.CacheKey = cacheKey
+	if err := recordChannelAffinityBinding(meta, channelID, ttlSeconds); err != nil {
+		common.SysError(common.LogText("channel affinity cache set failed: err=%v", err))
 	}
 }
 

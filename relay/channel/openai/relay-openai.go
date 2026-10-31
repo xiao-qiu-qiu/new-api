@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -201,9 +202,22 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 // observeStreamChoices collects billable function call names and records the
 // finish reason facts used by health sampling from one parsed chunk.
 func observeStreamChoices(info *relaycommon.RelayInfo, data string, seen map[string]struct{}, names *[]string) {
-	var streamResponse dto.ChatCompletionsStreamResponse
+	var streamResponse struct {
+		dto.ChatCompletionsStreamResponse
+		Type  string          `json:"type"`
+		Error json.RawMessage `json:"error"`
+	}
 	if err := common.UnmarshalJsonStr(data, &streamResponse); err != nil {
 		return
+	}
+	// An upstream may send HTTP 200 and even [DONE] after an error frame.
+	// Preserve forwarding, but never treat that stream as a successful binding.
+	errorPayload := strings.TrimSpace(string(streamResponse.Error))
+	payloadType := strings.ToLower(strings.TrimSpace(streamResponse.Type))
+	if payloadType == "error" || payloadType == "upstream_error" ||
+		(errorPayload != "" && errorPayload != "null" && errorPayload != "{}" && errorPayload != `""`) {
+		info.StreamStatus.RecordError("upstream chat stream returned error event")
+		info.StreamStatus.MarkFailed("upstream_stream_error", "upstream_error", 0)
 	}
 	info.ObserveResponseServiceTier(common.StringToByteSlice(data))
 	for _, choice := range streamResponse.Choices {

@@ -31,7 +31,8 @@ func DecideRelayRetry(c *gin.Context, err *types.NewAPIError, retryTimes int) Po
 	if GetChannelConstraints(c).SuppressesRetry() {
 		return PolicyDecision{Action: "stop", Reason: "pinned_channel", Source: "channel_constraint"}
 	}
-	if types.IsChannelError(err) {
+	fallback := HasChannelAffinityFallback(c)
+	if types.IsChannelError(err) && !fallback {
 		return PolicyDecision{Action: "retry", Reason: "channel_error", Source: "system"}
 	}
 	if types.IsSkipRetryError(err) {
@@ -40,6 +41,18 @@ func DecideRelayRetry(c *gin.Context, err *types.NewAPIError, retryTimes int) Po
 	if retryTimes <= 0 {
 		return PolicyDecision{Action: "stop", Reason: "attempt_budget_exhausted", Source: "global"}
 	}
+	if fallback {
+		if operation_setting.IsAlwaysSkipRetryCode(err.GetErrorCode()) {
+			return PolicyDecision{Action: "stop", Reason: "system_retry_exclusion", Source: "system"}
+		}
+		meta, _ := getChannelAffinityMeta(c)
+		if next, _ := nextChannelAffinityFallback(c, meta.ModelName, meta.UsingGroup, false); next == nil {
+			return PolicyDecision{Action: "stop", Reason: "fallback_chain_exhausted", Source: "session_rule"}
+		}
+		if types.IsChannelError(err) {
+			return PolicyDecision{Action: "retry", Reason: "channel_error", Source: "system"}
+		}
+	}
 	code := err.StatusCode
 	if code >= 200 && code < 300 {
 		return PolicyDecision{Action: "stop", Reason: "system_retry_exclusion", Source: "system"}
@@ -47,7 +60,13 @@ func DecideRelayRetry(c *gin.Context, err *types.NewAPIError, retryTimes int) Po
 	if code < 100 || code > 599 {
 		return PolicyDecision{Action: "retry", Reason: "unrecognized_status", Source: "system"}
 	}
-	if operation_setting.IsAlwaysSkipRetryCode(err.GetErrorCode()) || operation_setting.IsAlwaysSkipRetryStatusCode(code) {
+	if operation_setting.IsAlwaysSkipRetryCode(err.GetErrorCode()) {
+		return PolicyDecision{Action: "stop", Reason: "system_retry_exclusion", Source: "system"}
+	}
+	if operation_setting.IsAlwaysSkipRetryStatusCode(code) {
+		if fallback && RequestPolicy(c).SessionMode == "prefer" {
+			return PolicyDecision{Action: "retry", Reason: "fallback_timeout", Source: "session_rule"}
+		}
 		return PolicyDecision{Action: "stop", Reason: "system_retry_exclusion", Source: "system"}
 	}
 	if operation_setting.ShouldRetryByStatusCode(code) {

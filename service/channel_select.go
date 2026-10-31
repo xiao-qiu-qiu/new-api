@@ -139,6 +139,16 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 	userGroup := common.GetContextKeyString(param.Ctx, constant.ContextKeyUserGroup)
 	filters := GetChannelConstraints(param.Ctx).Filters
 	affinityRetryOffset := param.Ctx.GetInt(ginKeyChannelAffinityRetryOffset)
+	if HasChannelAffinityFallback(param.Ctx) {
+		if param.GetRetry() > 0 && ShouldSkipRetryAfterChannelAffinityFailure(param.Ctx) {
+			return nil, selectGroup, errors.New("strict_session_binding_unavailable")
+		}
+		channel, selectGroup = nextChannelAffinityFallback(param.Ctx, param.ModelName, param.TokenGroup, true)
+		if channel != nil {
+			return channel, selectGroup, nil
+		}
+		return nil, selectGroup, errors.New("channel_affinity_fallback_exhausted")
+	}
 
 	if param.TokenGroup == "auto" {
 		autoGroups := GetRequestAutoGroups(param.Ctx, userGroup)
@@ -226,6 +236,43 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 		}
 	}
 	return channel, selectGroup, nil
+}
+
+// The retry decision peeks without advancing, so an exhausted chain stops on
+// the last upstream error instead of replacing it with a channel-selection error.
+func nextChannelAffinityFallback(c *gin.Context, modelName, usingGroup string, advance bool) (*model.Channel, string) {
+	meta, ok := getChannelAffinityMeta(c)
+	if !ok {
+		return nil, usingGroup
+	}
+	groups := []string{usingGroup}
+	if usingGroup == "auto" {
+		groups = GetRequestAutoGroups(c, common.GetContextKeyString(c, constant.ContextKeyUserGroup))
+	}
+	filters := GetChannelConstraints(c).Filters
+	for index := c.GetInt(ginKeyChannelAffinityFallbackIndex); index < len(meta.FallbackChannelIDs); index++ {
+		// Unavailable members are also consumed, and no member is revisited.
+		if advance {
+			c.Set(ginKeyChannelAffinityFallbackIndex, index+1)
+		}
+		candidate, err := model.CacheGetChannel(meta.FallbackChannelIDs[index])
+		if err != nil || candidate == nil || candidate.Status != common.ChannelStatusEnabled {
+			continue
+		}
+		if satisfied, _ := model.ChannelSatisfiesFilters(candidate, modelName, filters); !satisfied {
+			continue
+		}
+		for _, group := range groups {
+			if !model.IsChannelEnabledForGroupModel(group, modelName, candidate.Id) {
+				continue
+			}
+			if advance && usingGroup == "auto" {
+				common.SetContextKey(c, constant.ContextKeyAutoGroup, group)
+			}
+			return candidate, group
+		}
+	}
+	return nil, usingGroup
 }
 
 func pinnedTaskPluginIdentities(c *gin.Context, expected string) ([]int, []string) {

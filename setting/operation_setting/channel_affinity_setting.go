@@ -8,6 +8,14 @@ type ChannelAffinityKeySource struct {
 	Path string `json:"path,omitempty"`
 }
 
+// ChannelAffinityLifetime limits newly created bindings on one channel.
+// Existing bindings without lifetime metadata retain their original sliding TTL.
+type ChannelAffinityLifetime struct {
+	ChannelID           int `json:"channel_id"`
+	IdleTTLSeconds      int `json:"idle_ttl_seconds"`
+	MaxResidenceSeconds int `json:"max_residence_seconds"`
+}
+
 type ChannelAffinityRule struct {
 	Name             string                     `json:"name"`
 	ModelRegex       []string                   `json:"model_regex"`
@@ -24,6 +32,9 @@ type ChannelAffinityRule struct {
 	// "inherit" uses the global default; off/prefer/strict override it.
 	// Empty preserves the legacy SkipRetryOnFailure behavior.
 	SessionMode string `json:"session_mode,omitempty"`
+	// An empty chain keeps the ordinary priority-based retry behavior.
+	FallbackChannelIDs []int                     `json:"fallback_channel_ids,omitempty"`
+	ChannelLifetimes   []ChannelAffinityLifetime `json:"channel_lifetimes,omitempty"`
 
 	IncludeUsingGroup bool `json:"include_using_group"`
 	IncludeModelName  bool `json:"include_model_name"`

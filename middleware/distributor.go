@@ -168,7 +168,12 @@ func Distribute() func(c *gin.Context) {
 		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
 		SetupContextForSelectedChannel(c, channel, modelRequest.Model)
 		c.Next()
-		if channel != nil && c.Writer != nil && c.Writer.Status() < http.StatusBadRequest {
+		// A heartbeat may have committed HTTP 200 before the relay failed.
+		// Keep legacy routes without a recorded outcome, but never refresh or
+		// replace a binding after a known relay or stream failure.
+		policy := service.RequestPolicy(c)
+		if channel != nil && c.Writer != nil && c.Writer.Status() < http.StatusBadRequest &&
+			!policy.FinalLogged && (!policy.OutcomeRecorded || policy.Successful) {
 			service.RecordChannelAffinity(c, channel.Id)
 		}
 	}
