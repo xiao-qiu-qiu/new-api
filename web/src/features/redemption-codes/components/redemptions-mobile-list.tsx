@@ -38,6 +38,7 @@ import { REDEMPTION_STATUS, REDEMPTION_STATUSES } from '../constants'
 import { isRedemptionExpired } from '../lib'
 import type { Redemption } from '../types'
 import { DataTableRowActions } from './data-table-row-actions'
+import { RedemptionUser } from './redemption-user'
 
 const MOBILE_SKELETON_KEYS = [
   'redemption-mobile-skeleton-1',
@@ -167,6 +168,17 @@ export function RedemptionsMobileList(props: RedemptionsMobileListProps) {
                 {formatQuota(redemption.quota)}
               </span>
             </div>
+
+            {redemption.used_user_id > 0 && (
+              <div className='flex items-start justify-between gap-2 text-xs'>
+                <span className='text-muted-foreground shrink-0'>
+                  {t('Redeemed By')}
+                </span>
+                <div className='min-w-0 text-right'>
+                  <RedemptionUser redemption={redemption} />
+                </div>
+              </div>
+            )}
           </div>
         )
       })}

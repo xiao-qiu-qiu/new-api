@@ -2879,6 +2879,7 @@
     "Filter": "Lọc",
     "Filter by API key...": "Lọc theo khóa API...",
     "Filter by channel ID": "Lọc theo ID kênh",
+    "Filter by code, name or ID...": "Tìm theo mã đổi thưởng, tên hoặc ID…",
     "Filter by group": "Lọc theo nhóm",
     "Filter by MjProxy task ID": "Lọc theo ID nhiệm vụ MjProxy",
     "Filter by model name": "Lọc theo tên mô hình",

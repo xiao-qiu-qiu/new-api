@@ -136,13 +136,6 @@ export function RedemptionsTable() {
     columnFilters,
     globalFilter,
     pagination,
-    globalFilterFn: (row, _columnId, filterValue) => {
-      const name = String(row.getValue('name')).toLowerCase()
-      const id = String(row.getValue('id'))
-      const searchValue = String(filterValue).toLowerCase()
-
-      return name.includes(searchValue) || id.includes(searchValue)
-    },
     onPaginationChange,
     onGlobalFilterChange,
     onColumnFiltersChange,
@@ -170,7 +163,7 @@ export function RedemptionsTable() {
       skeletonKeyPrefix='redemptions-skeleton'
       applyHeaderSize
       toolbarProps={{
-        searchPlaceholder: t('Filter by name or ID...'),
+        searchPlaceholder: t('Filter by code, name or ID...'),
         searchDebounceMs: 500,
         filters: [
           {

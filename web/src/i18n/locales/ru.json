@@ -2879,6 +2879,7 @@
     "Filter": "Фильтр",
     "Filter by API key...": "Фильтр по API-ключу...",
     "Filter by channel ID": "Фильтр по ID канала",
+    "Filter by code, name or ID...": "Поиск по коду, названию или ID…",
     "Filter by group": "Фильтр по группе",
     "Filter by MjProxy task ID": "Фильтр по ID задачи MjProxy",
     "Filter by model name": "Фильтр по имени модели",

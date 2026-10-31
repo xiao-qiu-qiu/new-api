@@ -2879,6 +2879,7 @@
     "Filter": "フィルター",
     "Filter by API key...": "APIキーでフィルター...",
     "Filter by channel ID": "チャネルIDでフィルター",
+    "Filter by code, name or ID...": "引き換えコード、名前、IDで検索…",
     "Filter by group": "グループでフィルター",
     "Filter by MjProxy task ID": "MjProxyタスクIDでフィルター",
     "Filter by model name": "モデル名で絞り込み",

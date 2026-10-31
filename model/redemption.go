@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"strconv"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
@@ -23,6 +24,13 @@ type Redemption struct {
 	UsedUserId   int            `json:"used_user_id"`
 	DeletedAt    gorm.DeletedAt `gorm:"index"`
 	ExpiredTime  int64          `json:"expired_time" gorm:"bigint"` // 过期时间，0 表示不过期
+}
+
+// AdminRedemption exposes user remarks only in administrator list responses.
+type AdminRedemption struct {
+	*Redemption
+	UsedUsername   string `json:"used_username"`
+	UsedUserRemark string `json:"used_user_remark"`
 }
 
 type UserRedemptionRecord struct {
@@ -72,7 +80,42 @@ func GetUserRedemptions(userId int, startIdx int, num int) (*UserRedemptionHisto
 	return history, nil
 }
 
-func GetAllRedemptions(startIdx int, num int) (redemptions []*Redemption, total int64, err error) {
+func redemptionsForAdmin(tx *gorm.DB, redemptions []*Redemption) ([]*AdminRedemption, error) {
+	items := make([]*AdminRedemption, 0, len(redemptions))
+	userIds := make([]int, 0, len(redemptions))
+	seen := make(map[int]struct{}, len(redemptions))
+	for _, redemption := range redemptions {
+		items = append(items, &AdminRedemption{Redemption: redemption})
+		if redemption.UsedUserId <= 0 {
+			continue
+		}
+		if _, exists := seen[redemption.UsedUserId]; !exists {
+			seen[redemption.UsedUserId] = struct{}{}
+			userIds = append(userIds, redemption.UsedUserId)
+		}
+	}
+	if len(userIds) == 0 {
+		return items, nil
+	}
+
+	var users []User
+	if err := tx.Select("id", "username", "remark").Where("id IN ?", userIds).Find(&users).Error; err != nil {
+		return nil, err
+	}
+	usersById := make(map[int]*User, len(users))
+	for i := range users {
+		usersById[users[i].Id] = &users[i]
+	}
+	for _, item := range items {
+		if user := usersById[item.UsedUserId]; user != nil {
+			item.UsedUsername = user.Username
+			item.UsedUserRemark = user.Remark
+		}
+	}
+	return items, nil
+}
+
+func GetAllRedemptions(startIdx int, num int) (redemptions []*AdminRedemption, total int64, err error) {
 	// 开始事务
 	tx := DB.Begin()
 	if tx.Error != nil {
@@ -92,7 +135,13 @@ func GetAllRedemptions(startIdx int, num int) (redemptions []*Redemption, total 
 	}
 
 	// 获取分页数据
-	err = tx.Order("id desc").Limit(num).Offset(startIdx).Find(&redemptions).Error
+	var rows []*Redemption
+	err = tx.Order("id desc").Limit(num).Offset(startIdx).Find(&rows).Error
+	if err != nil {
+		tx.Rollback()
+		return nil, 0, err
+	}
+	redemptions, err = redemptionsForAdmin(tx, rows)
 	if err != nil {
 		tx.Rollback()
 		return nil, 0, err
@@ -106,7 +155,7 @@ func GetAllRedemptions(startIdx int, num int) (redemptions []*Redemption, total 
 	return redemptions, total, nil
 }
 
-func SearchRedemptions(keyword string, status string, startIdx int, num int) (redemptions []*Redemption, total int64, err error) {
+func SearchRedemptions(keyword string, status string, startIdx int, num int) (redemptions []*AdminRedemption, total int64, err error) {
 	tx := DB.Begin()
 	if tx.Error != nil {
 		return nil, 0, tx.Error
@@ -120,10 +169,13 @@ func SearchRedemptions(keyword string, status string, startIdx int, num int) (re
 	query := tx.Model(&Redemption{})
 
 	if keyword != "" {
+		// Escape LIKE metacharacters so pasted codes and fragments are literal text.
+		pattern := strings.NewReplacer("!", "!!", "%", "!%", "_", "!_").Replace(keyword)
+		condition := "name LIKE ? ESCAPE '!' OR " + commonKeyCol + " LIKE ? ESCAPE '!'"
 		if id, err := strconv.Atoi(keyword); err == nil {
-			query = query.Where("id = ? OR name LIKE ?", id, keyword+"%")
+			query = query.Where("(id = ? OR "+condition+")", id, pattern+"%", "%"+pattern+"%")
 		} else {
-			query = query.Where("name LIKE ?", keyword+"%")
+			query = query.Where("("+condition+")", pattern+"%", "%"+pattern+"%")
 		}
 	}
 
@@ -157,7 +209,13 @@ func SearchRedemptions(keyword string, status string, startIdx int, num int) (re
 	}
 
 	// Get paginated data
-	err = query.Order("id desc").Limit(num).Offset(startIdx).Find(&redemptions).Error
+	var rows []*Redemption
+	err = query.Order("id desc").Limit(num).Offset(startIdx).Find(&rows).Error
+	if err != nil {
+		tx.Rollback()
+		return nil, 0, err
+	}
+	redemptions, err = redemptionsForAdmin(tx, rows)
 	if err != nil {
 		tx.Rollback()
 		return nil, 0, err

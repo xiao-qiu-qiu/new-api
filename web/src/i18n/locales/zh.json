@@ -2879,6 +2879,7 @@
     "Filter": "筛选",
     "Filter by API key...": "按 API 密钥筛选...",
     "Filter by channel ID": "按渠道 ID 筛选",
+    "Filter by code, name or ID...": "按兑换码、名称或编号搜索…",
     "Filter by group": "按分组筛选",
     "Filter by MjProxy task ID": "按 MjProxy 任务 ID 筛选",
     "Filter by model name": "按模型名称筛选",
