@@ -26,6 +26,7 @@ import type {
   ApiResponse,
   TopupInfoResponse,
   RedemptionResponse,
+  RedemptionHistoryResponse,
   AmountResponse,
   PaymentResponse,
   StripePaymentResponse,
@@ -67,6 +68,18 @@ export async function redeemTopupCode(
   request: RedemptionRequest
 ): Promise<RedemptionResponse> {
   const res = await api.post('/api/user/topup', request)
+  return res.data
+}
+
+export async function getRedemptionHistory(
+  page: number,
+  pageSize: number
+): Promise<ApiResponse<RedemptionHistoryResponse>> {
+  const params = new URLSearchParams({
+    p: page.toString(),
+    page_size: pageSize.toString(),
+  })
+  const res = await api.get(`/api/user/redemption/self?${params.toString()}`)
   return res.data
 }
 

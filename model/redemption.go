@@ -25,6 +25,53 @@ type Redemption struct {
 	ExpiredTime  int64          `json:"expired_time" gorm:"bigint"` // 过期时间，0 表示不过期
 }
 
+type UserRedemptionRecord struct {
+	Id           int   `json:"id"`
+	Quota        int   `json:"quota"`
+	RedeemedTime int64 `json:"redeemed_time"`
+}
+
+type UserRedemptionHistory struct {
+	Items      []UserRedemptionRecord `json:"items"`
+	Total      int64                  `json:"total"`
+	TotalQuota int64                  `json:"total_quota"`
+}
+
+func GetUserRedemptions(userId int, startIdx int, num int) (*UserRedemptionHistory, error) {
+	if userId <= 0 {
+		return nil, errors.New("invalid user id")
+	}
+	if num <= 0 {
+		num = common.ItemsPerPage
+	}
+	num = min(num, 100)
+	startIdx = max(startIdx, 0)
+
+	// A code's creator is unrelated to the user who redeemed it. Keep used
+	// codes in the history even after an administrator soft-deletes them.
+	query := DB.Unscoped().Model(&Redemption{}).
+		Where("status = ? AND used_user_id = ?", common.RedemptionCodeStatusUsed, userId)
+	var totals struct {
+		Total      int64
+		TotalQuota int64
+	}
+	if err := query.Select("COUNT(*) AS total, COALESCE(SUM(quota), 0) AS total_quota").Scan(&totals).Error; err != nil {
+		return nil, err
+	}
+
+	history := &UserRedemptionHistory{
+		Items:      make([]UserRedemptionRecord, 0),
+		Total:      totals.Total,
+		TotalQuota: totals.TotalQuota,
+	}
+	if err := query.Select("id", "quota", "redeemed_time").
+		Order("redeemed_time desc, id desc").Limit(num).Offset(startIdx).
+		Find(&history.Items).Error; err != nil {
+		return nil, err
+	}
+	return history, nil
+}
+
 func GetAllRedemptions(startIdx int, num int) (redemptions []*Redemption, total int64, err error) {
 	// 开始事务
 	tx := DB.Begin()

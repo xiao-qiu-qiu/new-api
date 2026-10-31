@@ -13,6 +13,16 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func GetUserRedemptions(c *gin.Context) {
+	pageInfo := common.GetPageQuery(c)
+	history, err := model.GetUserRedemptions(c.GetInt("id"), pageInfo.GetStartIdx(), pageInfo.GetPageSize())
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	common.ApiSuccess(c, history)
+}
+
 func GetAllRedemptions(c *gin.Context) {
 	pageInfo := common.GetPageQuery(c)
 	redemptions, total, err := model.GetAllRedemptions(pageInfo.GetStartIdx(), pageInfo.GetPageSize())

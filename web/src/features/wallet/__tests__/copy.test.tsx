@@ -17,7 +17,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { act, render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { createInstance } from 'i18next'
+import type { ComponentProps } from 'react'
 import { I18nextProvider, initReactI18next } from 'react-i18next'
 import { beforeEach, expect, it, vi } from 'vitest'
 
@@ -29,6 +31,42 @@ import { api } from '@/lib/api'
 import { RechargeFormCard } from '../components/recharge-form-card'
 
 const i18n = createInstance()
+
+const disabledTopupInfo = {
+  enable_online_topup: false,
+  enable_stripe_topup: false,
+  pay_methods: [],
+  min_topup: 1,
+  stripe_min_topup: 1,
+  amount_options: [],
+  discount: {},
+}
+
+function renderRechargeForm(
+  props: Partial<ComponentProps<typeof RechargeFormCard>> = {}
+) {
+  return render(
+    <I18nextProvider i18n={i18n}>
+      <RechargeFormCard
+        topupInfo={disabledTopupInfo}
+        presetAmounts={[]}
+        selectedPreset={null}
+        topupAmount={1}
+        paymentAmount={1}
+        calculating={false}
+        paymentLoading={null}
+        redemptionCode=''
+        redeeming={false}
+        onSelectPreset={vi.fn()}
+        onTopupAmountChange={vi.fn()}
+        onPaymentMethodSelect={vi.fn()}
+        onRedemptionCodeChange={vi.fn()}
+        onRedeem={vi.fn()}
+        {...props}
+      />
+    </I18nextProvider>
+  )
+}
 
 beforeEach(async () => {
   await i18n.use(initReactI18next).init({
@@ -125,3 +163,82 @@ it.each([
     expect(screen.getByPlaceholderText('Minimum 1')).toBeVisible()
   }
 )
+
+it('shows an accessible, usable redemption entry without payment guidance when all payments are disabled', async () => {
+  const user = userEvent.setup()
+  const onRedemptionCodeChange = vi.fn()
+  const onRedeem = vi.fn()
+  const onOpenRedemptionHistory = vi.fn()
+  renderRechargeForm({
+    onRedemptionCodeChange,
+    onRedeem,
+    onOpenRedemptionHistory,
+  })
+
+  expect(screen.getByText(i18n.t('Add Funds'))).toBeVisible()
+  expect
+    .soft(
+      screen.queryByText(
+        i18n.t(
+          'Online topup is not enabled. Please use redemption code or contact administrator.'
+        )
+      )
+    )
+    .not.toBeInTheDocument()
+  expect
+    .soft(screen.queryByText(i18n.t('Choose an amount and payment method')))
+    .not.toBeInTheDocument()
+  expect(screen.queryByRole('spinbutton')).not.toBeInTheDocument()
+
+  const codeInput = screen.getByRole('textbox', {
+    name: i18n.t('Redemption Code'),
+  })
+  expect(codeInput).toBeVisible()
+  await user.click(screen.getByText(i18n.t('Redemption Code')))
+  expect(codeInput).toHaveFocus()
+  await user.paste('wallet-redemption-code')
+  expect(onRedemptionCodeChange).toHaveBeenLastCalledWith(
+    'wallet-redemption-code'
+  )
+  await user.click(screen.getByRole('button', { name: i18n.t('Redeem') }))
+  expect(onRedeem).toHaveBeenCalledOnce()
+  await user.click(
+    screen.getByRole('button', { name: i18n.t('Redemption History') })
+  )
+  expect(onOpenRedemptionHistory).toHaveBeenCalledOnce()
+})
+
+it.each([
+  {
+    name: 'online topup',
+    props: {
+      topupInfo: { ...disabledTopupInfo, enable_online_topup: true },
+    },
+  },
+  {
+    name: 'Stripe',
+    props: {
+      topupInfo: { ...disabledTopupInfo, enable_stripe_topup: true },
+    },
+  },
+  { name: 'Creem', props: { enableCreemTopup: true } },
+  { name: 'Waffo', props: { enableWaffoTopup: true } },
+  { name: 'Waffo Pancake', props: { enableWaffoPancakeTopup: true } },
+])('keeps payment guidance when only $name is enabled', ({ props }) => {
+  renderRechargeForm(props)
+
+  expect(
+    screen.getByText(i18n.t('Choose an amount and payment method'))
+  ).toBeVisible()
+})
+
+it('hides the redemption entry when redemption is explicitly disabled', () => {
+  renderRechargeForm({
+    topupInfo: { ...disabledTopupInfo, enable_redemption: false },
+  })
+
+  expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('button', { name: i18n.t('Redeem') })
+  ).not.toBeInTheDocument()
+})

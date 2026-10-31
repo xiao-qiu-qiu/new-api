@@ -1,14 +1,144 @@
 package model
 
 import (
+	"fmt"
+	"os"
 	"sync"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	"gorm.io/gorm/schema"
 )
+
+func TestGetUserRedemptionsDatabaseMatrix(t *testing.T) {
+	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(dialect, func(t *testing.T) {
+			var driver gorm.Dialector
+			switch dialect {
+			case "sqlite":
+				driver = sqlite.Open(":memory:")
+			case "mysql":
+				dsn := os.Getenv("TEST_MYSQL_DSN")
+				if dsn == "" {
+					t.Skip("TEST_MYSQL_DSN is not configured")
+				}
+				driver = mysql.Open(dsn)
+			case "postgres":
+				dsn := os.Getenv("TEST_POSTGRES_DSN")
+				if dsn == "" {
+					t.Skip("TEST_POSTGRES_DSN is not configured")
+				}
+				driver = postgres.Open(dsn)
+			}
+			db, err := gorm.Open(driver, &gorm.Config{
+				NamingStrategy: schema.NamingStrategy{TablePrefix: "redemption_history_test_"},
+			})
+			require.NoError(t, err)
+			sqlDB, err := db.DB()
+			require.NoError(t, err)
+			sqlDB.SetMaxOpenConns(1)
+			t.Cleanup(func() { assert.NoError(t, sqlDB.Close()) })
+
+			var version string
+			versionQuery := "SELECT version()"
+			if dialect == "sqlite" {
+				versionQuery = "SELECT sqlite_version()"
+			}
+			require.NoError(t, db.Raw(versionQuery).Scan(&version).Error)
+			t.Logf("database version: %s", version)
+			require.False(t, db.Migrator().HasTable(&Redemption{}), "use an empty test table")
+			require.NoError(t, db.AutoMigrate(&Redemption{}))
+			t.Cleanup(func() { assert.NoError(t, db.Migrator().DropTable(&Redemption{})) })
+			previousDB := DB
+			DB = db
+			t.Cleanup(func() { DB = previousDB })
+
+			codes := []Redemption{
+				{UserId: 999, UsedUserId: 101, Status: common.RedemptionCodeStatusUsed, RedeemedTime: 100, Quota: 500_000},
+				{UserId: 202, UsedUserId: 101, Status: common.RedemptionCodeStatusUsed, RedeemedTime: 200, Quota: 700_000},
+				{UserId: 202, UsedUserId: 101, Status: common.RedemptionCodeStatusUsed, RedeemedTime: 200, Quota: 5_000_000_000},
+				{UserId: 999, UsedUserId: 101, Status: common.RedemptionCodeStatusUsed, RedeemedTime: 300, Quota: 6_000_000_000, ExpiredTime: 1},
+				{UserId: 101, UsedUserId: 202, Status: common.RedemptionCodeStatusUsed, RedeemedTime: 400, Quota: 900_000},
+				{UserId: 101, UsedUserId: 101, Status: common.RedemptionCodeStatusEnabled, RedeemedTime: 500, Quota: 800_000},
+				{UserId: 101, UsedUserId: 101, Status: common.RedemptionCodeStatusDisabled, RedeemedTime: 500, Quota: 800_000},
+				{UserId: 101, Status: common.RedemptionCodeStatusUsed, RedeemedTime: 600, Quota: 800_000},
+			}
+			for i := range codes {
+				codes[i].Key = fmt.Sprintf("%032d", i+1)
+			}
+			require.NoError(t, db.Create(&codes).Error)
+			require.NoError(t, db.Delete(&codes[3]).Error)
+
+			for _, tc := range []struct {
+				name      string
+				userId    int
+				startIdx  int
+				num       int
+				wantIDs   []int
+				wantTotal int64
+				wantQuota int64
+			}{
+				{name: "first page includes deleted history and sorts timestamp then id", userId: 101, num: 2, wantIDs: []int{codes[3].Id, codes[2].Id}, wantTotal: 4, wantQuota: 11_001_200_000},
+				{name: "second page keeps totals for all successful redemptions", userId: 101, startIdx: 2, num: 2, wantIDs: []int{codes[1].Id, codes[0].Id}, wantTotal: 4, wantQuota: 11_001_200_000},
+				{name: "past last page returns empty items with full totals", userId: 101, startIdx: 4, num: 2, wantIDs: []int{}, wantTotal: 4, wantQuota: 11_001_200_000},
+				{name: "other user sees only their own usage despite creating codes", userId: 202, num: 10, wantIDs: []int{codes[4].Id}, wantTotal: 1, wantQuota: 900_000},
+				{name: "creator without usage has no history", userId: 999, num: 10, wantIDs: []int{}},
+				{name: "unknown user gets zero totals and empty items", userId: 303, num: 10, wantIDs: []int{}},
+				{name: "negative pagination falls back to a bounded first page", userId: 101, startIdx: -1, num: -1, wantIDs: []int{codes[3].Id, codes[2].Id, codes[1].Id, codes[0].Id}, wantTotal: 4, wantQuota: 11_001_200_000},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					history, err := GetUserRedemptions(tc.userId, tc.startIdx, tc.num)
+					require.NoError(t, err)
+					require.NotNil(t, history.Items)
+					assert.Equal(t, tc.wantTotal, history.Total)
+					assert.Equal(t, tc.wantQuota, history.TotalQuota)
+					ids := make([]int, 0, len(history.Items))
+					for _, item := range history.Items {
+						ids = append(ids, item.Id)
+					}
+					assert.Equal(t, tc.wantIDs, ids)
+				})
+			}
+
+			t.Run("history JSON contains only public fields and raw quota units", func(t *testing.T) {
+				history, err := GetUserRedemptions(101, 0, 1)
+				require.NoError(t, err)
+				payload, err := common.Marshal(history)
+				require.NoError(t, err)
+				assert.JSONEq(t, fmt.Sprintf(`{"items":[{"id":%d,"quota":6000000000,"redeemed_time":300}],"total":4,"total_quota":11001200000}`, codes[3].Id), string(payload))
+				emptyHistory, err := GetUserRedemptions(303, 0, 1)
+				require.NoError(t, err)
+				payload, err = common.Marshal(emptyHistory)
+				require.NoError(t, err)
+				assert.JSONEq(t, `{"items":[],"total":0,"total_quota":0}`, string(payload))
+			})
+
+			t.Run("cleaning invalid codes preserves all successful redemption history", func(t *testing.T) {
+				_, err := DeleteInvalidRedemptions()
+				require.NoError(t, err)
+				history, err := GetUserRedemptions(101, 0, 10)
+				require.NoError(t, err)
+				assert.Len(t, history.Items, 4)
+				assert.EqualValues(t, 4, history.Total)
+				assert.EqualValues(t, 11_001_200_000, history.TotalQuota)
+			})
+
+			t.Run("missing or invalid identity cannot read unassigned usage", func(t *testing.T) {
+				for _, userId := range []int{0, -1} {
+					history, err := GetUserRedemptions(userId, 0, 10)
+					require.Error(t, err)
+					assert.Nil(t, history)
+				}
+			})
+		})
+	}
+}
 
 func TestSearchRedemptionsFiltersAndPaginates(t *testing.T) {
 	require.NoError(t, DB.AutoMigrate(&Redemption{}))

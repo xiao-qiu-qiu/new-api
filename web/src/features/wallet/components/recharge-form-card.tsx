@@ -16,13 +16,21 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Gift, ExternalLink, Loader2, Receipt, WalletCards } from 'lucide-react'
+import {
+  Gift,
+  ExternalLink,
+  History,
+  Loader2,
+  Receipt,
+  WalletCards,
+} from 'lucide-react'
 import { useState, useEffect } from 'react'
 import { Trans, useTranslation } from 'react-i18next'
 
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
+import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { IconBadge } from '@/components/ui/icon-badge'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -73,6 +81,7 @@ interface RechargeFormCardProps {
   priceRatio?: number
   usdExchangeRate?: number
   onOpenBilling?: () => void
+  onOpenRedemptionHistory?: () => void
   creemProducts?: CreemProduct[]
   enableCreemTopup?: boolean
   onCreemProductSelect?: (product: CreemProduct) => void
@@ -103,6 +112,7 @@ export function RechargeFormCard({
   priceRatio = 1,
   usdExchangeRate = 1,
   onOpenBilling,
+  onOpenRedemptionHistory,
   creemProducts,
   enableCreemTopup,
   onCreemProductSelect,
@@ -197,7 +207,9 @@ export function RechargeFormCard({
   return (
     <TitledCard
       title={t('Add Funds')}
-      description={t('Choose an amount and payment method')}
+      description={
+        hasAnyTopup ? t('Choose an amount and payment method') : undefined
+      }
       icon={<WalletCards className='h-4 w-4' />}
       iconTone='success'
       disableHoverEffect
@@ -217,7 +229,7 @@ export function RechargeFormCard({
       contentClassName='space-y-4 sm:space-y-6'
     >
       {/* Online Topup Section */}
-      {hasAnyTopup ? (
+      {hasAnyTopup && (
         <div className='space-y-4 sm:space-y-6'>
           {hasConfigurableTopup && (
             <>
@@ -487,14 +499,6 @@ export function RechargeFormCard({
             </>
           )}
         </div>
-      ) : (
-        <Alert>
-          <AlertDescription>
-            {t(
-              'Online topup is not enabled. Please use redemption code or contact administrator.'
-            )}
-          </AlertDescription>
-        </Alert>
       )}
 
       {/* Creem Products Section */}
@@ -515,51 +519,64 @@ export function RechargeFormCard({
 
       {/* Redemption Code Section */}
       {redemptionEnabled ? (
-        <div className='space-y-2.5 border-t pt-4 sm:space-y-3 sm:pt-6'>
-          <div className='flex items-center gap-2'>
-            <IconBadge tone='warning' size='xs'>
-              <Gift />
-            </IconBadge>
-            <Label
-              htmlFor='redemption-code'
-              className='text-muted-foreground text-xs font-medium tracking-wider uppercase'
-            >
-              {t('Have a Code?')}
-            </Label>
-          </div>
-          <div className='grid grid-cols-[minmax(0,1fr)_auto] gap-2'>
-            <Input
-              id='redemption-code'
-              value={redemptionCode}
-              onChange={(e) => onRedemptionCodeChange(e.target.value)}
-              placeholder={t('Enter your redemption code')}
-              className='h-9 min-w-0'
-            />
-            <Button
-              onClick={onRedeem}
-              disabled={redeeming}
-              variant='outline'
-              className='h-9 px-4'
-            >
-              {redeeming && <Loader2 className='mr-2 h-4 w-4 animate-spin' />}
-              {t('Redeem')}
-            </Button>
-          </div>
-          {topupLink && (
-            <p className='text-muted-foreground text-xs'>
-              {t('Need a redemption code?')}{' '}
-              <a
-                href={topupLink}
-                target='_blank'
-                rel='noopener noreferrer'
-                className='inline-flex items-center gap-1 underline-offset-4 hover:underline'
+        <FieldGroup className='border-primary/20 bg-primary/5 rounded-xl border p-4 sm:p-5'>
+          <Field className='gap-4'>
+            <div className='flex flex-wrap items-center justify-between gap-3'>
+              <FieldLabel
+                htmlFor='redemption-code'
+                className='gap-2.5 text-base font-semibold'
               >
-                {t('Get one here')}
-                <ExternalLink className='h-3 w-3' />
-              </a>
-            </p>
-          )}
-        </div>
+                <IconBadge tone='primary' size='md'>
+                  <Gift />
+                </IconBadge>
+                {t('Redemption Code')}
+              </FieldLabel>
+              {onOpenRedemptionHistory && (
+                <Button
+                  type='button'
+                  variant='outline'
+                  size='sm'
+                  onClick={onOpenRedemptionHistory}
+                >
+                  <History aria-hidden='true' />
+                  {t('Redemption History')}
+                </Button>
+              )}
+            </div>
+            <div className='grid grid-cols-1 gap-3 sm:grid-cols-[minmax(0,1fr)_auto]'>
+              <Input
+                id='redemption-code'
+                value={redemptionCode}
+                onChange={(e) => onRedemptionCodeChange(e.target.value)}
+                placeholder={t('Enter your redemption code')}
+                className='bg-background h-11 min-w-0 text-base'
+              />
+              <Button
+                type='button'
+                onClick={onRedeem}
+                disabled={redeeming}
+                className='h-11 px-6'
+              >
+                {redeeming && <Loader2 className='size-4 animate-spin' />}
+                {t('Redeem')}
+              </Button>
+            </div>
+            {topupLink && (
+              <p className='text-muted-foreground text-sm'>
+                {t('Need a redemption code?')}{' '}
+                <a
+                  href={topupLink}
+                  target='_blank'
+                  rel='noopener noreferrer'
+                  className='text-primary inline-flex items-center gap-1 font-medium underline underline-offset-4'
+                >
+                  {t('Get one here')}
+                  <ExternalLink className='size-3' aria-hidden='true' />
+                </a>
+              </p>
+            )}
+          </Field>
+        </FieldGroup>
       ) : (
         <Alert className='border-t'>
           <AlertDescription>

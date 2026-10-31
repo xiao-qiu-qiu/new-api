@@ -28,6 +28,7 @@ import { AffiliateRewardsCard } from './components/affiliate-rewards-card'
 import { BillingHistoryDialog } from './components/dialogs/billing-history-dialog'
 import { CreemConfirmDialog } from './components/dialogs/creem-confirm-dialog'
 import { PaymentConfirmDialog } from './components/dialogs/payment-confirm-dialog'
+import { RedemptionHistoryDialog } from './components/dialogs/redemption-history-dialog'
 import { TransferDialog } from './components/dialogs/transfer-dialog'
 import { RechargeFormCard } from './components/recharge-form-card'
 import { SubscriptionPlansCard } from './components/subscription-plans-card'
@@ -74,6 +75,7 @@ export function Wallet(props: WalletProps) {
   const [confirmDialogOpen, setConfirmDialogOpen] = useState(false)
   const [transferDialogOpen, setTransferDialogOpen] = useState(false)
   const [billingDialogOpen, setBillingDialogOpen] = useState(false)
+  const [redemptionHistoryOpen, setRedemptionHistoryOpen] = useState(false)
   const [redemptionCode, setRedemptionCode] = useState('')
   const [creemDialogOpen, setCreemDialogOpen] = useState(false)
   const [selectedCreemProduct, setSelectedCreemProduct] =
@@ -318,6 +320,7 @@ export function Wallet(props: WalletProps) {
                   priceRatio={(status?.price as number) || 1}
                   usdExchangeRate={effectiveUsdExchangeRate}
                   onOpenBilling={() => setBillingDialogOpen(true)}
+                  onOpenRedemptionHistory={() => setRedemptionHistoryOpen(true)}
                   creemProducts={topupInfo?.creem_products}
                   enableCreemTopup={topupInfo?.enable_creem_topup}
                   onCreemProductSelect={handleCreemProductSelect}
@@ -377,6 +380,13 @@ export function Wallet(props: WalletProps) {
         open={billingDialogOpen}
         onOpenChange={setBillingDialogOpen}
       />
+
+      {redemptionHistoryOpen && (
+        <RedemptionHistoryDialog
+          open={redemptionHistoryOpen}
+          onOpenChange={setRedemptionHistoryOpen}
+        />
+      )}
 
       <CreemConfirmDialog
         open={creemDialogOpen}

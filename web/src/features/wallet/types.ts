@@ -176,6 +176,18 @@ export interface RedemptionRequest {
   key: string
 }
 
+export interface RedemptionRecord {
+  id: number
+  quota: number
+  redeemed_time: number
+}
+
+export interface RedemptionHistoryResponse {
+  items: RedemptionRecord[]
+  total: number
+  total_quota: number
+}
+
 /**
  * Payment request parameters
  */
