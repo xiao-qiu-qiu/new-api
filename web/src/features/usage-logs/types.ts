@@ -84,6 +84,7 @@ export type LogFilters = CommonLogFilters | DrawingLogFilters | TaskLogFilters
  * Parsed data from the 'other' field in usage logs
  */
 export interface ChannelAffinityInfo {
+  binding_id?: string
   rule_name?: string
   selected_group?: string
   key_source?: string
@@ -92,6 +93,11 @@ export interface ChannelAffinityInfo {
   key_hint?: string
   key_fp?: string
   using_group?: string
+}
+
+export type ChannelAffinityTarget = ChannelAffinityInfo & {
+  user_id?: number
+  token_id?: number
 }
 
 export const USAGE_BILLING_PATH = {

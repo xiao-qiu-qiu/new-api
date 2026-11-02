@@ -23,8 +23,15 @@ import { useTranslation } from 'react-i18next'
 import { SectionPageLayout } from '@/components/layout'
 import type { NavGroup } from '@/components/layout/types'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { ChannelAffinityManagerDialog } from '@/features/channel-affinity/manager-dialog'
 import { CacheStatsDialog } from '@/features/system-settings/general/channel-affinity/cache-stats-dialog'
 import { useSidebarConfig } from '@/hooks/use-sidebar-config'
+import {
+  ADMIN_PERMISSION_ACTIONS,
+  ADMIN_PERMISSION_RESOURCES,
+  hasPermission,
+} from '@/lib/admin-permissions'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { UserInfoDialog } from './components/dialogs/user-info-dialog'
 import {
@@ -72,6 +79,12 @@ function UsageLogsContent() {
     setAffinityDialogOpen,
   } = useUsageLogsContext()
   const { canManageScope, viewScope, setViewScope } = useLogsViewScope()
+  const currentUser = useAuthStore((state) => state.auth.user)
+  const canReadChannels = hasPermission(
+    currentUser,
+    ADMIN_PERMISSION_RESOURCES.CHANNEL,
+    ADMIN_PERMISSION_ACTIONS.READ
+  )
   const tabNavGroups = useMemo<NavGroup[]>(
     () => [
       {
@@ -164,23 +177,40 @@ function UsageLogsContent() {
         onOpenChange={setUserInfoDialogOpen}
       />
 
-      <CacheStatsDialog
-        open={affinityDialogOpen}
-        onOpenChange={setAffinityDialogOpen}
-        target={
-          affinityTarget
-            ? {
-                rule_name: affinityTarget.rule_name || '',
-                using_group:
-                  affinityTarget.using_group ||
-                  affinityTarget.selected_group ||
-                  '',
-                key_hint: affinityTarget.key_hint || '',
-                key_fp: affinityTarget.key_fp || '',
-              }
-            : null
-        }
-      />
+      {affinityDialogOpen && affinityTarget && canReadChannels && (
+        <ChannelAffinityManagerDialog
+          open
+          onOpenChange={setAffinityDialogOpen}
+          target={{
+            binding_id: affinityTarget.binding_id,
+            rule_name: affinityTarget.rule_name,
+            using_group:
+              affinityTarget.using_group || affinityTarget.selected_group,
+            key_fp: affinityTarget.key_fp,
+            user_id: affinityTarget.user_id,
+            token_id: affinityTarget.token_id,
+          }}
+        />
+      )}
+      {!canReadChannels && (
+        <CacheStatsDialog
+          open={affinityDialogOpen}
+          onOpenChange={setAffinityDialogOpen}
+          target={
+            affinityTarget
+              ? {
+                  rule_name: affinityTarget.rule_name || '',
+                  using_group:
+                    affinityTarget.using_group ||
+                    affinityTarget.selected_group ||
+                    '',
+                  key_hint: affinityTarget.key_hint || '',
+                  key_fp: affinityTarget.key_fp || '',
+                }
+              : null
+          }
+        />
+      )}
     </>
   )
 }

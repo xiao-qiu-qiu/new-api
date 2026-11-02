@@ -37,6 +37,9 @@ type channelAffinityLifetimeState struct {
 	IdleExpiresAt     int64  `json:"idle_expires_at"`
 	AbsoluteExpiresAt int64  `json:"absolute_expires_at"`
 	IdleTTLSeconds    int    `json:"idle_ttl_seconds"`
+	// Survives automatic residence changes, fencing every request observed
+	// before a manual reset or migration, including legacy/unbound requests.
+	ManualEpoch string `json:"manual_epoch,omitempty"`
 }
 
 func (s channelAffinityLifetimeState) limited() bool {
@@ -48,9 +51,13 @@ func (s channelAffinityLifetimeState) expired(now int64) bool {
 }
 
 type channelAffinityLifetimeObservation struct {
-	StartedAt   int64
-	Epoch       string
-	LiveLimited bool
+	StartedAt       int64
+	Epoch           string
+	LiveLimited     bool
+	ManualEpoch     string
+	ManagementEpoch string
+	LiveBinding     bool
+	ClearObserved   channelAffinityClearObservation
 }
 
 type channelAffinityLifetimeCodec struct{}
@@ -102,11 +109,14 @@ func channelAffinityLifetimeLock(key string) *sync.Mutex {
 }
 
 type channelAffinityBindingSnapshot struct {
-	channelID   int
-	found       bool
-	lifetime    channelAffinityLifetimeState
-	bindingRaw  string
-	lifetimeRaw string
+	channelID     int
+	found         bool
+	lifetime      channelAffinityLifetimeState
+	bindingRaw    string
+	lifetimeRaw   string
+	management    channelAffinityManagedBinding
+	managementRaw string
+	bindingTTL    time.Duration
 }
 
 // The caller holds the stripe lock in memory mode. Redis MGET takes a single
@@ -117,20 +127,16 @@ func loadChannelAffinityBinding(key string) (channelAffinityBindingSnapshot, err
 	if common.RedisEnabled && common.RDB != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		values, err := common.RDB.MGet(ctx, getChannelAffinityCache().FullKey(key), getChannelAffinityLifetimeCache().FullKey(suffix)).Result()
+		values, err := common.RDB.MGet(ctx, getChannelAffinityCache().FullKey(key), getChannelAffinityLifetimeCache().FullKey(suffix), getChannelAffinityManagementCache().FullKey(channelAffinityBindingID(key))).Result()
 		if err != nil {
 			return snapshot, err
 		}
-		if raw, ok := values[0].(string); ok {
-			snapshot.bindingRaw, snapshot.found = raw, true
-			snapshot.channelID, err = strconv.Atoi(raw)
-			if err != nil {
-				return snapshot, errors.New("invalid channel affinity binding")
-			}
+		snapshot, err = decodeChannelAffinityBindingSnapshot(values)
+		if err != nil {
+			return snapshot, err
 		}
-		if raw, ok := values[1].(string); ok {
-			snapshot.lifetimeRaw = raw
-			snapshot.lifetime, err = (channelAffinityLifetimeCodec{}).Decode(raw)
+		if snapshot.found && snapshot.management.CacheKey == "" {
+			snapshot.bindingTTL, err = common.RDB.PTTL(ctx, getChannelAffinityCache().FullKey(key)).Result()
 		}
 		return snapshot, err
 	}
@@ -140,8 +146,47 @@ func loadChannelAffinityBinding(key string) (channelAffinityBindingSnapshot, err
 		return snapshot, err
 	}
 	snapshot.lifetime, _, err = getChannelAffinityLifetimeCache().Get(suffix)
+	if err != nil {
+		return snapshot, err
+	}
+	snapshot.management, _, err = getChannelAffinityManagementCache().Get(channelAffinityBindingID(key))
 	return snapshot, err
 }
+
+func decodeChannelAffinityBindingSnapshot(values []any) (channelAffinityBindingSnapshot, error) {
+	var snapshot channelAffinityBindingSnapshot
+	var err error
+	if raw, ok := values[0].(string); ok {
+		snapshot.bindingRaw, snapshot.found = raw, true
+		snapshot.channelID, err = strconv.Atoi(raw)
+		if err != nil {
+			return snapshot, errors.New("invalid channel affinity binding")
+		}
+	}
+	if raw, ok := values[1].(string); ok {
+		snapshot.lifetimeRaw = raw
+		snapshot.lifetime, err = (channelAffinityLifetimeCodec{}).Decode(raw)
+		if err != nil {
+			return snapshot, err
+		}
+	}
+	if raw, ok := values[2].(string); ok {
+		snapshot.managementRaw = raw
+		snapshot.management, err = (channelAffinityManagementCodec{}).Decode(raw)
+	}
+	return snapshot, err
+}
+
+var channelAffinityManagementRegister = redis.NewScript(`
+if (redis.call('GET', KEYS[1]) or '') ~= ARGV[1] or
+   (redis.call('GET', KEYS[2]) or '') ~= ARGV[2] or
+   (redis.call('GET', KEYS[3]) or '') ~= ARGV[3] then return 0 end
+if (redis.call('GET', KEYS[4]) or '') ~= ARGV[6] or
+   (redis.call('GET', KEYS[5]) or '') ~= ARGV[7] or
+   (redis.call('GET', KEYS[6]) or '') ~= ARGV[8] then return 0 end
+redis.call('SET', KEYS[3], ARGV[4], 'PX', ARGV[5])
+return 1
+`)
 
 func readChannelAffinityBinding(meta *channelAffinityMeta) (int, bool, error) {
 	lock := channelAffinityLifetimeLock(meta.CacheKey)
@@ -150,19 +195,76 @@ func readChannelAffinityBinding(meta *channelAffinityMeta) (int, bool, error) {
 
 	observation := &channelAffinityLifetimeObservation{StartedAt: channelAffinityLifetimeNow().UnixMilli()}
 	meta.LifetimeObserved = observation
-	snapshot, err := loadChannelAffinityBinding(meta.CacheKey)
+	clearObserved, err := loadChannelAffinityClearObservation(meta.RuleName, meta.CacheKey)
 	if err != nil {
 		return 0, false, err
 	}
-	state := snapshot.lifetime
-	observation.Epoch = state.Epoch
-	if snapshot.found && state.ChannelID == snapshot.channelID && state.limited() {
-		if state.expired(channelAffinityLifetimeNow().UnixMilli()) {
+	observation.ClearObserved = clearObserved
+	for range 8 {
+		snapshot, err := loadChannelAffinityBinding(meta.CacheKey)
+		if err != nil {
+			return 0, false, err
+		}
+		state := snapshot.lifetime
+		observation.Epoch, observation.ManualEpoch = state.Epoch, state.ManualEpoch
+		observation.ManagementEpoch = snapshot.management.ResidenceEpoch
+		now := channelAffinityLifetimeNow().UnixMilli()
+		observation.LiveBinding = snapshot.live(now)
+		observation.LiveLimited = snapshot.live(now) && state.ChannelID == snapshot.channelID && state.limited()
+		if !snapshot.live(now) {
 			return 0, false, nil
 		}
-		observation.LiveLimited = true
+		expiresAt := snapshot.management.ExpiresAtMillis
+		if snapshot.management.Binding.ChannelID != snapshot.channelID {
+			expiresAt = 0
+		}
+		if expiresAt == 0 {
+			ttl := time.Duration(meta.TTLSeconds) * time.Second
+			if ttl <= 0 {
+				ttl = time.Hour
+			}
+			if snapshot.bindingTTL > 0 {
+				ttl = snapshot.bindingTTL
+			}
+			expiresAt = now + ttl.Milliseconds()
+		}
+		if state.ChannelID == snapshot.channelID && state.limited() {
+			expiresAt = min(expiresAt, state.IdleExpiresAt, state.AbsoluteExpiresAt)
+		}
+		value := nextChannelAffinityManagement(*meta, snapshot, snapshot.channelID, expiresAt, now, true)
+		retention := max(24*time.Hour, time.Duration(max(meta.TTLSeconds, 1))*time.Second) + time.Duration(max(0, state.AbsoluteExpiresAt-now))*time.Millisecond
+		if common.RedisEnabled && common.RDB != nil {
+			raw, err := (channelAffinityManagementCodec{}).Encode(value)
+			if err != nil {
+				return 0, false, err
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			updated, err := channelAffinityManagementRegister.Run(ctx, common.RDB, []string{
+				getChannelAffinityCache().FullKey(meta.CacheKey), getChannelAffinityLifetimeCache().FullKey(channelAffinityLifetimeSuffix(meta.CacheKey)), getChannelAffinityManagementCache().FullKey(value.Binding.ID),
+				channelAffinityClearFenceCache.FullKey("all"), channelAffinityClearFenceCache.FullKey("rule:" + meta.RuleName), channelAffinityClearFenceCache.FullKey(clearObserved.BindingKey),
+			}, snapshot.bindingRaw, snapshot.lifetimeRaw, snapshot.managementRaw, raw, retention.Milliseconds(), clearObserved.All, clearObserved.Rule, clearObserved.Binding).Int()
+			cancel()
+			if err != nil {
+				return 0, false, err
+			}
+			if updated != 1 {
+				continue
+			}
+		} else {
+			channelAffinityClearFenceLock.Lock()
+			current, err := loadChannelAffinityMemoryClearObservation(clearObserved)
+			if err == nil && current == clearObserved {
+				err = getChannelAffinityManagementCache().SetWithTTL(value.Binding.ID, value, retention)
+			}
+			channelAffinityClearFenceLock.Unlock()
+			if err != nil || current != clearObserved {
+				return 0, false, err
+			}
+		}
+		observation.ManagementEpoch = value.ResidenceEpoch
+		return snapshot.channelID, true, nil
 	}
-	return snapshot.channelID, snapshot.found, nil
+	return 0, false, errors.New("channel affinity binding changed during observation")
 }
 
 // A matching live observation may only renew its original epoch. Requests
@@ -171,6 +273,12 @@ func readChannelAffinityBinding(meta *channelAffinityMeta) (int, bool, error) {
 func nextChannelAffinityLifetime(meta channelAffinityMeta, snapshot channelAffinityBindingSnapshot, channelID, ttlSeconds int, now int64) (channelAffinityLifetimeState, time.Duration, bool) {
 	state := snapshot.lifetime
 	observed := meta.LifetimeObserved
+	if observed != nil && observed.LiveBinding && observed.ManagementEpoch != "" && observed.ManagementEpoch != snapshot.management.ResidenceEpoch {
+		return state, 0, false
+	}
+	if state.ManualEpoch != "" && (observed == nil || observed.ManualEpoch != state.ManualEpoch) {
+		return state, 0, false
+	}
 	if observed == nil {
 		if state.Epoch != "" {
 			return state, 0, false
@@ -207,47 +315,49 @@ func nextChannelAffinityLifetime(meta channelAffinityMeta, snapshot channelAffin
 	}
 	// Absence of metadata is the compatibility marker for pre-existing v1
 	// integer bindings. Never retrofit a limited residence onto those bindings.
-	legacy := state.Epoch == "" && snapshot.found && snapshot.channelID == channelID
+	legacy := state.Epoch == "" && snapshot.found && snapshot.channelID == channelID && (snapshot.management.CacheKey == "" || snapshot.live(now))
 	if !legacy && policy.IdleTTLSeconds > 0 && policy.MaxResidenceSeconds > 0 {
 		state = channelAffinityLifetimeState{
 			ChannelID: channelID, Epoch: common.GetUUID(), BoundAt: now,
+			ManualEpoch:       state.ManualEpoch,
 			IdleTTLSeconds:    policy.IdleTTLSeconds,
 			AbsoluteExpiresAt: now + int64(policy.MaxResidenceSeconds)*1000,
 		}
 		state.IdleExpiresAt = min(now+int64(policy.IdleTTLSeconds)*1000, state.AbsoluteExpiresAt)
 		ttl = time.Duration(state.IdleExpiresAt-now) * time.Millisecond
 	} else if state.Epoch != "" && (state.ChannelID != channelID || state.limited()) {
-		state = channelAffinityLifetimeState{ChannelID: channelID, Epoch: common.GetUUID(), BoundAt: now}
+		state = channelAffinityLifetimeState{ChannelID: channelID, Epoch: common.GetUUID(), BoundAt: now, ManualEpoch: state.ManualEpoch}
 	}
 	return state, ttl, true
 }
-
-var channelAffinityLifetimeUpdate = redis.NewScript(`
-if (redis.call('GET', KEYS[1]) or '') ~= ARGV[1] or
-   (redis.call('GET', KEYS[2]) or '') ~= ARGV[2] then
-  return 0
-end
-redis.call('SET', KEYS[1], ARGV[3], 'PX', ARGV[4])
-if ARGV[5] == '' then
-  redis.call('DEL', KEYS[2])
-else
-  redis.call('SET', KEYS[2], ARGV[5], 'PX', ARGV[6])
-end
-return 1
-`)
 
 func recordChannelAffinityBinding(meta channelAffinityMeta, channelID, ttlSeconds int) error {
 	lock := channelAffinityLifetimeLock(meta.CacheKey)
 	lock.Lock()
 	defer lock.Unlock()
-	suffix := channelAffinityLifetimeSuffix(meta.CacheKey)
+	meta.TTLSeconds = ttlSeconds
 	for range 8 {
+		observedClear := channelAffinityClearObservation{RuleName: meta.RuleName, BindingKey: channelAffinityBindingFenceKey(meta.CacheKey)}
+		if meta.LifetimeObserved != nil {
+			observedClear = meta.LifetimeObserved.ClearObserved
+		}
+		currentClear, err := loadChannelAffinityClearObservation(meta.RuleName, meta.CacheKey)
+		if err != nil {
+			return err
+		}
+		if observedClear != currentClear {
+			return nil
+		}
 		snapshot, err := loadChannelAffinityBinding(meta.CacheKey)
 		if err != nil {
 			return err
 		}
 		now := channelAffinityLifetimeNow().UnixMilli()
-		state, ttl, write := nextChannelAffinityLifetime(meta, snapshot, channelID, ttlSeconds, now)
+		bindingTTLSeconds := ttlSeconds
+		if snapshot.live(now) && snapshot.management.TTLSeconds > 0 {
+			bindingTTLSeconds = min(bindingTTLSeconds, snapshot.management.TTLSeconds)
+		}
+		state, ttl, write := nextChannelAffinityLifetime(meta, snapshot, channelID, bindingTTLSeconds, now)
 		if !write {
 			return nil
 		}
@@ -260,67 +370,100 @@ func recordChannelAffinityBinding(meta channelAffinityMeta, channelID, ttlSecond
 		} else {
 			retention += remaining
 		}
-		if common.RedisEnabled && common.RDB != nil {
-			raw := ""
-			if state.Epoch != "" {
-				raw, err = (channelAffinityLifetimeCodec{}).Encode(state)
-				if err != nil {
-					return err
-				}
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			updated, err := channelAffinityLifetimeUpdate.Run(ctx, common.RDB, []string{
-				getChannelAffinityCache().FullKey(meta.CacheKey), getChannelAffinityLifetimeCache().FullKey(suffix),
-			}, snapshot.bindingRaw, snapshot.lifetimeRaw, channelID, ttl.Milliseconds(), raw, retention.Milliseconds()).Int()
-			cancel()
-			if err != nil {
-				return err
-			}
-			if updated == 1 {
-				return nil
-			}
-			continue
+		legacy := snapshot.management.CacheKey == "" && snapshot.found
+		value := nextChannelAffinityManagement(meta, snapshot, channelID, now+ttl.Milliseconds(), now, legacy)
+		updated, err := writeChannelAffinityManagedBinding(meta.CacheKey, snapshot, channelID, ttl, state, value, retention, observedClear)
+		if err != nil {
+			return err
 		}
-		if state.Epoch != "" {
-			if err := getChannelAffinityLifetimeCache().SetWithTTL(suffix, state, retention); err != nil {
-				return err
-			}
+		if updated {
+			return nil
 		}
-		return getChannelAffinityCache().SetWithTTL(meta.CacheKey, channelID, ttl)
 	}
 	return errors.New("channel affinity binding changed during update")
 }
 
-var channelAffinityLifetimeDelete = redis.NewScript(`
-local deleted = redis.call('DEL', KEYS[1])
-redis.call('DEL', KEYS[2])
-return deleted
-`)
-
-func deleteChannelAffinityBinding(key string) (bool, error) {
+func deleteChannelAffinityBinding(key string, observations ...*channelAffinityLifetimeObservation) (bool, error) {
 	lock := channelAffinityLifetimeLock(key)
 	lock.Lock()
 	defer lock.Unlock()
-	suffix := channelAffinityLifetimeSuffix(key)
-	if common.RedisEnabled && common.RDB != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		deleted, err := channelAffinityLifetimeDelete.Run(ctx, common.RDB, []string{
-			getChannelAffinityCache().FullKey(key), getChannelAffinityLifetimeCache().FullKey(suffix),
-		}).Int()
-		return deleted > 0, err
+	for range 8 {
+		var fences []channelAffinityClearObservation
+		if len(observations) > 0 && observations[0] != nil {
+			observed := observations[0].ClearObserved
+			current, err := loadChannelAffinityClearObservation(observed.RuleName, key)
+			if err != nil || current != observed {
+				return false, err
+			}
+			fences = append(fences, observed)
+		}
+		snapshot, err := loadChannelAffinityBinding(key)
+		if err != nil {
+			return false, err
+		}
+		if len(observations) > 0 && observations[0] != nil && observations[0].ManualEpoch != snapshot.lifetime.ManualEpoch {
+			return false, nil
+		}
+		if !snapshot.found && snapshot.lifetime.Epoch == "" && snapshot.management.CacheKey == "" {
+			return false, nil
+		}
+		// Every clear creates a tombstone. Deleting the epoch would let a slow
+		// completion recreate a legacy or unlimited binding immediately.
+		state := snapshot.lifetime
+		if snapshot.found {
+			state.ChannelID = snapshot.channelID
+		}
+		if state.ChannelID <= 0 {
+			state.ChannelID = snapshot.management.Binding.ChannelID
+		}
+		if state.ChannelID <= 0 {
+			return false, errors.New("invalid channel affinity lifetime metadata")
+		}
+		state.Epoch, state.ManualEpoch, state.BoundAt = common.GetUUID(), common.GetUUID(), channelAffinityLifetimeNow().UnixMilli()
+		state.IdleExpiresAt, state.AbsoluteExpiresAt, state.IdleTTLSeconds = 0, 0, 0
+		value := snapshot.management
+		if value.CacheKey == "" {
+			value.CacheKey = getChannelAffinityCache().FullKey(key)
+			value.Binding.ID = channelAffinityBindingID(key)
+			value.Binding.ChannelID = state.ChannelID
+		}
+		value.Active, value.ExpiresAtMillis, value.Binding.ExpiresAt = false, 0, 0
+		value.Binding.Version, value.ResidenceEpoch = common.GetUUID(), common.GetUUID()
+		updated, err := writeChannelAffinityManagedBinding(key, snapshot, 0, 0, state, value, 24*time.Hour, fences...)
+		if err != nil {
+			return false, err
+		}
+		if !updated {
+			continue
+		}
+		// The request performing an automatic unusable-channel clear may bind
+		// its own successful fallback. Other requests keep their old observations.
+		if len(observations) > 0 && observations[0] != nil {
+			observations[0].Epoch, observations[0].ManualEpoch = state.Epoch, state.ManualEpoch
+			observations[0].ManagementEpoch = value.ResidenceEpoch
+			observations[0].LiveBinding, observations[0].LiveLimited = false, false
+			observations[0].ClearObserved.Binding = state.ManualEpoch
+		}
+		return snapshot.found, nil
 	}
-	if _, err := getChannelAffinityLifetimeCache().DeleteMany([]string{suffix}); err != nil {
-		return false, err
-	}
-	deleted, err := getChannelAffinityCache().DeleteMany([]string{key})
-	return deleted[getChannelAffinityCache().FullKey(key)], err
+	return false, errors.New("channel affinity binding changed during deletion")
 }
 
 // Enumerate both namespaces so expired bindings' orphan metadata is included.
 // Filter literal prefixes in Go: rule names containing Redis glob characters
 // must not clear a different rule. Counts still refer only to v1 main keys.
 func clearChannelAffinityBindings(prefix string) (int, error) {
+	getChannelAffinityManagementCache()
+	clearKey := "all"
+	if prefix != "" {
+		clearKey = "rule:" + strings.TrimSuffix(prefix, ":")
+	}
+	channelAffinityClearFenceLock.Lock()
+	err := channelAffinityClearFenceCache.SetWithTTL(clearKey, common.GetUUID(), 0)
+	channelAffinityClearFenceLock.Unlock()
+	if err != nil {
+		return 0, err
+	}
 	mainKeys, err := getChannelAffinityCache().Keys()
 	if err != nil {
 		return 0, err

@@ -2,6 +2,8 @@ package controller
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -9,11 +11,224 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/service/authz"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestChannelAffinityManagementRejectsInvalidInput(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	ref := `{"id":"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789","version":"0123456789abcdef0123456789abcdef","channel_id":3}`
+	tooMany := strings.TrimSuffix(strings.Repeat(ref+",", 201), ",")
+	for _, tc := range []struct {
+		name, path, body, contentType string
+		handler                       gin.HandlerFunc
+	}{
+		{"empty bindings", "/targets", `{"bindings":[]}`, "application/json", GetChannelAffinityTargets},
+		{"too many bindings", "/targets", `{"bindings":[` + tooMany + `]}`, "application/json", GetChannelAffinityTargets},
+		{"duplicate binding", "/targets", `{"bindings":[` + ref + `,` + ref + `]}`, "application/json", GetChannelAffinityTargets},
+		{"missing version", "/targets", `{"bindings":[{"id":"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789","channel_id":3}]}`, "application/json", GetChannelAffinityTargets},
+		{"missing source channel", "/targets", `{"bindings":[{"id":"abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789","version":"v1"}]}`, "application/json", GetChannelAffinityTargets},
+		{"raw redis key", "/targets", `{"bindings":[{"id":"new-api:channel_affinity:v1:key","version":"v1","channel_id":3}]}`, "application/json", GetChannelAffinityTargets},
+		{"display fingerprint", "/targets", `{"bindings":[{"id":"ab12cd34","version":"v1","channel_id":3}]}`, "application/json", GetChannelAffinityTargets},
+		{"raw key field", "/targets", `{"bindings":[` + strings.TrimSuffix(ref, "}") + `,"key":"secret"}]}`, "application/json", GetChannelAffinityTargets},
+		{"unknown request field", "/targets", `{"bindings":[` + ref + `],"redis_key":"secret"}`, "application/json", GetChannelAffinityTargets},
+		{"targets cannot accept action", "/targets", `{"bindings":[` + ref + `],"action":"reset"}`, "application/json", GetChannelAffinityTargets},
+		{"unknown action", "/actions", `{"bindings":[` + ref + `],"action":"delete"}`, "application/json", MutateChannelAffinityBindings},
+		{"missing migration target", "/actions", `{"bindings":[` + ref + `],"action":"migrate"}`, "application/json", MutateChannelAffinityBindings},
+		{"zero migration target", "/actions", `{"bindings":[` + ref + `],"action":"migrate","target_channel_id":0}`, "application/json", MutateChannelAffinityBindings},
+		{"reset target forbidden", "/actions", `{"bindings":[` + ref + `],"action":"reset","target_channel_id":3}`, "application/json", MutateChannelAffinityBindings},
+		{"null reset target forbidden", "/actions", `{"bindings":[` + ref + `],"action":"reset","target_channel_id":null}`, "application/json", MutateChannelAffinityBindings},
+		{"invalid JSON", "/targets", `{"bindings":`, "application/json", GetChannelAffinityTargets},
+		{"trailing JSON", "/targets", `{"bindings":[]} {}`, "application/json", GetChannelAffinityTargets},
+		{"null body", "/targets", `null`, "application/json", GetChannelAffinityTargets},
+		{"simple request content type", "/targets", `{"bindings":[` + ref + `]}`, "text/plain", GetChannelAffinityTargets},
+		{"oversized body", "/targets", strings.Repeat(" ", 128<<10) + `{}`, "application/json", GetChannelAffinityTargets},
+		{"negative filter", "/bindings?user_id=-1", "", "", ListChannelAffinityBindings},
+		{"invalid filter", "/bindings?channel_id=oops", "", "", ListChannelAffinityBindings},
+		{"duplicate filter", "/bindings?user_id=1&user_id=2", "", "", ListChannelAffinityBindings},
+		{"empty filter", "/bindings?rule_name=", "", "", ListChannelAffinityBindings},
+		{"unknown filter", "/bindings?raw_key=secret", "", "", ListChannelAffinityBindings},
+		{"zero page", "/bindings?page=0", "", "", ListChannelAffinityBindings},
+		{"page size cap", "/bindings?page_size=201", "", "", ListChannelAffinityBindings},
+		{"page overflow", "/bindings?page=9223372036854775807&page_size=200", "", "", ListChannelAffinityBindings},
+		{"fingerprint as binding filter", "/bindings?binding_id=ab12cd34", "", "", ListChannelAffinityBindings},
+		{"malformed query encoding", "/bindings?page=%ZZ", "", "", ListChannelAffinityBindings},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(response)
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/api/channel/affinity"+tc.path, strings.NewReader(tc.body))
+			ctx.Request.Header.Set("Content-Type", tc.contentType)
+			tc.handler(ctx)
+			require.Equal(t, http.StatusBadRequest, response.Code, response.Body.String())
+			var result struct {
+				Success    bool
+				MessageKey string `json:"message_key"`
+			}
+			require.NoError(t, common.Unmarshal(response.Body.Bytes(), &result))
+			assert.False(t, result.Success)
+			assert.NotEmpty(t, result.MessageKey)
+			assert.NotContains(t, response.Body.String(), "secret")
+		})
+	}
+}
+
+func TestChannelAffinityManagementAuthorizationAndAudit(t *testing.T) {
+	admin, _ := setupAccessTokenAudit(t)
+	user := &model.User{Username: "affinity-user", AffCode: "affinity-user", Role: common.RoleCommonUser, Status: common.UserStatusEnabled, AuthVersion: 1}
+	require.NoError(t, model.DB.Create(user).Error)
+	_, sessionToken := createAccessTokenTestSession(t, admin.Id, "affinity-admin-session")
+	credentials := map[string]string{"session": sessionToken}
+	for _, grant := range []struct {
+		name   string
+		userID int
+		scope  string
+	}{
+		{"read", admin.Id, "channel:read"},
+		{"operate", admin.Id, "channel:operate"},
+		{"write", admin.Id, "channel:write"},
+		{"user-read", user.Id, "channel:read"},
+		{"user-operate", user.Id, "channel:operate"},
+	} {
+		raw, _ := createScopedAccessToken(t, grant.userID, 0, grant.scope)
+		credentials[grant.name] = raw
+	}
+	engine := gin.New()
+	engine.Use(middleware.RequestId(), middleware.AccessTokenAudit())
+	group := engine.Group("/api/channel/affinity", middleware.AdminAuth(), middleware.DisableCache())
+	for _, route := range []struct {
+		method, path string
+		permission   authz.Permission
+		handler      gin.HandlerFunc
+	}{
+		{http.MethodGet, "/bindings", authz.ChannelRead, ListChannelAffinityBindings},
+		{http.MethodPost, "/targets", authz.ChannelRead, GetChannelAffinityTargets},
+		{http.MethodPost, "/actions", authz.ChannelOperate, MutateChannelAffinityBindings},
+	} {
+		middleware.DeclareAccessTokenPermissionRoute(route.method, group.BasePath()+route.path, route.permission)
+		group.Handle(route.method, route.path, middleware.RequirePermission(route.permission), route.handler)
+	}
+	for _, tc := range []struct {
+		name, credential, method, path string
+		status                         int
+	}{
+		{"anonymous", "", http.MethodPost, "/actions", http.StatusUnauthorized},
+		{"ordinary user read", "user-read", http.MethodGet, "/bindings?page=0", http.StatusForbidden},
+		{"ordinary user targets", "user-read", http.MethodPost, "/targets", http.StatusForbidden},
+		{"ordinary user actions", "user-operate", http.MethodPost, "/actions", http.StatusForbidden},
+		{"list read scope", "read", http.MethodGet, "/bindings?page=0", http.StatusBadRequest},
+		{"list missing read scope", "operate", http.MethodGet, "/bindings?page=0", http.StatusForbidden},
+		{"targets read scope", "read", http.MethodPost, "/targets", http.StatusBadRequest},
+		{"targets missing read scope", "operate", http.MethodPost, "/targets", http.StatusForbidden},
+		{"actions operate scope", "operate", http.MethodPost, "/actions", http.StatusBadRequest},
+		{"actions read scope", "read", http.MethodPost, "/actions", http.StatusForbidden},
+		{"write scope does not imply operate", "write", http.MethodPost, "/actions", http.StatusForbidden},
+		{"session read", "session", http.MethodGet, "/bindings?page=0", http.StatusBadRequest},
+		{"session targets", "session", http.MethodPost, "/targets", http.StatusBadRequest},
+		{"session actions", "session", http.MethodPost, "/actions", http.StatusBadRequest},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			response := accessTokenRequest(engine, tc.method, group.BasePath()+tc.path, credentials[tc.credential], "", `{}`)
+			assert.Equal(t, tc.status, response.Code, response.Body.String())
+		})
+	}
+	var targetOperationCount int64
+	require.NoError(t, model.LOG_DB.Model(&model.AuditLog{}).Where("route = ? AND category = ?", group.BasePath()+"/targets", model.AuditCategoryOperation).Count(&targetOperationCount).Error)
+	assert.Zero(t, targetOperationCount, "read-only POST target preview must not create operation audits")
+	var targetPATCount int64
+	require.NoError(t, model.LOG_DB.Model(&model.AuditLog{}).Where("route = ? AND category = ?", group.BasePath()+"/targets", model.AuditCategoryAccessToken).Count(&targetPATCount).Error)
+	assert.Positive(t, targetPATCount, "the narrow exclusion must preserve PAT access audits")
+
+	// A refresh cookie cannot authenticate channel writes or target previews.
+	for _, path := range []string{"/actions", "/targets"} {
+		request := httptest.NewRequest(http.MethodPost, group.BasePath()+path, strings.NewReader(`{}`))
+		request.Header.Set("Content-Type", "application/json")
+		request.AddCookie(&http.Cookie{Name: service.RefreshCookieName, Value: sessionToken})
+		response := httptest.NewRecorder()
+		engine.ServeHTTP(response, request)
+		assert.Equal(t, http.StatusUnauthorized, response.Code)
+	}
+
+	// Valid but absent handles return per-binding expiry, with one structured audit
+	// per operation and no handle, version or bearer secret in the audit metadata.
+	refID := strings.Repeat("e", 64)
+	refVersion := strings.Repeat("f", 32)
+	for _, action := range []string{"reset", "migrate"} {
+		body := `{"action":"` + action + `","bindings":[{"id":"` + refID + `","version":"` + refVersion + `","channel_id":3}]`
+		targetID := 0
+		if action == "migrate" {
+			body += `,"target_channel_id":59`
+			targetID = 59
+		}
+		body += `}`
+		response := accessTokenRequest(engine, http.MethodPost, group.BasePath()+"/actions", credentials["operate"], "", body)
+		require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+		assert.Contains(t, response.Body.String(), `"expired":1`)
+		var entries []model.AuditLog
+		require.NoError(t, model.LOG_DB.Where("action = ?", "channel.affinity_"+action).Find(&entries).Error)
+		require.Len(t, entries, 1, "manual audit must suppress the AdminAuth fallback")
+		entry := entries[0]
+		assert.Equal(t, admin.Id, entry.UserId)
+		assert.Equal(t, common.RoleAdminUser, entry.ActorRole)
+		assert.False(t, entry.Success)
+		require.NotNil(t, entry.Other.AdminInfo)
+		assert.Equal(t, admin.Id, entry.Other.AdminInfo.AdminID)
+		require.NotNil(t, entry.Other.Op)
+		params, err := common.Marshal(entry.Other.Op.Params)
+		require.NoError(t, err)
+		assert.Contains(t, string(params), `"source_channel_ids":[3]`)
+		assert.Contains(t, string(params), `"expired":1`)
+		var auditParams struct {
+			TargetChannelID int `json:"target_channel_id"`
+		}
+		require.NoError(t, common.Unmarshal(params, &auditParams))
+		assert.Equal(t, targetID, auditParams.TargetChannelID)
+		encoded, err := common.Marshal(entries)
+		require.NoError(t, err)
+		for _, secret := range []string{refID, refVersion, credentials["operate"]} {
+			assert.NotContains(t, string(encoded), secret)
+		}
+	}
+
+	// PAT scopes and the current owner's server-side permissions are both required.
+	require.NoError(t, authz.SetUserPermissions(admin.Id, authz.PermissionsMap{authz.ResourceChannel: {authz.ActionRead: false, authz.ActionOperate: false}}))
+	for _, tc := range []struct{ method, path, credential string }{
+		{http.MethodGet, "/bindings?page=0", "read"},
+		{http.MethodPost, "/targets", "read"},
+		{http.MethodPost, "/actions", "operate"},
+		{http.MethodPost, "/actions", "session"},
+	} {
+		response := accessTokenRequest(engine, tc.method, group.BasePath()+tc.path, credentials[tc.credential], "", `{}`)
+		assert.Equal(t, http.StatusForbidden, response.Code, response.Body.String())
+	}
+}
+
+func TestChannelAffinityManagementErrorsExcludeCacheDetails(t *testing.T) {
+	for _, tc := range []struct {
+		err    error
+		status int
+		key    string
+	}{
+		{errors.New("redis new-api:channel_affinity:private-secret failed"), http.StatusInternalServerError, "Channel affinity operation failed"},
+		{fmt.Errorf("redis private-secret: %w", common.NewMessage("Channel affinity binding has expired")), http.StatusBadRequest, "Channel affinity binding has expired"},
+	} {
+		response := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(response)
+		channelAffinityManagementError(ctx, tc.err)
+		assert.Equal(t, tc.status, response.Code)
+		var result struct {
+			Key string `json:"message_key"`
+		}
+		require.NoError(t, common.Unmarshal(response.Body.Bytes(), &result))
+		assert.Equal(t, tc.key, result.Key)
+		assert.NotContains(t, response.Body.String(), "private-secret")
+	}
+}
 
 func TestChannelHasSensitiveChanges(t *testing.T) {
 	baseURL := "https://api.example.com"

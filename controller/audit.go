@@ -66,6 +66,8 @@ var auditContentTemplates = map[string]string{
 	"channel.multi_key_manage":   "Multi-key management ${action} on channel (ID: ${id})",
 	"channel.upstream_apply":     "Applied upstream model changes to channel (ID: ${id})",
 	"channel.upstream_apply_all": "Applied upstream model changes to ${count} channels",
+	"channel.affinity_reset":     "Reset channel affinity bindings: succeeded ${succeeded}, expired ${expired}, conflicted ${conflicted}, failed ${failed}",
+	"channel.affinity_migrate":   "Migrated channel affinity bindings to channel ${target_channel_id}: succeeded ${succeeded}, expired ${expired}, conflicted ${conflicted}, failed ${failed}",
 
 	"redemption.create":       "Created ${count} redemption codes named ${name} (${quota} each)",
 	"redemption.delete_batch": "Batch deleted ${count} redemption codes",

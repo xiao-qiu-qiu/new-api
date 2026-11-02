@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { flexRender, type Cell } from '@tanstack/react-table'
-import { ChevronRight, KeyRound } from 'lucide-react'
+import { ChevronRight, KeyRound, Sparkles } from 'lucide-react'
 import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -27,10 +27,16 @@ import { GroupBadge } from '@/components/group-badge'
 import { StatusBadge, type StatusVariant } from '@/components/status-badge'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Button } from '@/components/ui/button'
+import {
+  ADMIN_PERMISSION_ACTIONS,
+  ADMIN_PERMISSION_RESOURCES,
+  hasPermission,
+} from '@/lib/admin-permissions'
 import { getUserAvatarFallback, getUserAvatarStyle } from '@/lib/avatar'
 import { getLogCacheHitRate } from '@/lib/cache-hit-rate'
 import dayjs from '@/lib/dayjs'
 import { formatLogQuota, formatTimestampToDate } from '@/lib/format'
+import { useAuthStore } from '@/stores/auth-store'
 
 import type { UsageLog } from '../data/schema'
 import {
@@ -71,9 +77,16 @@ export function CommonLogMobileCard<TData>(props: {
 }) {
   const { t } = useTranslation()
   const context = useUsageLogsContext()
+  const currentUser = useAuthStore((state) => state.auth.user)
+  const canReadChannels = hasPermission(
+    currentUser,
+    ADMIN_PERMISSION_RESOURCES.CHANNEL,
+    ADMIN_PERMISSION_ACTIONS.READ
+  )
   const [selectedField, setSelectedField] = useState<FieldName | null>(null)
   const log = props.log
   const other = parseLogOther(log.other)
+  const affinity = other?.admin_info?.channel_affinity
   const displayable = isDisplayableLogType(log.type)
   const timing = isTimingLogType(log.type)
   const model = formatModelName(log)
@@ -287,6 +300,35 @@ export function CommonLogMobileCard<TData>(props: {
                   </Button>
                 ) : (
                   <span className='min-w-0 py-1.5'>••••</span>
+                )}
+                {id === 'channel' && affinity && (
+                  <Button
+                    variant='ghost'
+                    size='icon-sm'
+                    className='text-amber-500'
+                    aria-label={
+                      canReadChannels
+                        ? t('Manage affinity')
+                        : t('Channel Affinity')
+                    }
+                    aria-haspopup='dialog'
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      context.setAffinityTarget({
+                        binding_id: affinity.binding_id,
+                        rule_name: affinity.rule_name || '',
+                        using_group:
+                          affinity.using_group || affinity.selected_group || '',
+                        key_hint: affinity.key_hint || '',
+                        key_fp: affinity.key_fp || '',
+                        user_id: log.user_id,
+                        token_id: log.token_id,
+                      })
+                      context.setAffinityDialogOpen(true)
+                    }}
+                  >
+                    <Sparkles className='size-3.5' aria-hidden='true' />
+                  </Button>
                 )}
               </div>
             )

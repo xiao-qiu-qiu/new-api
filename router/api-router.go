@@ -286,6 +286,10 @@ func SetApiRouter(router *gin.Engine) {
 		}
 		handlePermissionRoute(apiRouter.Group("", middleware.AdminAuth()), http.MethodGet, "/task_plugin_options", authz.TaskPluginBind, controller.GetTaskPluginOptions)
 		registerChannelRoutes(apiRouter)
+		channelAffinityRoute := apiRouter.Group("/channel/affinity", middleware.AdminAuth(), middleware.DisableCache())
+		handlePermissionRoute(channelAffinityRoute, http.MethodGet, "/bindings", authz.ChannelRead, controller.ListChannelAffinityBindings)
+		handlePermissionRoute(channelAffinityRoute, http.MethodPost, "/targets", authz.ChannelRead, controller.GetChannelAffinityTargets)
+		handlePermissionRoute(channelAffinityRoute, http.MethodPost, "/actions", authz.ChannelOperate, controller.MutateChannelAffinityBindings)
 		registerAuthzRoutes(apiRouter)
 		tokenRoute := apiRouter.Group("/token")
 		tokenRoute.Use(middleware.UserAuth())
