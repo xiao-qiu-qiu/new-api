@@ -25,9 +25,70 @@ import {
   pricingFromDraft,
   pricingOptions,
   pricingRow,
+  pricingValuesByModel,
 } from '../pricing'
 
 describe('shared model pricing', () => {
+  it('round-trips group-ratio policy and includes a toggle-only edit in saved changes', () => {
+    const key = 'billing_setting.ignore_group_ratio'
+    const before = pricingOptions({ ModelPrice: '{"image":0.03}' })
+    const configured = { ModelPrice: 0.03 }
+    const snapshot: ModelPricingConfig = {
+      options: before,
+      empty_version: 'empty',
+      entries: [
+        {
+          model_name: 'image',
+          version: 'v1',
+          configured,
+          effective: configured,
+        },
+      ],
+    }
+    const draft = pricingRow('image', configured)
+    const enabled = applyPricingDraft(before, {
+      ...draft,
+      ignoreGroupRatio: true,
+    })
+    expect(
+      buildPricingChanges(snapshot, before, enabled)[0].pricing
+    ).toMatchObject({
+      ModelPrice: 0.03,
+      [key]: true,
+    })
+    expect(
+      pricingRow('image', pricingValuesByModel(enabled).get('image') ?? {})
+        .ignoreGroupRatio
+    ).toBe(true)
+    const disabled = applyPricingDraft(enabled, {
+      ...draft,
+      ignoreGroupRatio: false,
+    })
+    expect(pricingValuesByModel(disabled).get('image')).toMatchObject({
+      [key]: false,
+      ModelPrice: 0.03,
+    })
+    expect(() =>
+      pricingValuesByModel(pricingOptions({ [key]: '{"image":"true"}' }))
+    ).toThrow()
+    expect(() =>
+      pricingValuesByModel(pricingOptions({ ModelPrice: '{"image":true}' }))
+    ).toThrow()
+  })
+
+  it('keeps the local group-ratio policy when syncing upstream prices', () => {
+    const key = 'billing_setting.ignore_group_ratio'
+    const options = pricingOptions({
+      ModelPrice: '{"image":0.03,"other":0.1}',
+      IgnoreGroupRatio: '{"image":true,"other":false}',
+    })
+    const after = applyPriceSyncSelections(options, {
+      image: { model_price: 0.04 },
+    })
+    expect(JSON.parse(after[key])).toEqual({ image: true, other: false })
+    expect(JSON.parse(after.ModelPrice)).toEqual({ image: 0.04, other: 0.1 })
+  })
+
   it('preserves explicit zero prices and cache-write configuration', () => {
     expect(
       pricingFromDraft({

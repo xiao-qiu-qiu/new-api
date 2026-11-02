@@ -66,7 +66,7 @@ var ErrModelPricingConflict = errors.New("model pricing changed; reload before s
 var modelPricingOptionKeys = []string{
 	"AudioCompletionRatio", "AudioRatio", "CacheRatio", "CompletionRatio",
 	"CreateCacheRatio", "ImageRatio", "ModelPrice", "ModelRatio",
-	"billing_setting.billing_expr", "billing_setting.billing_mode", billing_setting.PluginBillingExprOption,
+	"billing_setting.billing_expr", "billing_setting.billing_mode", billing_setting.IgnoreGroupRatioOption, billing_setting.PluginBillingExprOption,
 }
 
 var modelPricingMutationMu sync.Mutex
@@ -171,6 +171,10 @@ func effectiveModelPricing(values map[string]map[string]any, name string) Pricin
 	result := modelPricingValues(values, name)
 	// Legacy wildcard aliases are resolved by the same normalization as relay.
 	alias := ratio_setting.FormatMatchingModelName(name)
+	ignored, configured := values[billing_setting.IgnoreGroupRatioOption][name]
+	if !configured {
+		ignored, configured = values[billing_setting.IgnoreGroupRatioOption][alias]
+	}
 	for _, key := range []string{"ModelPrice", "ModelRatio", "CompletionRatio", "AudioRatio", "AudioCompletionRatio"} {
 		delete(result, key)
 		if value, exists := values[key][alias]; exists {
@@ -185,6 +189,19 @@ func effectiveModelPricing(values map[string]map[string]any, name string) Pricin
 			mode = "tiered_expr"
 		}
 	}
+	if !configured {
+		if target, resolved := ResolveTaskModelAlias(jsplugin.DefaultRegistry.Generation(), name); resolved && target.Declared != "" {
+			_, originOverride := values[billing_setting.PluginBillingExprOption][billing_setting.PluginBillingExprKey(target.PluginKey, name)]
+			_, mappedOverride := values[billing_setting.PluginBillingExprOption][billing_setting.PluginBillingExprKey(target.PluginKey, target.Declared)]
+			mapped := effectiveModelPricing(values, target.Declared)
+			mappedExpression, _ := mapped["billing_setting.billing_expr"].(string)
+			if !originOverride && (mappedOverride || (mode != billing_setting.BillingModeTieredExpr &&
+				mapped["billing_setting.billing_mode"] == billing_setting.BillingModeTieredExpr && strings.TrimSpace(mappedExpression) != "")) {
+				ignored = mapped[billing_setting.IgnoreGroupRatioOption]
+			}
+		}
+	}
+	result[billing_setting.IgnoreGroupRatioOption], _ = ignored.(bool)
 	if mode == "tiered_expr" {
 		result["billing_setting.billing_mode"] = mode
 		if _, exists := result["billing_setting.billing_expr"]; !exists {
@@ -402,6 +419,12 @@ func validateModelPricing(name string, values, previous PricingValues) error {
 		}
 		if !IsModelPricingOption(key) {
 			return fmt.Errorf("unsupported pricing field: %s", key)
+		}
+		if key == billing_setting.IgnoreGroupRatioOption {
+			if _, ok := value.(bool); !ok {
+				return fmt.Errorf("%s must be a boolean", key)
+			}
+			continue
 		}
 		if key == "billing_setting.billing_mode" {
 			if value != "ratio" && value != "tiered_expr" {

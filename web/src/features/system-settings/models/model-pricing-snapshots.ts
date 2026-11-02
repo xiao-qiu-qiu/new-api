@@ -33,10 +33,12 @@ export type ModelPricingSnapshotInput = {
   audioCompletionRatio: string
   billingMode: string
   billingExpr: string
+  ignoreGroupRatio?: string
   pluginBillingExpr?: string
 }
 
 export type ModelPricingSnapshot = {
+  ignoreGroupRatio?: boolean
   pluginBillingExpr?: Record<string, string>
   name: string
   price?: string
@@ -166,6 +168,7 @@ export const buildModelSnapshots = ({
   audioCompletionRatio,
   billingMode,
   billingExpr,
+  ignoreGroupRatio = '{}',
   pluginBillingExpr = '{}',
 }: ModelPricingSnapshotInput): ModelPricingSnapshot[] => {
   const priceMap = safeJsonParse<Record<string, number>>(modelPrice, {
@@ -213,6 +216,10 @@ export const buildModelSnapshots = ({
     pluginBillingExpr,
     { fallback: {}, context: 'plugin billing expressions' }
   )
+  const ignoreGroupRatioMap = safeJsonParse<Record<string, boolean>>(
+    ignoreGroupRatio,
+    { fallback: {}, context: 'model group ratio policy' }
+  )
   const pluginExpressionsByModel = new Map<string, Record<string, string>>()
   for (const [key, expression] of Object.entries(pluginExprMap)) {
     const parts = splitPluginBillingExprKey(key)
@@ -235,6 +242,7 @@ export const buildModelSnapshots = ({
     ...Object.keys(audioCompletionMap),
     ...Object.keys(billingModeMap),
     ...Object.keys(billingExprMap),
+    ...Object.keys(ignoreGroupRatioMap),
   ])
 
   return [...modelNames].map((name) => {
@@ -254,6 +262,7 @@ export const buildModelSnapshots = ({
         splitBillingExprAndRequestRules(fullExpr)
       return {
         name,
+        ignoreGroupRatio: ignoreGroupRatioMap[name],
         pluginBillingExpr: pluginExpressionsByModel.get(name),
         billingMode: 'tiered_expr',
         billingExpr: pureExpr,
@@ -272,6 +281,7 @@ export const buildModelSnapshots = ({
 
     return {
       name,
+      ignoreGroupRatio: ignoreGroupRatioMap[name],
       pluginBillingExpr: pluginExpressionsByModel.get(name),
       price,
       ratio,
@@ -298,6 +308,7 @@ export const buildModelSnapshots = ({
 export const getSnapshotSignature = (snapshot?: ModelPricingSnapshot) => {
   if (!snapshot) return ''
   return JSON.stringify({
+    ignoreGroupRatio: snapshot.ignoreGroupRatio,
     price: snapshot.price || '',
     ratio: snapshot.ratio || '',
     cacheRatio: snapshot.cacheRatio || '',

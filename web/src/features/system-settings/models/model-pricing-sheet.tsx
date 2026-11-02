@@ -92,6 +92,7 @@ import { cn } from '@/lib/utils'
 import { usePricingPreferencesStore } from '@/stores/pricing-preferences-store'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
+import { SettingsSwitchField } from '../components/settings-form-layout'
 import {
   EMPTY_LANE_ENABLED,
   EMPTY_LANE_PRICES,
@@ -206,6 +207,7 @@ export const ModelPricingEditorPanel = forwardRef<
 ) {
   const { t } = useTranslation()
   const promptPriceId = useId()
+  const ignoreGroupRatioId = useId()
   const formElementRef = useRef<HTMLFormElement>(null)
   const currencyConfig = useSystemConfigStore((state) => state.config.currency)
   const preference = usePricingPreferencesStore((state) => state.currency)
@@ -367,6 +369,7 @@ export const ModelPricingEditorPanel = forwardRef<
     if (editData) {
       form.reset({
         name: editData.name,
+        ignoreGroupRatio: editData.ignoreGroupRatio,
         price: editData.price || '',
         ratio: editData.ratio || '',
         cacheRatio: editData.cacheRatio || '',
@@ -688,6 +691,7 @@ export const ModelPricingEditorPanel = forwardRef<
     (values: ModelPricingFormValues) => {
       const data: ModelRatioData = {
         name: values.name.trim(),
+        ignoreGroupRatio: values.ignoreGroupRatio,
         ...(editData?.pluginBillingExpr ||
         pluginVariants?.length ||
         Object.keys(pluginExpressions).length
@@ -943,6 +947,20 @@ export const ModelPricingEditorPanel = forwardRef<
                 )}
 
                 <PricingCurrencySelector siteCurrency={siteCurrency} />
+
+                <FormField
+                  control={form.control}
+                  name='ignoreGroupRatio'
+                  render={({ field }) => (
+                    <SettingsSwitchField
+                      controlId={ignoreGroupRatioId}
+                      label={t('Ignore group ratio')}
+                      checked={field.value === true}
+                      onCheckedChange={field.onChange}
+                      disabled={isSaving}
+                    />
+                  )}
+                />
 
                 <TaskPluginPricingEditor
                   key={`${editorReloadToken}:${watchedValues.name}`}

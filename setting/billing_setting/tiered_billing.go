@@ -23,22 +23,25 @@ const (
 	BillingModeField        = "billing_mode"
 	BillingExprField        = "billing_expr"
 	PluginBillingExprOption = "billing_setting.plugin_billing_expr"
+	IgnoreGroupRatioOption  = "billing_setting.ignore_group_ratio"
 	maxTaskExprSmokeTests   = 64
 )
 
 // BillingSetting is managed by config.GlobalConfig.Register.
 // DB keys: billing_setting.billing_mode, billing_setting.billing_expr,
-// billing_setting.plugin_billing_expr
+// billing_setting.plugin_billing_expr, billing_setting.ignore_group_ratio
 type BillingSetting struct {
 	BillingMode       map[string]string `json:"billing_mode"`
 	BillingExpr       map[string]string `json:"billing_expr"`
 	PluginBillingExpr map[string]string `json:"plugin_billing_expr"`
+	IgnoreGroupRatio  map[string]bool   `json:"ignore_group_ratio"`
 }
 
 var billingSetting = BillingSetting{
 	BillingMode:       make(map[string]string),
 	BillingExpr:       make(map[string]string),
 	PluginBillingExpr: make(map[string]string),
+	IgnoreGroupRatio:  make(map[string]bool),
 }
 
 func init() {
@@ -48,6 +51,27 @@ func init() {
 // ---------------------------------------------------------------------------
 // Read accessors (hot path, must be fast)
 // ---------------------------------------------------------------------------
+
+// IgnoreGroupRatio checks each model's exact and normalized entries in order.
+// An explicit false is an override, so only absent entries use the fallback.
+func IgnoreGroupRatio(model string, fallback ...string) bool {
+	for index := range len(fallback) + 1 {
+		name := model
+		if index > 0 {
+			name = fallback[index-1]
+		}
+		if name == "" {
+			continue
+		}
+		if ignored, exists := billingSetting.IgnoreGroupRatio[name]; exists {
+			return ignored
+		}
+		if ignored, exists := billingSetting.IgnoreGroupRatio[ratio_setting.FormatMatchingModelName(name)]; exists {
+			return ignored
+		}
+	}
+	return false
+}
 
 func GetBillingMode(model string) string {
 	if mode, ok := billingSetting.BillingMode[model]; ok {

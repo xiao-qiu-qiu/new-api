@@ -12,6 +12,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 )
 
@@ -236,6 +237,9 @@ func BuildPublicChannelProbeModel(probe model.ChannelProbe, name string, now tim
 	ratio, special := ratio_setting.GetGroupGroupRatio(userGroup, probe.GroupName)
 	if !special {
 		ratio = ratio_setting.GetGroupRatio(probe.GroupName)
+	}
+	if billing_setting.IgnoreGroupRatio(name) {
+		ratio = 1
 	}
 	price := *basePrice * ratio
 	if ratio >= 0 && !math.IsNaN(ratio) && !math.IsInf(ratio, 0) && !math.IsNaN(price) && !math.IsInf(price, 0) {

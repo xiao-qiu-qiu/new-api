@@ -398,7 +398,12 @@ export function extractUsage(){return {old_units:2};}
 
 			if testCase.wantTiered {
 				require.NotNil(t, info.TieredBillingSnapshot, "submission error: %+v", taskErr)
-				assert.Equal(t, "alias-model", info.TieredBillingSnapshot.ModelName)
+				billingModel := "declared-model"
+				if testCase.wantExpr == aliasExpr {
+					billingModel = "alias-model"
+				}
+				assert.Equal(t, billingModel, info.GetBillingModelName())
+				assert.Equal(t, billingModel, info.TieredBillingSnapshot.ModelName)
 				assert.Equal(t, testCase.wantExpr, info.TieredBillingSnapshot.ExprString)
 				assert.Equal(t, billingexpr.ExprHashString(testCase.wantExpr), info.TieredBillingSnapshot.ExprHash)
 				assert.NotEqual(t, "model_price_error", taskErr.Code)
@@ -420,6 +425,7 @@ func TestSharedTaskBillingExpressionSelectionAndFrozenSettlement(t *testing.T) {
 	const aliasExpr = `tier("alias", u("credits") * 7)`
 	for _, tc := range []struct {
 		name, plugin, model, mapping, modelExpr, mode, wantExpr string
+		policy                                                  string
 		variants                                                map[string]string
 		wantPriceError, profiled                                bool
 	}{
@@ -428,6 +434,8 @@ func TestSharedTaskBillingExpressionSelectionAndFrozenSettlement(t *testing.T) {
 		{name: "model expression fallback", plugin: "billing-alpha", model: "declared-model", modelExpr: baseExpr, mode: "tiered_expr", wantExpr: baseExpr},
 		{name: "alias override precedes mapped override", plugin: "billing-beta", model: "alias-model", mapping: `{"alias-model":"declared-model"}`, modelExpr: baseExpr, mode: "tiered_expr", variants: map[string]string{"billing-beta::declared-model": betaExpr, "billing-beta::alias-model": aliasExpr}, wantExpr: aliasExpr},
 		{name: "mapped override precedes model fallback", plugin: "billing-beta", model: "alias-model", mapping: `{"alias-model":"declared-model"}`, modelExpr: baseExpr, mode: "tiered_expr", variants: map[string]string{"billing-beta::declared-model": betaExpr}, wantExpr: betaExpr},
+		{name: "alias policy true precedes mapped false", plugin: "billing-beta", model: "alias-model", mapping: `{"alias-model":"declared-model"}`, variants: map[string]string{"billing-beta::declared-model": betaExpr}, wantExpr: betaExpr, policy: `{"alias-model":true,"declared-model":false}`},
+		{name: "missing alias policy uses mapped policy", plugin: "billing-beta", model: "alias-model", mapping: `{"alias-model":"declared-model"}`, variants: map[string]string{"billing-beta::declared-model": betaExpr}, wantExpr: betaExpr, policy: `{"declared-model":true}`},
 		{name: "unconfigured plugin cannot use another schema", plugin: "billing-beta", model: "declared-model", modelExpr: baseExpr, mode: "tiered_expr", wantPriceError: true},
 		{name: "missing usage in skipped branch remains incompatible", plugin: "billing-beta", model: "declared-model", modelExpr: `true ? tier("free", 0) : tier("missing", u("seconds"))`, mode: "tiered_expr", wantPriceError: true},
 		{name: "fixed pricing is still rejected", plugin: "billing-beta", model: "declared-model", variants: map[string]string{"billing-beta::declared-model": `tier("fixed", fixed(1))`}, wantPriceError: true},
@@ -458,8 +466,15 @@ func TestSharedTaskBillingExpressionSelectionAndFrozenSettlement(t *testing.T) {
 			require.NoError(t, err)
 			expressions, err := common.Marshal(map[string]string{"declared-model": tc.modelExpr})
 			require.NoError(t, err)
+			policy := tc.policy
+			if policy == "" {
+				policy = `{"declared-model":true,"alias-model":false}`
+			}
 			require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
 				billing_setting.PluginBillingExprOption: string(rawVariants), "billing_setting.billing_mode": string(modes), "billing_setting.billing_expr": string(expressions),
+				"billing_setting.ignore_group_ratio":    policy,
+				"group_ratio_setting.group_ratio":       `{"default":3}`,
+				"group_ratio_setting.group_group_ratio": `{"default":{"default":0.25}}`,
 			}))
 			c, info := newTaskSubmitContext(t, tc.model, tc.mapping)
 			c.Set("group", "default")
@@ -479,8 +494,19 @@ func TestSharedTaskBillingExpressionSelectionAndFrozenSettlement(t *testing.T) {
 			}
 			require.NotNil(t, info.TieredBillingSnapshot, "submission error: %+v", taskErr)
 			assert.Equal(t, tc.wantExpr, info.TieredBillingSnapshot.ExprString)
+			wantGroupRatio := 1.0
+			if tc.model == "alias-model" && tc.policy == "" {
+				wantGroupRatio = 0.25
+			}
+			assert.Equal(t, wantGroupRatio, info.PriceData.GroupRatioInfo.GroupRatio)
+			assert.Equal(t, wantGroupRatio, info.TieredBillingSnapshot.GroupRatio)
+			assert.Equal(t, info.GetBillingModelName(), info.TieredBillingSnapshot.ModelName)
 			assert.NotEqual(t, "model_price_error", taskErr.Code)
-			require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{billing_setting.PluginBillingExprOption: `{}`, "billing_setting.billing_expr": `{}`}))
+			require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+				billing_setting.PluginBillingExprOption: `{}`, "billing_setting.billing_expr": `{}`,
+				"billing_setting.ignore_group_ratio": `{"declared-model":false,"alias-model":true}`,
+				"group_ratio_setting.group_ratio":    `{"default":9}`,
+			}))
 			field := "seconds"
 			if tc.plugin == "billing-beta" {
 				field = "credits"

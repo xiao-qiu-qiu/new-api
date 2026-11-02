@@ -38,6 +38,7 @@ import {
 import { CachedPriceCell } from '../components/cached-price-cell'
 import { ModelCard } from '../components/model-card'
 import { ModelCardGrid } from '../components/model-card-grid'
+import { ModelPriceCell } from '../components/model-price-cell'
 import type { PricingModel } from '../types'
 
 function pricingModel(overrides: Partial<PricingModel> = {}): PricingModel {
@@ -88,6 +89,170 @@ afterEach(() => {
 })
 
 describe('model cards', () => {
+  it.each<{
+    name: string
+    pricing: Partial<PricingModel>
+    cardPrice: string
+    listPrice: string
+    groupedListPrice: string
+    cachePrice?: string
+  }>([
+    {
+      name: 'legacy tokens',
+      pricing: { cache_ratio: 0.25 },
+      cardPrice: '$2',
+      listPrice: '2',
+      groupedListPrice: '6',
+      cachePrice: '$0.5',
+    },
+    {
+      name: 'legacy requests',
+      pricing: { quota_type: 1, model_price: 0.4 },
+      cardPrice: '$0.4',
+      listPrice: '0.4',
+      groupedListPrice: '1.2',
+    },
+    {
+      name: 'token expressions with image cache',
+      pricing: {
+        billing_mode: 'tiered_expr',
+        billing_expr:
+          'tier("base", p * 2 + c * 8 + cr * 0.5 + img * 4 + img_cr * 0.1)',
+      },
+      cardPrice: '$2',
+      listPrice: '2',
+      groupedListPrice: '6',
+      cachePrice: '$0.1',
+    },
+    {
+      name: 'request expressions',
+      pricing: {
+        billing_mode: 'tiered_expr',
+        billing_expr: 'tier("request", fixed(0.4))',
+      },
+      cardPrice: '$0.4',
+      listPrice: '0.4/request',
+      groupedListPrice: '1.2/request',
+    },
+    {
+      name: 'image expressions',
+      pricing: {
+        billing_mode: 'tiered_expr',
+        billing_expr: 'tier("image", fixed(0.4)) * image_count',
+      },
+      cardPrice: '$0.4',
+      listPrice: '0.4/image',
+      groupedListPrice: '1.2/image',
+    },
+    {
+      name: 'task expressions with examples',
+      pricing: {
+        billing_mode: 'tiered_expr',
+        billing_expr: 'tier("base", 0.1 + u("seconds") * 0.4)',
+        billing_usage_schema: { seconds: { type: 'number', unit: 'second' } },
+        billing_usage_examples: [{ label: '5s sample', facts: { seconds: 5 } }],
+      },
+      cardPrice: '$0.4',
+      listPrice: '0.4/s',
+      groupedListPrice: '1.2/s',
+    },
+    {
+      name: 'provider task ranges',
+      pricing: {
+        billing_plugin_variants: [
+          {
+            plugin_key: 'alpha',
+            plugin_name: 'Alpha',
+            billing_expr: 'tier("base", u("seconds") * 0.4)',
+            billing_usage_schema: {
+              seconds: { type: 'number', unit: 'second' },
+            },
+          },
+          {
+            plugin_key: 'beta',
+            plugin_name: 'Beta',
+            billing_expr: 'tier("base", u("seconds") * 0.8)',
+            billing_usage_schema: {
+              seconds: { type: 'number', unit: 'second' },
+            },
+          },
+        ],
+      },
+      cardPrice: '$0.4 – $0.8',
+      listPrice: '0.4 – 0.8/s',
+      groupedListPrice: '1.2 – 2.4/s',
+    },
+  ])(
+    'refreshes $name in cards, lists and cache prices when ignoring group ratios is toggled',
+    ({ pricing, cardPrice, listPrice, groupedListPrice, cachePrice }) => {
+      const model = pricingModel({
+        ...pricing,
+        enable_groups: ['discount', 'premium'],
+        group_ratio: { discount: 0.5, premium: 3 },
+      })
+      const view = (ignoreGroupRatio: boolean, selectedGroup: string) => {
+        const priced = { ...model, ignore_group_ratio: ignoreGroupRatio }
+        return (
+          <>
+            <section aria-label='card price'>
+              <ModelCard
+                model={priced}
+                onClick={vi.fn()}
+                selectedGroup={selectedGroup}
+                tokenUnit='M'
+              />
+            </section>
+            <section aria-label='list price'>
+              <ModelPriceCell
+                model={priced}
+                options={{ selectedGroup, tokenUnit: 'M' }}
+              />
+            </section>
+            <section aria-label='cache price'>
+              <CachedPriceCell
+                model={priced}
+                options={{ selectedGroup, tokenUnit: 'M' }}
+              />
+            </section>
+          </>
+        )
+      }
+      const { rerender } = render(view(false, 'premium'))
+      expect(
+        within(screen.getByLabelText('list price')).getByTitle(groupedListPrice)
+      ).toBeVisible()
+      rerender(view(true, 'premium'))
+      expect(
+        within(screen.getByLabelText('card price')).getByRole('group', {
+          name: 'Pricing',
+        })
+      ).toHaveTextContent(cardPrice)
+      expect(
+        within(screen.getByLabelText('list price')).getByTitle(listPrice)
+      ).toBeVisible()
+      if (cachePrice) {
+        expect(screen.getByLabelText('cache price')).toHaveTextContent(
+          cachePrice
+        )
+      }
+      if (pricing.billing_usage_examples) {
+        expect(screen.getByText('5s sample ≈ $2.1')).toBeVisible()
+      }
+      rerender(view(true, 'discount'))
+      expect(
+        within(screen.getByLabelText('list price')).getByTitle(listPrice)
+      ).toBeVisible()
+      rerender(view(true, 'all'))
+      expect(
+        within(screen.getByLabelText('list price')).getByTitle(listPrice)
+      ).toBeVisible()
+      rerender(view(false, 'premium'))
+      expect(
+        within(screen.getByLabelText('list price')).getByTitle(groupedListPrice)
+      ).toBeVisible()
+    }
+  )
+
   it('shows separate generic and image cache prices including a free image cache', () => {
     render(
       <CachedPriceCell
