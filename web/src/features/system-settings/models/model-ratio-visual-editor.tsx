@@ -86,6 +86,7 @@ type ModelRatioVisualEditorProps = {
   savedAudioCompletionRatio: string
   savedBillingMode: string
   savedBillingExpr: string
+  savedIgnoreGroupRatio?: string
   savedPluginBillingExpr?: string
   modelPrice: string
   modelRatio: string
@@ -97,6 +98,7 @@ type ModelRatioVisualEditorProps = {
   audioCompletionRatio: string
   billingMode: string
   billingExpr: string
+  ignoreGroupRatio?: string
   pluginBillingExpr?: string
   candidateModelNames?: string[]
   candidateModelsLoading?: boolean
@@ -127,6 +129,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
     savedAudioCompletionRatio,
     savedBillingMode,
     savedBillingExpr,
+    savedIgnoreGroupRatio = '{}',
     savedPluginBillingExpr = '{}',
     modelPrice,
     modelRatio,
@@ -138,6 +141,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
     audioCompletionRatio,
     billingMode,
     billingExpr,
+    ignoreGroupRatio = '{}',
     pluginBillingExpr = '{}',
     candidateModelNames,
     candidateModelsLoading,
@@ -239,6 +243,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
       audioCompletionRatio: savedAudioCompletionRatio,
       billingMode: savedBillingMode,
       billingExpr: savedBillingExpr,
+      ignoreGroupRatio: savedIgnoreGroupRatio,
       pluginBillingExpr: savedPluginBillingExpr,
     })
     const draftRows = buildModelSnapshots({
@@ -252,6 +257,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
       audioCompletionRatio,
       billingMode,
       billingExpr,
+      ignoreGroupRatio,
       pluginBillingExpr,
     })
 
@@ -296,6 +302,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
     savedAudioCompletionRatio,
     savedBillingMode,
     savedBillingExpr,
+    savedIgnoreGroupRatio,
     savedPluginBillingExpr,
     modelPrice,
     modelRatio,
@@ -307,6 +314,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
     audioCompletionRatio,
     billingMode,
     billingExpr,
+    ignoreGroupRatio,
     pluginBillingExpr,
   ])
 
@@ -356,6 +364,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
         audioCompletionRatio: editableModel.audioCompletionRatio,
         billingMode: editBillingMode,
         billingExpr: editableModel.billingExpr,
+        ignoreGroupRatio: editableModel.ignoreGroupRatio,
         pluginBillingExpr: editableModel.pluginBillingExpr,
         requestRuleExpr: editableModel.requestRuleExpr,
       })
@@ -428,6 +437,10 @@ const ModelRatioVisualEditorComponent = forwardRef<
         billingExpr,
         { fallback: {}, silent: true }
       )
+      const ignoreGroupRatioMap = safeJsonParse<Record<string, boolean>>(
+        ignoreGroupRatio,
+        { fallback: {}, silent: true }
+      )
 
       delete priceMap[name]
       delete ratioMap[name]
@@ -439,6 +452,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
       delete audioCompletionMap[name]
       delete billingModeMap[name]
       delete billingExprMap[name]
+      delete ignoreGroupRatioMap[name]
       const pluginExprMap = safeJsonParse<Record<string, string>>(
         pluginBillingExpr,
         { fallback: {} }
@@ -472,6 +486,10 @@ const ModelRatioVisualEditorComponent = forwardRef<
         'billing_setting.billing_expr',
         JSON.stringify(billingExprMap, null, 2)
       )
+      onChange(
+        'billing_setting.ignore_group_ratio',
+        JSON.stringify(ignoreGroupRatioMap, null, 2)
+      )
 
       if (editingModelNameRef.current === name) {
         setEditData(null)
@@ -490,6 +508,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
       audioCompletionRatio,
       billingMode,
       billingExpr,
+      ignoreGroupRatio,
       pluginBillingExpr,
       onChange,
     ]
@@ -553,6 +572,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
         AudioCompletionRatio: audioCompletionRatio,
         BillingMode: billingMode,
         BillingExpr: billingExpr,
+        IgnoreGroupRatio: ignoreGroupRatio,
         PluginBillingExpr: pluginBillingExpr,
       })
       const updated = applyPricingDraft(options, data, targetNames)
@@ -569,6 +589,7 @@ const ModelRatioVisualEditorComponent = forwardRef<
       audioCompletionRatio,
       billingMode,
       billingExpr,
+      ignoreGroupRatio,
       pluginBillingExpr,
       onChange,
     ]
@@ -833,6 +854,7 @@ export const ModelRatioVisualEditor = memo(
         nextProps.savedAudioCompletionRatio &&
       prevProps.savedBillingMode === nextProps.savedBillingMode &&
       prevProps.savedBillingExpr === nextProps.savedBillingExpr &&
+      prevProps.savedIgnoreGroupRatio === nextProps.savedIgnoreGroupRatio &&
       prevProps.savedPluginBillingExpr === nextProps.savedPluginBillingExpr &&
       prevProps.modelPrice === nextProps.modelPrice &&
       prevProps.modelRatio === nextProps.modelRatio &&
@@ -844,6 +866,7 @@ export const ModelRatioVisualEditor = memo(
       prevProps.audioCompletionRatio === nextProps.audioCompletionRatio &&
       prevProps.billingMode === nextProps.billingMode &&
       prevProps.billingExpr === nextProps.billingExpr &&
+      prevProps.ignoreGroupRatio === nextProps.ignoreGroupRatio &&
       prevProps.pluginBillingExpr === nextProps.pluginBillingExpr &&
       prevProps.candidateModelNames === nextProps.candidateModelNames &&
       prevProps.candidateModelsLoading === nextProps.candidateModelsLoading &&

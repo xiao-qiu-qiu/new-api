@@ -3281,6 +3281,7 @@
     "If you provide generative AI services to the public in mainland China, you will fulfill legal obligations including filing, security assessment, content safety, complaint handling, generated content labeling, log retention, and personal information protection.": "如果你在中国大陆向公众提供生成式人工智能服务，你将履行备案、安全评估、内容安全、投诉处理、生成内容标识、日志留存和个人信息保护等法律义务。",
     "If your Passkey belongs to another website, start sign-in there:": "如果通行密钥属于其他网站，请前往该网站登录：",
     "Ignore": "忽略",
+    "Ignore group ratio": "不受分组倍率影响",
     "Ignore this version": "忽略该版本提醒",
     "Ignored upstream models": "已忽略上游模型",
     "image": "张",

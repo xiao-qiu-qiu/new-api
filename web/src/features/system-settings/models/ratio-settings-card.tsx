@@ -127,6 +127,13 @@ const createModelSchema = (t: Translate) =>
     ExposeRatioEnabled: z.boolean(),
     BillingMode: createJsonStringField(t),
     BillingExpr: createJsonStringField(t),
+    IgnoreGroupRatio: createJsonStringField(t, {
+      predicate: (parsed) =>
+        parsed !== null &&
+        typeof parsed === 'object' &&
+        !Array.isArray(parsed) &&
+        Object.values(parsed).every((value) => typeof value === 'boolean'),
+    }),
     PluginBillingExpr: createJsonStringField(t),
   })
 
@@ -157,7 +164,9 @@ type RatioTabId =
   | 'upstream-sync'
 
 type RatioSettingsCardProps = {
-  modelDefaults: ModelFormValues
+  modelDefaults: Omit<ModelFormValues, 'IgnoreGroupRatio'> & {
+    IgnoreGroupRatio?: string
+  }
   groupDefaults: GroupFormValues
   toolPricesDefault: string
   titleKey?: string
@@ -184,22 +193,24 @@ export function RatioSettingsCard({
       setPricingBaseline(pricingQuery.data)
     }
   }, [pricingBaseline, pricingQuery.data])
-  const modelDefaults = useMemo(
-    () =>
-      pricingBaseline
-        ? {
-            ...initialModelDefaults,
-            ...pricingBaseline.options,
-            BillingMode:
-              pricingBaseline.options['billing_setting.billing_mode'],
-            BillingExpr:
-              pricingBaseline.options['billing_setting.billing_expr'],
-            PluginBillingExpr:
-              pricingBaseline.options['billing_setting.plugin_billing_expr'],
-          }
-        : initialModelDefaults,
-    [initialModelDefaults, pricingBaseline]
-  )
+  const modelDefaults = useMemo(() => {
+    const defaults = {
+      ...initialModelDefaults,
+      IgnoreGroupRatio: initialModelDefaults.IgnoreGroupRatio ?? '{}',
+    }
+    if (!pricingBaseline) return defaults
+    return {
+      ...defaults,
+      ...pricingBaseline.options,
+      BillingMode: pricingBaseline.options['billing_setting.billing_mode'],
+      BillingExpr: pricingBaseline.options['billing_setting.billing_expr'],
+      IgnoreGroupRatio:
+        pricingBaseline.options['billing_setting.ignore_group_ratio'] ??
+        defaults.IgnoreGroupRatio,
+      PluginBillingExpr:
+        pricingBaseline.options['billing_setting.plugin_billing_expr'],
+    }
+  }, [initialModelDefaults, pricingBaseline])
   const resetMutation = useMutation({
     mutationFn: async () => {
       if (!pricingBaseline) return
@@ -235,6 +246,7 @@ export function RatioSettingsCard({
     ExposeRatioEnabled: modelDefaults.ExposeRatioEnabled,
     BillingMode: normalizeJsonString(modelDefaults.BillingMode),
     BillingExpr: normalizeJsonString(modelDefaults.BillingExpr),
+    IgnoreGroupRatio: normalizeJsonString(modelDefaults.IgnoreGroupRatio),
     PluginBillingExpr: normalizeJsonString(modelDefaults.PluginBillingExpr),
   })
   const [savedModelValues, setSavedModelValues] = useState(
@@ -273,6 +285,7 @@ export function RatioSettingsCard({
       ),
       BillingMode: formatJsonForTextarea(modelDefaults.BillingMode),
       BillingExpr: formatJsonForTextarea(modelDefaults.BillingExpr),
+      IgnoreGroupRatio: formatJsonForTextarea(modelDefaults.IgnoreGroupRatio),
       PluginBillingExpr: formatJsonForTextarea(modelDefaults.PluginBillingExpr),
     },
   })
@@ -308,6 +321,7 @@ export function RatioSettingsCard({
       ExposeRatioEnabled: modelDefaults.ExposeRatioEnabled,
       BillingMode: normalizeJsonString(modelDefaults.BillingMode),
       BillingExpr: normalizeJsonString(modelDefaults.BillingExpr),
+      IgnoreGroupRatio: normalizeJsonString(modelDefaults.IgnoreGroupRatio),
       PluginBillingExpr: normalizeJsonString(modelDefaults.PluginBillingExpr),
     }
     setSavedModelValues(modelNormalizedDefaults.current)
@@ -326,6 +340,7 @@ export function RatioSettingsCard({
       ),
       BillingMode: formatJsonForTextarea(modelDefaults.BillingMode),
       BillingExpr: formatJsonForTextarea(modelDefaults.BillingExpr),
+      IgnoreGroupRatio: formatJsonForTextarea(modelDefaults.IgnoreGroupRatio),
       PluginBillingExpr: formatJsonForTextarea(modelDefaults.PluginBillingExpr),
     })
   }, [modelDefaults, modelForm])
@@ -371,6 +386,7 @@ export function RatioSettingsCard({
         ExposeRatioEnabled: values.ExposeRatioEnabled,
         BillingMode: normalizeJsonString(values.BillingMode),
         BillingExpr: normalizeJsonString(values.BillingExpr),
+        IgnoreGroupRatio: normalizeJsonString(values.IgnoreGroupRatio),
         PluginBillingExpr: normalizeJsonString(values.PluginBillingExpr),
       }
 

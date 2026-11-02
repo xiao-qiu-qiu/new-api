@@ -19,6 +19,9 @@ type GroupRatioInfo struct {
 	GroupRatio        float64
 	GroupSpecialRatio float64
 	HasSpecialRatio   bool
+	// Freeze the model policy across channel/group retries for this pricing identity.
+	BillingModelName string
+	IgnoreGroupRatio bool
 }
 
 type PriceData struct {

@@ -17,6 +17,9 @@ import (
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
@@ -42,6 +45,9 @@ func TestMain(m *testing.M) {
 	model.LOG_DB = db
 
 	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
+	if err := model.MigrateChannelProbes(db); err != nil {
+		panic("failed to initialize probe test schema: " + err.Error())
+	}
 	common.RedisEnabled = false
 	common.BatchUpdateEnabled = false
 	common.LogConsumeEnabled = true
@@ -1794,6 +1800,8 @@ func TestSettle_TokenRecalcFallsBackToCompletionTokens(t *testing.T) {
 			seedChannel(t, channelID)
 
 			task := makeTask(userID, channelID, preConsumed, tokenID, BillingSourceWallet, 0)
+			task.PrivateData.BillingContext.ModelRatio = 1
+			require.NoError(t, model.DB.Create(task).Error)
 			settled := settleTaskBillingOnComplete(
 				context.Background(),
 				&mockAdaptor{},
@@ -1808,5 +1816,168 @@ func TestSettle_TokenRecalcFallsBackToCompletionTokens(t *testing.T) {
 			assert.Equal(t, testCase.wantSettled, settled)
 			assert.Equal(t, testCase.wantQuota, task.Quota)
 		})
+	}
+}
+
+func TestTaskTokenSettlementKeepsSubmittedGroupRatio(t *testing.T) {
+	previous := config.GlobalConfig.ExportAllConfigs()
+	previousRatios := ratio_setting.ModelRatio2JSONString()
+	t.Cleanup(func() {
+		require.NoError(t, config.GlobalConfig.LoadFromDB(previous))
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(previousRatios))
+	})
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"test-model":2}`))
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		"group_ratio_setting.group_ratio":       `{"default":9}`,
+		"group_ratio_setting.group_group_ratio": `{"default":{"default":7}}`,
+	}))
+	for _, tc := range []struct {
+		name                string
+		snapshot, ignoreNow bool
+		groupRatio          float64
+		want                int
+	}{
+		{"ignored at submission", true, false, 1, 160},
+		{"special at submission", true, true, 0.25, 40},
+		{"free at submission", true, true, 0, 0},
+		{"historical without snapshot ignored", false, true, 0, 160},
+		{"historical without snapshot unchanged", false, false, 0, 1120},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			truncate(t)
+			ignoreJSON := `{"test-model":false}`
+			if tc.ignoreNow {
+				ignoreJSON = `{"test-model":true}`
+			}
+			require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"billing_setting.ignore_group_ratio": ignoreJSON}))
+			const userID, channelID, preConsumed = 71, 71, 50
+			seedUser(t, userID, 10000)
+			seedChannel(t, channelID)
+			seedChargedAccounting(t, userID, channelID, 0, preConsumed, 1)
+			task := makeTask(userID, channelID, preConsumed, 0, BillingSourceWallet, 0)
+			if tc.snapshot {
+				task.PrivateData.BillingContext.ModelRatio = 2
+				task.PrivateData.BillingContext.GroupRatio = tc.groupRatio
+			} else {
+				task.PrivateData.BillingContext = nil
+			}
+			require.NoError(t, model.DB.Create(task).Error)
+			var saved model.Task
+			require.NoError(t, model.DB.First(&saved, task.ID).Error)
+			require.True(t, RecalculateTaskQuotaByTokens(context.Background(), &saved, 80))
+			assert.Equal(t, tc.want, saved.Quota)
+			assert.Equal(t, 10000+preConsumed-tc.want, getUserQuota(t, userID))
+			if tc.snapshot {
+				log := getLastLog(t)
+				require.NotNil(t, log)
+				var other map[string]any
+				require.NoError(t, common.UnmarshalJsonStr(log.Other, &other))
+				assert.Equal(t, tc.groupRatio, other["group_ratio"])
+			}
+		})
+	}
+}
+
+func TestRealtimePreConsumeKeepsGroupSnapshot(t *testing.T) {
+	previous := config.GlobalConfig.ExportAllConfigs()
+	t.Cleanup(func() { require.NoError(t, config.GlobalConfig.LoadFromDB(previous)) })
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		"group_ratio_setting.group_ratio":       `{"default":9}`,
+		"group_ratio_setting.group_group_ratio": `{"default":{"default":7}}`,
+		"billing_setting.ignore_group_ratio":    `{"snapshot-realtime":true}`,
+	}))
+	for _, groupRatio := range []float64{1, 0.25, 0} {
+		t.Run(decimal.NewFromFloat(groupRatio).String(), func(t *testing.T) {
+			truncate(t)
+			const userID, tokenID = 72, 72
+			seedUser(t, userID, 10000)
+			seedToken(t, tokenID, userID, "realtime-policy", 10000)
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Set("auto_group", "default")
+			info := &relaycommon.RelayInfo{UserId: userID, TokenId: tokenID, TokenKey: "sk-realtime-policy", OriginModelName: "client-alias", BillingModelName: "snapshot-realtime", UserGroup: "default", UsingGroup: "default",
+				PriceData: types.PriceData{ModelRatio: 2, GroupRatioInfo: types.GroupRatioInfo{GroupRatio: groupRatio}}}
+			usage := &dto.RealtimeUsage{InputTokens: 80, TotalTokens: 80}
+			usage.InputTokenDetails.TextTokens = 80
+			require.NoError(t, PreWssConsumeQuota(ctx, info, usage))
+			want := common.QuotaFromFloat(160 * groupRatio)
+			assert.Equal(t, 10000-want, getUserQuota(t, userID))
+			assert.Equal(t, 10000-want, getTokenRemainQuota(t, tokenID))
+		})
+	}
+}
+
+func TestImageAndToolSettlementUsesEffectiveGroupRatio(t *testing.T) {
+	for _, tools := range []bool{false, true} {
+		name := "image"
+		if tools {
+			name = "image with tool surcharge"
+		}
+		t.Run(name, func(t *testing.T) {
+			truncate(t)
+			const userID, channelID = 73, 73
+			seedUser(t, userID, 100000)
+			seedChannel(t, channelID)
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+			info := &relaycommon.RelayInfo{UserId: userID, IsPlayground: true, OriginModelName: "client-alias", BillingModelName: "snapshot-image", UsingGroup: "default", StartTime: time.Now(), FirstResponseTime: time.Now(), ChannelMeta: &relaycommon.ChannelMeta{ChannelId: channelID},
+				PriceData: types.PriceData{UsePrice: true, ModelPrice: 0.03, GroupRatioInfo: types.GroupRatioInfo{GroupRatio: 1, GroupSpecialRatio: -1, IgnoreGroupRatio: true}}}
+			want := 15000
+			if tools {
+				info.ResponsesUsageInfo = &relaycommon.ResponsesUsageInfo{BuiltInTools: map[string]*relaycommon.BuildInToolInfo{
+					dto.BuildInToolWebSearch: {CallCount: 2},
+				}}
+				want = 25000
+			}
+			PostTextConsumeQuota(ctx, info, &dto.Usage{PromptTokens: 1, TotalTokens: 1}, nil)
+			assert.Equal(t, 100000-want, getUserQuota(t, userID))
+			log := getLastLog(t)
+			require.NotNil(t, log)
+			assert.Equal(t, want, log.Quota)
+			var other map[string]any
+			require.NoError(t, common.UnmarshalJsonStr(log.Other, &other))
+			assert.Equal(t, float64(1), other["group_ratio"])
+			assert.Equal(t, float64(-1), other["user_group_ratio"])
+		})
+	}
+}
+
+func TestPublicChannelProbePriceIgnoresGroupRatio(t *testing.T) {
+	truncate(t)
+	previous := config.GlobalConfig.ExportAllConfigs()
+	previousUsable := setting.UserUsableGroups2JSONString()
+	t.Cleanup(func() {
+		require.NoError(t, config.GlobalConfig.LoadFromDB(previous))
+		require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(previousUsable))
+	})
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		"group_ratio_setting.group_ratio":       `{"probe-policy-group":3}`,
+		"group_ratio_setting.group_group_ratio": `{"special":{"probe-policy-group":0.25},"free":{"probe-policy-group":0}}`,
+	}))
+	require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{"probe-policy-group":"Probe"}`))
+	probe := model.ChannelProbe{ID: 9999, Scope: "group", GroupName: "probe-policy-group", Model: "snapshot-probe"}
+	now := time.Now()
+	for range 10 {
+		require.NoError(t, model.LOG_DB.Create(&model.Log{Type: model.LogTypeConsume, ModelName: probe.Model, Group: probe.GroupName,
+			CreatedAt: now.Unix() - 10, PromptTokens: 10000, CompletionTokens: 10000, Quota: 1000, Other: `{"model_ratio":1,"group_ratio":1}`}).Error)
+	}
+	for _, ignore := range []bool{false, true} {
+		ignoreJSON := `{"snapshot-probe":false}`
+		if ignore {
+			ignoreJSON = `{"snapshot-probe":true}`
+		}
+		require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"billing_setting.ignore_group_ratio": ignoreJSON}))
+		for _, tc := range []struct {
+			group string
+			want  float64
+		}{{"default", 30}, {"special", 2.5}, {"free", 0}} {
+			view, err := BuildPublicChannelProbeModel(probe, probe.Model, now, 1, tc.group)
+			require.NoError(t, err)
+			require.NotNil(t, view.EstimatedPricePer100MTokens)
+			want := tc.want
+			if ignore {
+				want = 10
+			}
+			assert.InDelta(t, want, *view.EstimatedPricePer100MTokens, 1e-9)
+		}
 	}
 }

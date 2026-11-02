@@ -100,6 +100,128 @@ const model: PricingModel = {
 }
 const clients: QueryClient[] = []
 
+it.each<{
+  name: string
+  pricing: Partial<PricingModel>
+  basePrice: string
+  groupedPrice: string
+}>([
+  {
+    name: 'legacy tokens',
+    pricing: {
+      billing_mode: undefined,
+      billing_expr: undefined,
+      billing_usage_schema: undefined,
+      cache_ratio: 0.25,
+      image_ratio: 2,
+    },
+    basePrice: '$2',
+    groupedPrice: '$6',
+  },
+  {
+    name: 'legacy requests',
+    pricing: {
+      quota_type: 1,
+      model_price: 0.4,
+      billing_mode: undefined,
+      billing_expr: undefined,
+      billing_usage_schema: undefined,
+    },
+    basePrice: '$0.4',
+    groupedPrice: '$1.2',
+  },
+  {
+    name: 'token expressions',
+    pricing: {
+      billing_expr: 'tier("base", p * 2 + c * 8 + cr * 0.5 + img * 4)',
+      billing_usage_schema: undefined,
+    },
+    basePrice: '$2',
+    groupedPrice: '$6',
+  },
+  {
+    name: 'request expressions',
+    pricing: {
+      billing_expr: 'tier("request", fixed(0.4))',
+      billing_usage_schema: undefined,
+    },
+    basePrice: '$0.4',
+    groupedPrice: '$1.2',
+  },
+  {
+    name: 'image expressions',
+    pricing: {
+      billing_expr: 'tier("image", fixed(0.4)) * image_count',
+      billing_usage_schema: undefined,
+    },
+    basePrice: '$0.4',
+    groupedPrice: '$1.2',
+  },
+  {
+    name: 'task expressions and examples',
+    pricing: {
+      billing_usage_examples: [
+        { label: '2 clips sample', facts: { clips: 2 } },
+      ],
+    },
+    basePrice: '$0.22',
+    groupedPrice: '$0.66',
+  },
+])(
+  'uses the effective group factor in $name detail tables and restores group prices when disabled',
+  ({ pricing, basePrice, groupedPrice }) => {
+    vi.spyOn(api, 'get').mockResolvedValue({ data: { data: { groups: [] } } })
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    clients.push(client)
+    const view = (ignoreGroupRatio: boolean) => (
+      <QueryClientProvider client={client}>
+        <ModelDetailsContent
+          model={{
+            ...model,
+            completion_ratio: 3,
+            ...pricing,
+            enable_groups: ['free', 'premium'],
+            ignore_group_ratio: ignoreGroupRatio,
+          }}
+          groupRatio={{ free: 0, premium: 3 }}
+          usableGroup={{
+            free: { desc: '', ratio: 0 },
+            premium: { desc: '', ratio: 3 },
+          }}
+          endpointMap={{}}
+          autoGroups={[]}
+          priceRate={1}
+          usdExchangeRate={1}
+          tokenUnit='M'
+        />
+      </QueryClientProvider>
+    )
+    const { rerender } = render(view(true))
+    const section = screen
+      .getByRole('heading', { name: 'Pricing by Group' })
+      .closest('section')
+    expect(section).not.toBeNull()
+    const groupPrices = within(section as HTMLElement)
+    expect(groupPrices.getByText('free')).toBeVisible()
+    expect(groupPrices.getByText('premium')).toBeVisible()
+    expect(groupPrices.getAllByText(basePrice)).toHaveLength(2)
+    expect(groupPrices.getAllByText('1x')).toHaveLength(2)
+    if (pricing.billing_usage_examples) {
+      expect(groupPrices.getAllByText('≈ $0.44')).toHaveLength(2)
+    }
+    rerender(view(false))
+    expect(groupPrices.getByText(groupedPrice)).toBeVisible()
+    expect(groupPrices.getByText('3x')).toBeVisible()
+    expect(groupPrices.getByText('0x')).toBeVisible()
+    expect(groupPrices.getAllByText('$0').length).toBeGreaterThan(0)
+    if (pricing.billing_usage_examples) {
+      expect(groupPrices.getByText('≈ $1.32')).toBeVisible()
+    }
+  }
+)
+
 it('shows nested task conditions and prices in detail and group tables without ambiguous log matches', () => {
   vi.spyOn(api, 'get').mockResolvedValue({ data: { data: { groups: [] } } })
   const client = new QueryClient({

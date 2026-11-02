@@ -792,6 +792,98 @@ func TestInputPreConsumeMultiplierLegacyAndRequestPrices(t *testing.T) {
 	}
 }
 
+func TestIgnoreGroupRatioPricingAndRetrySnapshot(t *testing.T) {
+	previous := config.GlobalConfig.ExportAllConfigs()
+	previousRatios, previousPrices := ratio_setting.ModelRatio2JSONString(), ratio_setting.ModelPrice2JSONString()
+	t.Cleanup(func() {
+		require.NoError(t, config.GlobalConfig.LoadFromDB(previous))
+		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(previousRatios))
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(previousPrices))
+	})
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"group-policy-image":0.03}`))
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"group-policy-token":2}`))
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		"billing_setting.billing_mode":                `{"group-policy-expression":"tiered_expr"}`,
+		"billing_setting.billing_expr":                `{"group-policy-expression":"tier(\"image\", fixed(0.03)) * image_count"}`,
+		"group_ratio_setting.group_ratio":             `{"default":3,"free":0,"retry":7}`,
+		"group_ratio_setting.group_group_ratio":       `{"special":{"default":0.25,"free":0,"retry":0.5}}`,
+		"quota_setting.pre_consume_multiplier":        "1",
+		"quota_setting.enable_free_model_pre_consume": "false",
+	}))
+	for _, tc := range []struct {
+		name, model, userGroup, group string
+		ignore, perCall               bool
+		baseQuota                     int
+		groupRatio, retryRatio        float64
+	}{
+		{"image normal ignored", "group-policy-image", "default", "default", true, false, 15000, 1, 1},
+		{"image normal unchanged", "group-policy-image", "default", "default", false, false, 15000, 3, 7},
+		{"image special ignored", "group-policy-image", "special", "default", true, false, 15000, 1, 1},
+		{"image special unchanged", "group-policy-image", "special", "default", false, false, 15000, 0.25, 0.5},
+		{"image zero ignored", "group-policy-image", "default", "free", true, false, 15000, 1, 1},
+		{"image zero unchanged", "group-policy-image", "default", "free", false, false, 15000, 0, 7},
+		{"token ignored", "group-policy-token", "special", "default", true, false, 200, 1, 1},
+		{"image expression ignored", "group-policy-expression", "special", "free", true, false, 15000, 1, 1},
+		{"image expression unchanged", "group-policy-expression", "default", "default", false, false, 15000, 3, 7},
+		{"per call ignored", "group-policy-image", "special", "default", true, true, 15000, 1, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+				"billing_setting.ignore_group_ratio": fmt.Sprintf(`{"%s":%t}`, tc.model, tc.ignore),
+			}))
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+			ctx.Set("auto_group", tc.group)
+			info := &relaycommon.RelayInfo{OriginModelName: "client-alias", BillingModelName: tc.model, UserGroup: tc.userGroup, UsingGroup: "auto", BillingRequestInput: &billingexpr.RequestInput{}}
+			var err error
+			if tc.perCall {
+				info.PriceData, err = ModelPriceHelperPerCall(ctx, info)
+			} else {
+				if tc.model != "group-policy-token" {
+					info.Request = &dto.ImageRequest{Model: "client-alias"}
+				}
+				_, err = ModelPriceHelper(ctx, info, 100, &types.TokenCountMeta{})
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.group, info.UsingGroup)
+			assert.Equal(t, tc.groupRatio, info.PriceData.GroupRatioInfo.GroupRatio)
+			quota := info.PriceData.QuotaToPreConsume
+			if tc.perCall {
+				quota = info.PriceData.Quota
+			}
+			assert.Equal(t, common.QuotaFromFloat(float64(tc.baseQuota)*tc.groupRatio), quota)
+			if tc.ignore {
+				assert.Equal(t, -1.0, info.PriceData.GroupRatioInfo.GroupSpecialRatio)
+				assert.False(t, info.PriceData.GroupRatioInfo.HasSpecialRatio)
+				assert.False(t, info.PriceData.FreeModel)
+			}
+
+			// A live configuration edit applies to new requests, not an in-flight retry.
+			require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+				"billing_setting.ignore_group_ratio": fmt.Sprintf(`{"%s":%t}`, tc.model, !tc.ignore),
+			}))
+			ctx.Set("auto_group", "retry")
+			info.PriceData.GroupRatioInfo = HandleGroupRatio(ctx, info)
+			assert.Equal(t, "retry", info.UsingGroup)
+			assert.Equal(t, tc.retryRatio, info.PriceData.GroupRatioInfo.GroupRatio)
+			fresh := &relaycommon.RelayInfo{OriginModelName: "client-alias", BillingModelName: tc.model, UserGroup: tc.userGroup}
+			assert.Equal(t, !tc.ignore, HandleGroupRatio(ctx, fresh).IgnoreGroupRatio)
+			if !tc.perCall && tc.model != "group-policy-token" {
+				reservation := &priceTestReservation{held: quota}
+				info.Billing = reservation
+				require.Nil(t, service.PrepareImageBillingForRequest(ctx, info, 2))
+				assert.Equal(t, common.QuotaFromFloat(float64(2*tc.baseQuota)*tc.retryRatio), reservation.held)
+				if info.TieredBillingSnapshot != nil {
+					info.UpdateImageCount(1)
+					ok, actual, _ := service.TryTieredSettle(info, billingexpr.TokenParams{})
+					require.True(t, ok)
+					assert.Equal(t, common.QuotaFromFloat(float64(tc.baseQuota)*tc.retryRatio), actual)
+				}
+			}
+		})
+	}
+}
+
 // priceTestReservation observes the reservation requested before image submission.
 type priceTestReservation struct{ held int }
 

@@ -28,6 +28,7 @@ type Pricing struct {
 	VideoCapabilities      *VideoModelCapabilities              `json:"video_capabilities,omitempty"`
 	BillingPluginVariants  []PricingPluginVariant               `json:"billing_plugin_variants,omitempty"`
 	ModelName              string                               `json:"model_name"`
+	IgnoreGroupRatio       bool                                 `json:"ignore_group_ratio"`
 	Description            string                               `json:"description,omitempty"`
 	Icon                   string                               `json:"icon,omitempty"`
 	Tags                   string                               `json:"tags,omitempty"`
@@ -336,6 +337,7 @@ func updatePricing() {
 	for model, groups := range modelGroupsMap {
 		pricing := Pricing{
 			ModelName:              model,
+			IgnoreGroupRatio:       billing_setting.IgnoreGroupRatio(model),
 			EnableGroup:            groups.Items(),
 			SupportedEndpointTypes: modelSupportEndpointTypes[model],
 		}
@@ -403,6 +405,16 @@ func updatePricing() {
 			}
 		}
 		if ok && plugin != nil {
+			if usageModel != "" && usageModel != model {
+				_, hasExpression := billing_setting.ResolveTaskBillingExpr(plugin.Meta.Key, model, usageModel)
+				_, originOverride := billing_setting.GetPluginBillingExpr(plugin.Meta.Key, model)
+				_, mappedOverride := billing_setting.GetPluginBillingExpr(plugin.Meta.Key, usageModel)
+				originMode := billing_setting.GetBillingMode(model)
+				if (hasExpression || originMode == billing_setting.BillingModeTieredExpr) && !originOverride &&
+					(mappedOverride || originMode != billing_setting.BillingModeTieredExpr) {
+					pricing.IgnoreGroupRatio = billing_setting.IgnoreGroupRatio(model, usageModel)
+				}
+			}
 			usageSchema, usageExamples := plugin.Meta.UsageForModel(usageModel)
 			pricing.BillingUsageSchema = jsplugin.CloneUsageSchema(usageSchema)
 			pricing.BillingUsageExamples = jsplugin.CloneUsageExamples(usageExamples)

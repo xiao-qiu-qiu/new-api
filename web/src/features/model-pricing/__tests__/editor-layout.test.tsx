@@ -18,6 +18,7 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
+  act,
   cleanup,
   render,
   screen,
@@ -25,12 +26,16 @@ import {
   within,
 } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { useState } from 'react'
+import { createRef, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { afterEach, expect, it, vi } from 'vitest'
 
 import { SettingsPageProvider } from '@/features/system-settings/components/settings-page-context'
-import { ModelPricingEditorPanel } from '@/features/system-settings/models/model-pricing-sheet'
+import {
+  ModelPricingEditorPanel,
+  type ModelPricingEditorPanelHandle,
+  type ModelRatioData,
+} from '@/features/system-settings/models/model-pricing-sheet'
 import { ModelRatioForm } from '@/features/system-settings/models/model-ratio-form'
 import { api } from '@/lib/api'
 import { useAuthStore } from '@/stores/auth-store'
@@ -175,7 +180,11 @@ it.each(['none', 'standard', 'claude_ttl', 'openai_ttl'] as const)(
   }
 )
 
-function renderEditor(embedded = false) {
+function renderEditor(
+  embedded = false,
+  data: Partial<ModelRatioData> = {},
+  isSaving = false
+) {
   vi.spyOn(api, 'get').mockResolvedValue({
     data: { success: true, data: [], vendors: [] },
   })
@@ -200,9 +209,14 @@ function renderEditor(embedded = false) {
     defaultOptions: { queries: { retry: false } },
   })
   clients.push(client)
-  render(
+  const ref = createRef<ModelPricingEditorPanelHandle>()
+  const dirty = vi.fn()
+  const view = (entry: Partial<ModelRatioData>) => (
     <QueryClientProvider client={client}>
       <ModelPricingEditorPanel
+        ref={ref}
+        onDirtyChange={dirty}
+        isSaving={isSaving}
         embedded={embedded}
         editData={{
           name: 'example-model',
@@ -210,12 +224,68 @@ function renderEditor(embedded = false) {
           ratio: '3.25',
           completionRatio: '2',
           cacheRatio: '0.2',
+          ...entry,
         }}
         onSave={() => {}}
       />
     </QueryClientProvider>
   )
+  const result = render(view(data))
+  return {
+    ref,
+    dirty,
+    reload: (entry: Partial<ModelRatioData>) => result.rerender(view(entry)),
+  }
 }
+
+it('saves the group-ratio toggle without changing the unit price and reloads it for each model', async () => {
+  const editor = renderEditor(true, {
+    billingMode: 'per-request',
+    price: '0.03',
+  })
+  const user = userEvent.setup()
+  const toggle = screen.getByRole('switch', { name: 'Ignore group ratio' })
+  expect(toggle).not.toBeChecked()
+  await user.click(toggle)
+  expect(toggle).toBeChecked()
+  expect(editor.dirty).toHaveBeenLastCalledWith(true)
+  await act(async () => {
+    expect(await editor.ref.current?.commitDraft()).toMatchObject({
+      price: '0.03',
+      ignoreGroupRatio: true,
+    })
+  })
+  toggle.focus()
+  await user.keyboard(' ')
+  expect(toggle).not.toBeChecked()
+  await act(async () => {
+    expect(await editor.ref.current?.commitDraft()).toMatchObject({
+      price: '0.03',
+      ignoreGroupRatio: false,
+    })
+  })
+  editor.reload({
+    name: 'enabled-model',
+    billingMode: 'per-request',
+    price: '0.03',
+    ignoreGroupRatio: true,
+  })
+  expect(toggle).toBeChecked()
+  expect(editor.dirty).toHaveBeenLastCalledWith(false)
+  editor.reload({
+    name: 'ordinary-model',
+    billingMode: 'per-request',
+    price: '0.03',
+  })
+  expect(toggle).not.toBeChecked()
+})
+
+it('disables the group-ratio toggle while saving', () => {
+  renderEditor(true, { ignoreGroupRatio: true }, true)
+  const toggle = screen.getByRole('switch', { name: 'Ignore group ratio' })
+  expect(toggle).toBeChecked()
+  expect(toggle).toHaveAttribute('aria-disabled', 'true')
+})
 
 it('keeps the preview expanded and the save action outside the scrolling embedded form', () => {
   renderEditor(true)
@@ -300,6 +370,7 @@ function PricingFormFixture(props: {
     AudioCompletionRatio: '{}',
     BillingMode: '{}',
     BillingExpr: '{}',
+    IgnoreGroupRatio: '{}',
     PluginBillingExpr: '{}',
     ExposeRatioEnabled: false,
   }

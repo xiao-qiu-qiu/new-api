@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
@@ -386,33 +387,39 @@ func RecalculateTaskQuotaByTokens(ctx context.Context, task *model.Task, totalTo
 
 	modelName := taskModelName(task)
 
-	// 获取模型价格和倍率
-	modelRatio, hasRatioSetting, _ := ratio_setting.GetModelRatio(modelName)
-	// 只有配置了倍率(非固定价格)时才按 token 重新计费
-	if !hasRatioSetting || modelRatio <= 0 {
-		return false
-	}
-
-	// 获取用户和组的倍率信息
-	group := task.Group
-	if group == "" {
-		user, err := model.GetUserById(task.UserId, false)
-		if err == nil {
-			group = user.Group
+	var modelRatio, finalGroupRatio float64
+	if bc := task.PrivateData.BillingContext; bc != nil {
+		// Submission already captured both ratios, including a deliberately free group.
+		// Configuration changes while the task runs must not reprice it.
+		modelRatio = bc.ModelRatio
+		finalGroupRatio = bc.GroupRatio
+	} else {
+		var configured bool
+		modelRatio, configured, _ = ratio_setting.GetModelRatio(modelName)
+		if !configured {
+			return false
+		}
+		group := task.Group
+		if group == "" {
+			user, err := model.GetUserById(task.UserId, false)
+			if err == nil {
+				group = user.Group
+			}
+		}
+		if group == "" {
+			return false
+		}
+		finalGroupRatio = 1
+		if !billing_setting.IgnoreGroupRatio(modelName) {
+			var special bool
+			finalGroupRatio, special = ratio_setting.GetGroupGroupRatio(group, group)
+			if !special {
+				finalGroupRatio = ratio_setting.GetGroupRatio(group)
+			}
 		}
 	}
-	if group == "" {
+	if modelRatio <= 0 {
 		return false
-	}
-
-	groupRatio := ratio_setting.GetGroupRatio(group)
-	userGroupRatio, hasUserGroupRatio := ratio_setting.GetGroupGroupRatio(group, group)
-
-	var finalGroupRatio float64
-	if hasUserGroupRatio {
-		finalGroupRatio = userGroupRatio
-	} else {
-		finalGroupRatio = groupRatio
 	}
 
 	// 计算 OtherRatios 乘积（视频折扣、时长等）

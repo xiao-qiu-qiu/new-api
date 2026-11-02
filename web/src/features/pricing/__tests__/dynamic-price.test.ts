@@ -31,7 +31,13 @@ import {
   hasTaskUsageSchema,
   isUnconfiguredTaskUsageModel,
 } from '../lib/dynamic-price'
-import { isTokenBasedModel } from '../lib/model-helpers'
+import { getDisplayGroupRatio, isTokenBasedModel } from '../lib/model-helpers'
+import {
+  formatFixedPrice,
+  formatGroupPrice,
+  formatPrice,
+  formatRequestPrice,
+} from '../lib/price'
 import type { PricingModel } from '../types'
 
 function pricingModel(overrides: Partial<PricingModel>): PricingModel {
@@ -53,6 +59,76 @@ const summaryOptions = {
   usdExchangeRate: 6,
   groupRatioMultiplier: 2,
 }
+
+describe('public pricing group factors', () => {
+  test.each([true, false, undefined])(
+    'uses the model group policy for selected and minimum prices when ignore_group_ratio is %s',
+    (ignoreGroupRatio) => {
+      const model = pricingModel({
+        ignore_group_ratio: ignoreGroupRatio,
+        enable_groups: ['free', 'discount', 'premium'],
+        group_ratio: { free: 0, discount: 0.5, premium: 3 },
+      })
+      expect(getDisplayGroupRatio(model)).toBe(ignoreGroupRatio ? 1 : 0)
+      expect(getDisplayGroupRatio(model, 'all')).toBe(ignoreGroupRatio ? 1 : 0)
+      expect(getDisplayGroupRatio(model, 'premium')).toBe(
+        ignoreGroupRatio ? 1 : 3
+      )
+      expect(getDisplayGroupRatio(model, 'discount')).toBe(
+        ignoreGroupRatio ? 1 : 0.5
+      )
+      expect(getDisplayGroupRatio(model, 'free')).toBe(ignoreGroupRatio ? 1 : 0)
+      expect(model.group_ratio).toEqual({ free: 0, discount: 0.5, premium: 3 })
+    }
+  )
+
+  test.each([
+    ['input', '$1'],
+    ['output', '$3'],
+    ['cache', '$0.25'],
+    ['create_cache', '$1.25'],
+    ['image', '$2'],
+    ['audio_input', '$4'],
+    ['audio_output', '$8'],
+  ] as const)(
+    'ignores only the group factor for %s prices in summaries and group details',
+    (type, expected) => {
+      const model = pricingModel({
+        ignore_group_ratio: true,
+        completion_ratio: 3,
+        cache_ratio: 0.25,
+        create_cache_ratio: 1.25,
+        image_ratio: 2,
+        audio_ratio: 4,
+        audio_completion_ratio: 2,
+        enable_groups: ['premium'],
+        group_ratio: { premium: 3 },
+      })
+      expect(formatPrice(model, type, 'M', true, 3, 6, 'premium')).toBe(
+        expected
+      )
+      expect(
+        formatGroupPrice(model, 'premium', type, 'M', true, 3, 6, {
+          premium: 3,
+        })
+      ).toBe(expected)
+    }
+  )
+
+  test('ignores group factors for per-request summaries and details while preserving recharge rates', () => {
+    const model = pricingModel({
+      quota_type: 1,
+      model_price: 0.4,
+      ignore_group_ratio: true,
+      enable_groups: ['premium'],
+      group_ratio: { premium: 3 },
+    })
+    expect(formatRequestPrice(model, true, 3, 6, 'premium')).toBe('$0.2')
+    expect(formatFixedPrice(model, 'premium', true, 3, 6, { premium: 3 })).toBe(
+      '$0.2'
+    )
+  })
+})
 
 describe('expression price summaries', () => {
   test('keeps request prices unchanged by token units and separates mixed billing units', () => {

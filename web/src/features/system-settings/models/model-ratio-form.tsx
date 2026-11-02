@@ -62,6 +62,7 @@ type ModelFormValues = {
   ExposeRatioEnabled: boolean
   BillingMode: string
   BillingExpr: string
+  IgnoreGroupRatio: string
   PluginBillingExpr: string
 }
 
@@ -84,11 +85,12 @@ type ModelJsonFieldName =
   | 'ImageRatio'
   | 'AudioRatio'
   | 'AudioCompletionRatio'
+  | 'IgnoreGroupRatio'
 
 const modelJsonFields: Array<{
   name: ModelJsonFieldName
   labelKey: string
-  descriptionKey: string
+  descriptionKey?: string
 }> = [
   {
     name: 'ModelPrice',
@@ -134,13 +136,17 @@ const modelJsonFields: Array<{
     labelKey: 'Audio completion ratio',
     descriptionKey: 'Ratio applied to audio completions for streaming models.',
   },
+  {
+    name: 'IgnoreGroupRatio',
+    labelKey: 'Ignore group ratio',
+  },
 ]
 
 function ModelJsonTextareaField(props: {
   form: UseFormReturn<ModelFormValues>
   name: ModelJsonFieldName
   label: string
-  description: string
+  description?: string
 }) {
   return (
     <FormField
@@ -158,9 +164,11 @@ function ModelJsonTextareaField(props: {
               textareaRef={field.ref}
             />
           </FormControl>
-          <FormDescription className='text-xs leading-5'>
-            {props.description}
-          </FormDescription>
+          {props.description && (
+            <FormDescription className='text-xs leading-5'>
+              {props.description}
+            </FormDescription>
+          )}
           <FormMessage />
         </FormItem>
       )}
@@ -317,6 +325,7 @@ export const ModelRatioForm = memo(function ModelRatioForm({
               savedAudioCompletionRatio={savedValues.AudioCompletionRatio}
               savedBillingMode={savedValues.BillingMode}
               savedBillingExpr={savedValues.BillingExpr}
+              savedIgnoreGroupRatio={savedValues.IgnoreGroupRatio}
               savedPluginBillingExpr={savedValues.PluginBillingExpr}
               modelPrice={form.watch('ModelPrice')}
               modelRatio={form.watch('ModelRatio')}
@@ -328,6 +337,7 @@ export const ModelRatioForm = memo(function ModelRatioForm({
               audioCompletionRatio={form.watch('AudioCompletionRatio')}
               billingMode={form.watch('BillingMode')}
               billingExpr={form.watch('BillingExpr')}
+              ignoreGroupRatio={form.watch('IgnoreGroupRatio')}
               pluginBillingExpr={form.watch('PluginBillingExpr')}
               candidateModelNames={
                 isUnsetVariant ? enabledModelsQuery.data?.data : undefined
@@ -342,6 +352,7 @@ export const ModelRatioForm = memo(function ModelRatioForm({
                 const fieldMap: Record<string, keyof ModelFormValues> = {
                   'billing_setting.billing_mode': 'BillingMode',
                   'billing_setting.billing_expr': 'BillingExpr',
+                  'billing_setting.ignore_group_ratio': 'IgnoreGroupRatio',
                   'billing_setting.plugin_billing_expr': 'PluginBillingExpr',
                 }
                 const formField =
@@ -359,7 +370,9 @@ export const ModelRatioForm = memo(function ModelRatioForm({
                   form={form}
                   name={config.name}
                   label={t(config.labelKey)}
-                  description={t(config.descriptionKey)}
+                  description={
+                    config.descriptionKey ? t(config.descriptionKey) : undefined
+                  }
                 />
               ))}
             </div>

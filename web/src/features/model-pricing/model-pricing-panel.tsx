@@ -70,6 +70,12 @@ export function ModelPricingPanel(props: {
   const editData = useMemo(() => {
     if (!entry) return null
     const values = { ...entry.configured }
+    if (
+      values['billing_setting.ignore_group_ratio'] === undefined &&
+      entry.effective['billing_setting.ignore_group_ratio'] === true
+    ) {
+      values['billing_setting.ignore_group_ratio'] = true
+    }
     if (entry.effective['billing_setting.billing_mode'] === 'tiered_expr') {
       values['billing_setting.billing_mode'] = 'tiered_expr'
       values['billing_setting.billing_expr'] =

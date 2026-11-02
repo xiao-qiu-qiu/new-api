@@ -50,6 +50,14 @@ export function getConfiguredGroupRatio(
   return typeof ratio === 'number' && Number.isFinite(ratio) ? ratio : 1
 }
 
+/** Apply the model's group policy to public prices, not historical log ratios. */
+export function getEffectiveGroupRatio(
+  model: PricingModel,
+  ratio: number
+): number {
+  return model.ignore_group_ratio === true ? 1 : ratio
+}
+
 /**
  * Resolve the group ratio used by model square summary prices.
  *
@@ -71,7 +79,10 @@ export function getDisplayGroupRatio(
     selectedGroup !== FILTER_ALL &&
     modelEnableGroups.includes(selectedGroup)
   ) {
-    return getConfiguredGroupRatio(groupRatio, selectedGroup)
+    return getEffectiveGroupRatio(
+      model,
+      getConfiguredGroupRatio(groupRatio, selectedGroup)
+    )
   }
 
   if (modelEnableGroups.length === 0) {
@@ -91,7 +102,10 @@ export function getDisplayGroupRatio(
     }
   }
 
-  return minRatio === Number.POSITIVE_INFINITY ? 1 : minRatio
+  return getEffectiveGroupRatio(
+    model,
+    minRatio === Number.POSITIVE_INFINITY ? 1 : minRatio
+  )
 }
 
 /**

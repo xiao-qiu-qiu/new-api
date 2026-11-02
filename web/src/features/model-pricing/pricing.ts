@@ -43,15 +43,21 @@ export const PRICING_KEYS = [
   'AudioCompletionRatio',
   'billing_setting.billing_mode',
   'billing_setting.billing_expr',
+  'billing_setting.ignore_group_ratio',
   'billing_setting.plugin_billing_expr',
 ] as const
 export type PricingKey = (typeof PRICING_KEYS)[number]
 export type PricingValues = Partial<
   Record<
-    Exclude<PricingKey, 'billing_setting.plugin_billing_expr'>,
+    Exclude<
+      PricingKey,
+      | 'billing_setting.plugin_billing_expr'
+      | 'billing_setting.ignore_group_ratio'
+    >,
     number | string
   >
 > & {
+  'billing_setting.ignore_group_ratio'?: boolean
   'billing_setting.plugin_billing_expr'?: Record<string, string>
 }
 export type PricingOptions = Record<PricingKey, string>
@@ -80,6 +86,7 @@ export function modelPricingDisplay(
     id: 0,
     model_name: entry.model_name,
     enable_groups: [],
+    ignore_group_ratio: values['billing_setting.ignore_group_ratio'] === true,
     quota_type:
       values.ModelPrice !== undefined &&
       values['billing_setting.billing_mode'] !== 'tiered_expr'
@@ -150,6 +157,9 @@ export function pricingOptions(
       let value = values[key]
       if (key === 'billing_setting.billing_mode') value ??= values.BillingMode
       if (key === 'billing_setting.billing_expr') value ??= values.BillingExpr
+      if (key === 'billing_setting.ignore_group_ratio') {
+        value ??= values.IgnoreGroupRatio
+      }
       if (key === 'billing_setting.plugin_billing_expr') {
         value ??= values.PluginBillingExpr
       }
@@ -170,6 +180,7 @@ export function pricingRows(options: PricingOptions): ModelPricingSnapshot[] {
     audioCompletionRatio: options.AudioCompletionRatio,
     billingMode: options['billing_setting.billing_mode'],
     billingExpr: options['billing_setting.billing_expr'],
+    ignoreGroupRatio: options['billing_setting.ignore_group_ratio'],
     pluginBillingExpr: options['billing_setting.plugin_billing_expr'],
   })
 }
@@ -215,6 +226,9 @@ export function pricingRow(
 
 export function pricingFromDraft(data: ModelRatioData): PricingValues {
   const values: PricingValues = {
+    ...(data.ignoreGroupRatio === undefined
+      ? {}
+      : { 'billing_setting.ignore_group_ratio': data.ignoreGroupRatio }),
     ...(data.pluginBillingExpr === undefined
       ? {}
       : { 'billing_setting.plugin_billing_expr': data.pluginBillingExpr }),
@@ -274,7 +288,7 @@ function applyPricingValues(
     PRICING_KEYS.map((key) => {
       const map = JSON.parse(options[key] ?? '{}') as Record<
         string,
-        number | string
+        number | string | boolean
       >
       if (key === 'billing_setting.plugin_billing_expr') {
         // Model-only imports and batch copies retain each target's provider prices.
@@ -317,6 +331,15 @@ export function pricingValuesByModel(
       throw new Error(t('Pricing must be a JSON object'))
     }
     for (const [name, value] of Object.entries(map)) {
+      if (key === 'billing_setting.ignore_group_ratio') {
+        if (typeof value !== 'boolean') {
+          throw new Error(t('Invalid pricing value'))
+        }
+        const model = models.get(name) ?? {}
+        model[key] = value
+        models.set(name, model)
+        continue
+      }
       if (typeof value !== 'number' && typeof value !== 'string') {
         throw new Error(t('Invalid pricing value'))
       }
@@ -344,6 +367,7 @@ export function applyPriceSyncSelections(
   selections: Record<string, Record<string, number | string>>
 ): PricingOptions {
   let result = options
+  const localPricing = pricingValuesByModel(options)
   for (const [name, fields] of Object.entries(selections)) {
     const next: PricingValues = {}
     const expression =
@@ -364,6 +388,7 @@ export function applyPriceSyncSelections(
           .join('') as PricingKey
         if (
           PRICING_KEYS.includes(key) &&
+          key !== 'billing_setting.ignore_group_ratio' &&
           key !== 'billing_setting.plugin_billing_expr'
         ) {
           next[key] = value
@@ -371,6 +396,12 @@ export function applyPriceSyncSelections(
       }
     }
     const validated = pricingFromDraft(pricingRow(name, next))
+    // Group discounts are a local policy, independent of upstream unit prices.
+    const ignoreGroupRatio =
+      localPricing.get(name)?.['billing_setting.ignore_group_ratio']
+    if (ignoreGroupRatio !== undefined) {
+      validated['billing_setting.ignore_group_ratio'] = ignoreGroupRatio
+    }
     if (expression) {
       // Sync is a literal import. The editor may normalize request-rule
       // parentheses, which would otherwise produce another upstream diff.

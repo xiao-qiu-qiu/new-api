@@ -104,6 +104,18 @@ describe('price sorting', () => {
       ],
     ],
     [
+      SORT_OPTIONS.REQUEST_PRICE_LOW,
+      [
+        'expr-fixed',
+        'legacy-per-call',
+        'expr-task',
+        'legacy-ratio',
+        'expr-tokens',
+        'expr-long-context',
+        'expr-input-only',
+      ],
+    ],
+    [
       SORT_OPTIONS.REQUEST_PRICE_HIGH,
       [
         'expr-task',
@@ -121,6 +133,15 @@ describe('price sorting', () => {
       expect(sortModels(models, sortBy).map((m) => m.model_name)).toEqual(
         expected
       )
+      const ignoredGroupModels = models.map((model) => ({
+        ...model,
+        enable_groups: ['free', 'premium'],
+        group_ratio: { free: 0, premium: 3 },
+        ignore_group_ratio: true,
+      }))
+      expect(
+        sortModels(ignoredGroupModels, sortBy).map((m) => m.model_name)
+      ).toEqual(expected)
     }
   )
 })
