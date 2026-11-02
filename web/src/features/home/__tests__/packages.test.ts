@@ -115,6 +115,14 @@ describe('Homepage package contract', () => {
     expect(doc.querySelector('.response-panel')).toBeNull()
     expect(doc.querySelectorAll('.model-option')).toHaveLength(4)
     expect(doc.querySelectorAll('.code-tab')).toHaveLength(3)
+    const consoleLinks = doc.querySelectorAll(
+      '.hero-actions .button-primary, .final-cta .button-primary'
+    )
+    expect(consoleLinks).toHaveLength(2)
+    for (const link of consoleLinks) {
+      expect(link.getAttribute('href')).toBe('/dashboard')
+      expect(link.getAttribute('target')).toBe('_top')
+    }
   })
   it('accepts runtime messages only from the current iframe and channel', () => {
     expect(

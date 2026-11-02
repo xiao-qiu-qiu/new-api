@@ -70,6 +70,8 @@ html {
   scroll-padding-top: 90px;
 }
 body {
+  /* Include child margins in the body height reported to the homepage host. */
+  display: flow-root;
   margin: 0;
   background: var(--background);
   color: var(--foreground);
