@@ -28,8 +28,19 @@ import { NoticeSection } from '../maintenance/notice-section'
 import { SidebarModulesSection } from '../maintenance/sidebar-modules-section'
 import type { SiteSettings } from '../types'
 import { createSectionRegistry } from '../utils/section-registry'
+import { HomepagePackagesSection } from './homepage-packages-section'
 
 const SITE_SECTIONS = [
+  {
+    id: 'homepage-packages',
+    titleKey: 'Homepage packages',
+    build: (settings: SiteSettings) => (
+      <HomepagePackagesSection
+        defaultValue={settings.HomePagePackages ?? ''}
+        legacy={settings.HomePageContent}
+      />
+    ),
+  },
   {
     id: 'system-info',
     titleKey: 'System Information',

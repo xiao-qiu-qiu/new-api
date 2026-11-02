@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "codeq-custom",
+  "name": "CodeQ",
+  "description": "CodeQ homepage for New API",
+  "kind": "html",
+  "layout": "content",
+  "config": {
+    "brand": "CodeQ",
+    "apiBase": "",
+    "models": {
+      "gpt": "gpt-6.1-sol",
+      "claude": "claude-sonnet-4-5",
+      "gemini": "gemini-2.5-pro",
+      "deepseek": "deepseek-chat"
+    }
+  }
+}

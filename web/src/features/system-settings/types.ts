@@ -147,6 +147,7 @@ export type SiteSettings = {
   Footer: string
   About: string
   HomePageContent: string
+  HomePagePackages: string
   ServerAddress: string
   TaskPublicAddress: string
   'console_setting.recharge_store_url': string

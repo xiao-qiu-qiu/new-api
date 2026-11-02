@@ -27,7 +27,9 @@ import { isLikelyHtml } from '@/lib/content-format'
 import { useAuthStore } from '@/stores/auth-store'
 
 import { CTA, Features, Hero, HowItWorks, Stats } from './components'
+import { PackageHome } from './components/package-home'
 import { useHomePageContent } from './hooks'
+import { readPublicHomepagePackage } from './packages'
 
 export function Home() {
   const { i18n, t } = useTranslation()
@@ -67,6 +69,9 @@ export function Home() {
       </PublicLayout>
     )
   }
+
+  const homepagePackage = readPublicHomepagePackage(content)
+  if (homepagePackage) return <PackageHome pack={homepagePackage} />
 
   if (content) {
     if (isUrl) {

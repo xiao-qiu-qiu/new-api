@@ -217,6 +217,12 @@ func UpdateOption(c *gin.Context) {
 			return
 		}
 	}
+	if option.Key == system_setting.HomepagePackagesOption {
+		if _, err := system_setting.ParseHomepagePackages(option.Value.(string)); err != nil {
+			common.ApiErrorT(c, "Invalid homepage package configuration")
+			return
+		}
+	}
 	switch option.Key {
 	case "GitHubOAuthEnabled":
 		if option.Value == "true" && common.GitHubClientId == "" {
@@ -423,7 +429,11 @@ func UpdateOption(c *gin.Context) {
 		common.ApiSuccess(c, change)
 		return
 	}
-	err = model.UpdateOption(option.Key, option.Value.(string))
+	if option.Key == system_setting.HomepagePackagesOption {
+		err = model.UpdateOptionsBulk(map[string]string{option.Key: option.Value.(string)})
+	} else {
+		err = model.UpdateOption(option.Key, option.Value.(string))
+	}
 	if err != nil {
 		if errors.Is(err, system_setting.ErrPasskeyRPIDInvalid) {
 			writeSecurityOperationError(c, err)

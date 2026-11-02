@@ -20,6 +20,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import i18next from 'i18next'
 import { toast } from 'sonner'
 
+import { HOMEPAGE_QUERY_KEY } from '@/features/home/packages'
 import { handleServerError } from '@/lib/handle-server-error'
 import { requireServerSuccess } from '@/lib/server-error-message'
 
@@ -62,6 +63,17 @@ export function useUpdateOption() {
       if (data.success) {
         // Always refresh system-options
         queryClient.invalidateQueries({ queryKey: ['system-options'] })
+        if (
+          variables.key === 'HomePagePackages' ||
+          variables.key === 'HomePageContent'
+        ) {
+          queryClient.invalidateQueries({ queryKey: HOMEPAGE_QUERY_KEY })
+          if (typeof BroadcastChannel !== 'undefined') {
+            const channel = new BroadcastChannel('new-api-homepage')
+            channel.postMessage('updated')
+            channel.close()
+          }
+        }
 
         // If updating frontend-display-related config, also refresh status
         if (STATUS_RELATED_KEYS.has(variables.key)) {

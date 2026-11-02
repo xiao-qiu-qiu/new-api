@@ -4,8 +4,9 @@
   "private": false,
   "type": "module",
   "scripts": {
-    "dev": "bun run canvas:build && rsbuild dev",
-    "build": "bun run canvas:build && rsbuild build",
+    "dev": "bun run homepage:build && bun run canvas:build && rsbuild dev",
+    "build": "bun run homepage:build && bun run canvas:build && rsbuild build",
+    "homepage:build": "bun scripts/build-homepage-packages.mjs",
     "build:check": "bun run typecheck && bun run build",
     "typecheck": "bun check -b && bun run --cwd canvas typecheck",
     "lint": "oxlint -c .oxlintrc.json .",

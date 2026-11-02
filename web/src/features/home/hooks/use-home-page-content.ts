@@ -16,67 +16,39 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import i18next from 'i18next'
-import { useEffect, useState } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useEffect } from 'react'
 
 import { isHttpUrl } from '@/lib/content-format'
-import { handleServerError } from '@/lib/handle-server-error'
+import { requireServerSuccess } from '@/lib/server-error-message'
 
 import { getHomePageContent } from '../api'
+import { HOMEPAGE_QUERY_KEY } from '../packages'
 import type { HomePageContentResult } from '../types'
-
-const STORAGE_KEY = 'home_page_content'
 
 /**
  * Hook to load and manage custom home page content
  * Supports both Markdown/HTML content and iframe URLs
  */
 export function useHomePageContent(): HomePageContentResult {
-  const [content, setContent] = useState<string>('')
-  const [isLoaded, setIsLoaded] = useState(false)
-
+  const queryClient = useQueryClient()
+  const query = useQuery({
+    queryKey: HOMEPAGE_QUERY_KEY,
+    queryFn: async () =>
+      requireServerSuccess(await getHomePageContent()).data ?? '',
+    staleTime: 0,
+    refetchInterval: 30000,
+    refetchOnWindowFocus: true,
+  })
   useEffect(() => {
-    let mounted = true
-
-    const loadContent = async () => {
-      // Load from localStorage first for immediate display
-      const cached = localStorage.getItem(STORAGE_KEY)
-      if (cached && mounted) {
-        setContent(cached)
-      }
-
-      try {
-        const response = await getHomePageContent()
-        const { success, data } = response
-
-        if (!mounted) return
-
-        if (success && data) {
-          setContent(data)
-          localStorage.setItem(STORAGE_KEY, data)
-        } else {
-          // Clear content if API returns empty
-          setContent('')
-          localStorage.removeItem(STORAGE_KEY)
-        }
-      } catch (error) {
-        if (!mounted) return
-        handleServerError(error, i18next.t('Failed to load home page content'))
-      } finally {
-        if (mounted) {
-          setIsLoaded(true)
-        }
-      }
-    }
-
-    loadContent()
-
-    return () => {
-      mounted = false
-    }
-  }, [])
-
+    if (typeof BroadcastChannel === 'undefined') return
+    const channel = new BroadcastChannel('new-api-homepage')
+    channel.addEventListener('message', () => {
+      void queryClient.invalidateQueries({ queryKey: HOMEPAGE_QUERY_KEY })
+    })
+    return () => channel.close()
+  }, [queryClient])
+  const content = query.data ?? ''
   const isUrl = isHttpUrl(content)
-
-  return { content, isLoaded, isUrl }
+  return { content, isLoaded: !query.isPending, isUrl }
 }

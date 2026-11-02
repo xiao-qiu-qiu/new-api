@@ -31,6 +31,7 @@ const defaultSiteSettings: SiteSettings = {
   Footer: '',
   About: '',
   HomePageContent: '',
+  HomePagePackages: '',
   ServerAddress: '',
   TaskPublicAddress: '',
   'console_setting.recharge_store_url': 'https://catfk.com/shop/40PFAHE3',
