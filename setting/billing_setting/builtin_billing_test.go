@@ -216,6 +216,7 @@ func TestServiceTierForwardReservationAndSettlement(t *testing.T) {
 		{"flex reserves discounted price", "flex", "flex", "responses", "flex", "flex", true, 2500, 3750, 3000, "follow"},
 		{"reject expensive tier before upstream", "ultrafast", "ultrafast", "responses", "", "", true, 0, 0, 10000, ""},
 		{"key priority survives channel filtering", "flex", "priority", "responses", "priority", "priority", false, 10000, 15000, 0, "priority"},
+		{"key priority with omitted client tier accepts upstream default", "", "default", "responses", "priority", "default", false, 10000, 7500, 0, "priority"},
 		{"key ultrafast wins over Fast alias", "fast", "ultrafast", "chat", "ultrafast", "ultrafast", true, 30000, 45000, 0, "ultrafast"},
 		{"key priority caps client ultrafast", "ultrafast", "priority", "responses", "priority", "priority", true, 10000, 15000, 0, "priority"},
 		{"locked tier still accepts terminal downgrade", "flex", "default", "stream", "ultrafast", "default", false, 30000, 7500, 0, "ultrafast"},
@@ -254,8 +255,13 @@ func TestServiceTierForwardReservationAndSettlement(t *testing.T) {
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
 			common.SetContextKey(c, constant.ContextKeyTokenOpenAITierPolicy, tc.policy)
 			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-			request := []byte(fmt.Sprintf(`{"model":"gpt-6-astra","service_tier":%q}`, tc.requested))
-			request, err := relaycommon.RemoveDisabledFields(request, dto.ChannelOtherSettings{AllowServiceTier: tc.allow}, false)
+			requestBody := `{"model":"gpt-6-astra"}`
+			billingRequest := `{}`
+			if tc.requested != "" {
+				requestBody = fmt.Sprintf(`{"model":"gpt-6-astra","service_tier":%q}`, tc.requested)
+				billingRequest = fmt.Sprintf(`{"service_tier":%q}`, tc.requested)
+			}
+			request, err := relaycommon.RemoveDisabledFields([]byte(requestBody), dto.ChannelOtherSettings{AllowServiceTier: tc.allow}, false)
 			require.NoError(t, err)
 			reservation := &serviceTierReservation{limit: tc.limit}
 			info := &relaycommon.RelayInfo{
@@ -267,7 +273,7 @@ func TestServiceTierForwardReservationAndSettlement(t *testing.T) {
 				PriceData: hosttypes.PriceData{GroupRatioInfo: hosttypes.GroupRatioInfo{GroupRatio: 1}},
 				TieredBillingSnapshot: &billingexpr.BillingSnapshot{BillingMode: "tiered_expr", ExprString: expression,
 					ExprHash: billingexpr.ExprHashString(expression), GroupRatio: 1, EstimatedPromptTokens: 1000, QuotaPerUnit: 500000},
-				BillingRequestInput: &billingexpr.RequestInput{Body: []byte(fmt.Sprintf(`{"service_tier":%q}`, tc.requested))},
+				BillingRequestInput: &billingexpr.RequestInput{Body: []byte(billingRequest)},
 			}
 			if strings.HasPrefix(tc.mode, "chat") {
 				info.RelayFormat = types.RelayFormatOpenAI
@@ -330,11 +336,16 @@ func TestServiceTierForwardReservationAndSettlement(t *testing.T) {
 			var logged map[string]any
 			require.NoError(t, common.UnmarshalJsonStr(other.JSONString(), &logged))
 			assert.Equal(t, tc.effective, logged["service_tier"])
-			assert.Equal(t, tc.requested, logged["requested_service_tier"])
+			assert.Equal(t, outbound, logged["outbound_service_tier"])
+			if tc.requested == "" {
+				assert.NotContains(t, logged, "requested_service_tier")
+			} else {
+				assert.Equal(t, tc.requested, logged["requested_service_tier"])
+			}
 			if tc.observed != "auto" {
 				assert.Equal(t, tc.observed, logged["observed_service_tier"])
 			}
-			assert.JSONEq(t, fmt.Sprintf(`{"service_tier":%q}`, tc.requested), string(info.BillingRequestInput.Body))
+			assert.JSONEq(t, billingRequest, string(info.BillingRequestInput.Body))
 			assert.Equal(t, "high", logged["reasoning_effort"])
 		})
 	}

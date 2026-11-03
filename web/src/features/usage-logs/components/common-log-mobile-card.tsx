@@ -51,7 +51,11 @@ import {
   isTimingLogType,
 } from '../lib/utils'
 import { LogCacheHitRate } from './log-cache-hit-rate'
-import { ModelBadge, ResponseModelDetails } from './model-badge'
+import {
+  ModelBadge,
+  ResponseModelDetails,
+  ServiceTierDetails,
+} from './model-badge'
 import { StreamTpsCell, TimingMetricsCell } from './timing-metrics-cell'
 import { useUsageLogsContext } from './usage-logs-provider'
 
@@ -176,6 +180,8 @@ export function CommonLogMobileCard<TData>(props: {
               reasoningEffort={other?.reasoning_effort}
               serviceTier={other?.service_tier}
               requestedServiceTier={other?.requested_service_tier}
+              outboundServiceTier={other?.outbound_service_tier}
+              observedServiceTier={other?.observed_service_tier}
               wrapText
               onInspect={() => setSelectedField('model')}
             />
@@ -410,6 +416,14 @@ export function CommonLogMobileCard<TData>(props: {
             </p>
             {selectedField === 'model' && model.responseModel && (
               <ResponseModelDetails observation={model.responseModel} />
+            )}
+            {selectedField === 'model' && (
+              <ServiceTierDetails
+                serviceTier={other?.service_tier}
+                requestedServiceTier={other?.requested_service_tier}
+                outboundServiceTier={other?.outbound_service_tier}
+                observedServiceTier={other?.observed_service_tier}
+              />
             )}
             {selectedField === 'model' &&
               !model.responseModel &&

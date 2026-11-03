@@ -726,6 +726,8 @@ export function useCommonLogsColumns(
                 reasoningEffort={other?.reasoning_effort}
                 serviceTier={other?.service_tier}
                 requestedServiceTier={other?.requested_service_tier}
+                outboundServiceTier={other?.outbound_service_tier}
+                observedServiceTier={other?.observed_service_tier}
               />
             </div>
           )
