@@ -150,6 +150,16 @@ func TestAccessTokenRouteRulesCoverEveryDashboardRoute(t *testing.T) {
 		assert.Equal(t, "scope", rule.Kind(), key)
 		assert.Equal(t, service.AccessTokenScopeOf(permission), rule.Scope(), key)
 	}
+	for key, scope := range map[string]string{
+		"GET /api/user/redemption/self":              "wallet:read",
+		"GET /api/option/video_model_capabilities":   "option:read",
+		"PATCH /api/option/video_model_capabilities": "option:write",
+	} {
+		rule, ok := middleware.AccessTokenRouteRule(key)
+		require.True(t, ok, key)
+		assert.Equal(t, "scope", rule.Kind(), key)
+		assert.Equal(t, scope, rule.Scope(), key)
+	}
 }
 
 func TestChannelAffinityManagementRouteScopes(t *testing.T) {

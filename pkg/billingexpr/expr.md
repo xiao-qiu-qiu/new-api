@@ -202,7 +202,7 @@ Logs expose the requested, observed and effective tiers as
 |----------|-----------|---------|
 | `tier` | `tier(name, value) → float64` | Records which pricing tier matched; must wrap the cost expression |
 | `fixed` | `fixed(amount) → float64` | A USD price per request, used only as the complete price in `tier(name, fixed(amount))` |
-| `param` | `param(path) → any` | Reads a JSON path from the request body (uses gjson) |
+| `param` | `param(path) → any` | Reads a JSON path from the request body (uses ojson, gjson path syntax) |
 | `header` | `header(key) → string` | Reads a request header value |
 | `has` | `has(source, substr) → bool` | Substring check |
 | `hour` | `hour(tz) → int` | Current hour in timezone (0-23) |

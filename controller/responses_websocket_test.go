@@ -28,6 +28,7 @@ import (
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/config"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
@@ -133,6 +134,17 @@ func newResponsesWSTestRunner(t *testing.T, token *model.Token) (relay.Responses
 
 func TestResponsesWSRequestRunnerRefreshesBillingContextAndCleansBody(t *testing.T) {
 	user, token := setupResponsesWSRequestTest(t)
+	previousGroups, previousConfigured := setting.UserGroups2JSONString(), setting.UserGroupsConfigured()
+	previousRatios := ratio_setting.GroupRatio2JSONString()
+	t.Cleanup(func() {
+		require.NoError(t, setting.UpdateUserGroupsByJSONString(previousGroups))
+		if !previousConfigured {
+			setting.ResetUserGroups()
+		}
+		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(previousRatios))
+	})
+	require.NoError(t, setting.UpdateUserGroupsByJSONString(`{"default":"default","updated":"updated"}`))
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1,"updated":2}`))
 	allowedIP := "203.0.113.8"
 	require.NoError(t, model.DB.Model(token).Update("allow_ips", allowedIP).Error)
 	runner, handshake := newResponsesWSTestRunner(t, token)

@@ -33,8 +33,8 @@ import (
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	hosttypes "github.com/QuantumNous/new-api/types"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/samber/lo"
-	"github.com/tidwall/gjson"
 
 	"github.com/gin-gonic/gin"
 )
@@ -764,16 +764,16 @@ func detectErrorMessageFromJSONBytes(jsonBytes []byte) string {
 	if jsonBytes[0] != '{' && jsonBytes[0] != '[' {
 		return ""
 	}
-	errVal := gjson.GetBytes(jsonBytes, "error")
-	if !errVal.Exists() || errVal.Type == gjson.Null {
+	errVal := ojson.GetBytes(jsonBytes, "error")
+	if !errVal.Exists() || errVal.Type == ojson.Null {
 		return ""
 	}
 
-	message := gjson.GetBytes(jsonBytes, "error.message").String()
+	message := ojson.GetBytes(jsonBytes, "error.message").String()
 	if message == "" {
-		message = gjson.GetBytes(jsonBytes, "error.error.message").String()
+		message = ojson.GetBytes(jsonBytes, "error.error.message").String()
 	}
-	if message == "" && errVal.Type == gjson.String {
+	if message == "" && errVal.Type == ojson.String {
 		message = errVal.String()
 	}
 	if message == "" {
@@ -832,8 +832,8 @@ func applyChannelTestPrompt(request dto.Request, prompt string) error {
 
 // channelTestVisibleContent only extracts public text blocks; reasoning,
 // encrypted compaction state, image data and tool arguments stay out of replies.
-func channelTestVisibleContent(content gjson.Result) string {
-	if content.Type == gjson.String {
+func channelTestVisibleContent(content ojson.Result) string {
+	if content.Type == ojson.String {
 		return content.String()
 	}
 	var text strings.Builder
@@ -859,10 +859,10 @@ type channelTestResponsePreview struct {
 }
 
 func (p *channelTestResponsePreview) observe(payload []byte, stream bool) {
-	if !gjson.ValidBytes(payload) {
+	if !ojson.ValidBytes(payload) {
 		return
 	}
-	root := gjson.ParseBytes(payload)
+	root := ojson.ParseBytes(payload)
 	for _, path := range []string{"model", "response.model", "message.model", "modelVersion"} {
 		if value := root.Get(path).String(); value != "" {
 			p.model = value
@@ -944,8 +944,8 @@ func (p *channelTestResponsePreview) observe(payload []byte, stream bool) {
 func extractChannelTestResponse(body []byte, truncated bool) (string, string, bool) {
 	preview := channelTestResponsePreview{truncated: truncated}
 	trimmed := bytes.TrimSpace(body)
-	if gjson.ValidBytes(trimmed) {
-		root := gjson.ParseBytes(trimmed)
+	if ojson.ValidBytes(trimmed) {
+		root := ojson.ParseBytes(trimmed)
 		if root.IsArray() {
 			for _, item := range root.Array() {
 				preview.observe([]byte(item.Raw), false)
@@ -989,8 +989,8 @@ func extractChannelTestResponse(body []byte, truncated bool) (string, string, bo
 	if preview.finalText != "" {
 		text = preview.finalText
 	}
-	root := gjson.ParseBytes(trimmed)
-	if text == "" && gjson.ValidBytes(trimmed) && (root.Get("data").Exists() || root.Get("results").Exists()) {
+	root := ojson.ParseBytes(trimmed)
+	if text == "" && ojson.ValidBytes(trimmed) && (root.Get("data").Exists() || root.Get("results").Exists()) {
 		// Non-text endpoints (embeddings, images and rerank) still provide an
 		// inspectable bounded JSON response.
 		if formatted, err := common.IndentJson(trimmed); err == nil {

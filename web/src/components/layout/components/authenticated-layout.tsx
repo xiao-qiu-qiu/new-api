@@ -26,6 +26,7 @@ import { LayoutProvider } from '@/context/layout-provider'
 import { SearchProvider } from '@/context/search-provider'
 import { getCookie } from '@/lib/cookies'
 import { cn } from '@/lib/utils'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { AppHeader } from './app-header'
 import { AppSidebar } from './app-sidebar'
@@ -39,6 +40,9 @@ export function AuthenticatedLayout(props: AuthenticatedLayoutProps) {
   const isCanvas = useRouterState({
     select: (state) => /^\/canvas\/?$/.test(state.location.pathname),
   })
+  const signedIn = useAuthStore((s) => !!s.auth.user)
+  // Unmount pages on sign-out, otherwise their queries refetch and toast "Session expired!" / "invalid access token"
+  if (!signedIn) return null
 
   return (
     <LayoutProvider>

@@ -31,8 +31,10 @@ import (
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	hosttypes "github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
+	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func TestGPT6AstraBuiltinBilling(t *testing.T) {
@@ -83,6 +85,18 @@ func TestGPT6AstraBuiltinBilling(t *testing.T) {
 	}
 
 	t.Run("admin options expose defaults without persisting them", func(t *testing.T) {
+		db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+		require.NoError(t, err)
+		sqlDB, err := db.DB()
+		require.NoError(t, err)
+		sqlDB.SetMaxOpenConns(1)
+		previousDB := model.DB
+		model.DB = db
+		t.Cleanup(func() {
+			model.DB = previousDB
+			require.NoError(t, sqlDB.Close())
+		})
+		require.NoError(t, db.AutoMigrate(&model.User{}, &model.SubscriptionPlan{}, &model.UserSubscription{}))
 		recorder := httptest.NewRecorder()
 		ctx, _ := gin.CreateTestContext(recorder)
 		controller.GetOptions(ctx)
