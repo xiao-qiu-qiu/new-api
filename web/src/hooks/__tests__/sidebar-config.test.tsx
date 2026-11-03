@@ -208,3 +208,46 @@ describe('audit log sidebar entry', () => {
     expect(titles).toContain('Audit Logs')
   })
 })
+
+describe('affinity session sidebar configuration', () => {
+  it('legacy settings enable Affinity sessions next to Channels and preserve its independent toggle', () => {
+    const config = parseSidebarModulesAdmin(
+      '{"admin":{"enabled":true,"channel":true}}'
+    )
+    expect(config.admin.channelAffinity).toBe(true)
+    const { result } = sidebarFor(config)
+    const items =
+      result.current.find((group) => group.id === 'admin')?.items ?? []
+    const channelsIndex = items.findIndex((item) => item.title === 'Channels')
+    expect(items[channelsIndex + 1]).toMatchObject({
+      title: 'Affinity sessions',
+      url: '/channel-affinity',
+    })
+    expect(
+      items
+        .filter((item) => checkIsActive('/channel-affinity', item))
+        .map((item) => item.title)
+    ).toEqual(['Affinity sessions'])
+
+    config.admin.channelAffinity = false
+    expect(
+      parseSidebarModulesAdmin(serializeSidebarModulesAdmin(config)).admin
+        .channelAffinity
+    ).toBe(false)
+  })
+
+  it.each([
+    [{ admin: { enabled: true, channelAffinity: false } }, undefined],
+    [undefined, { admin: { enabled: true, channelAffinity: false } }],
+  ])(
+    'disabling Affinity sessions keeps Channels visible (%j, %j)',
+    (admin, user) => {
+      const { result } = sidebarFor(admin, user)
+      const titles = result.current.flatMap((group) =>
+        group.items.map((item) => item.title)
+      )
+      expect(titles).not.toContain('Affinity sessions')
+      expect(titles).toContain('Channels')
+    }
+  )
+})

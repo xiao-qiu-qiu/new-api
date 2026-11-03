@@ -62,6 +62,7 @@ const DEFAULT_SIDEBAR_MODULES: SidebarModulesAdminConfig = {
   admin: {
     enabled: true,
     channel: true,
+    channelAffinity: true,
     channelProbes: true,
     models: true,
     redemption: true,
@@ -117,6 +118,7 @@ const URL_TO_CONFIG_MAP: Record<string, { section: string; module: string }> = {
   '/profile': { section: 'personal', module: 'personal' },
   '/security': { section: 'personal', module: 'security' },
   '/channels': { section: 'admin', module: 'channel' },
+  '/channel-affinity': { section: 'admin', module: 'channelAffinity' },
   '/channel-probes': { section: 'admin', module: 'channelProbes' },
   '/models': { section: 'admin', module: 'models' },
   '/models/metadata': { section: 'admin', module: 'models' },
