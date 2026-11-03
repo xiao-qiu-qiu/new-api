@@ -163,6 +163,7 @@ function GroupSelect(props: GroupSelectProps) {
 type GroupSpecialUsableRulesEditorProps = {
   value: string
   groupOptions: string[]
+  userGroupOptions: string[]
   onChange: (value: string) => void
 }
 
@@ -170,6 +171,7 @@ type GroupSectionProps = {
   groupName: string
   items: Rule[]
   groupOptions: string[]
+  userGroupOptions: string[]
   onUpdate: (id: string, field: keyof Rule, val: string | boolean) => void
   onRemove: (id: string) => void
   onAdd: (groupName: string) => void
@@ -179,7 +181,7 @@ type GroupSectionProps = {
 function GroupSection(props: GroupSectionProps) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(true)
-  const isKnownGroup = props.groupOptions.includes(props.groupName)
+  const isKnownGroup = props.userGroupOptions.includes(props.groupName)
 
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
@@ -205,7 +207,7 @@ function GroupSection(props: GroupSectionProps) {
             {!isKnownGroup && (
               <StatusBadge variant='danger' copyable={false}>
                 <AlertTriangle className='mr-1 h-3 w-3' />
-                {t('Not in pricing table')}
+                {t('Unknown user group')}
               </StatusBadge>
             )}
             <StatusBadge variant='neutral' copyable={false}>
@@ -264,14 +266,30 @@ function GroupSection(props: GroupSectionProps) {
                   </SelectTrigger>
                   <SelectContent alignItemWithTrigger={false}>
                     <SelectGroup>
-                      <SelectItem value='visible'>
+                      <SelectItem
+                        value='visible'
+                        disabled={props.items.some(
+                          (other) =>
+                            other._id !== rule._id &&
+                            other.targetGroup === rule.targetGroup &&
+                            other.visible
+                        )}
+                      >
                         <StatusBadge
                           label={t('Extra visible')}
                           variant='info'
                           copyable={false}
                         />
                       </SelectItem>
-                      <SelectItem value='hidden'>
+                      <SelectItem
+                        value='hidden'
+                        disabled={props.items.some(
+                          (other) =>
+                            other._id !== rule._id &&
+                            other.targetGroup === rule.targetGroup &&
+                            !other.visible
+                        )}
+                      >
                         <StatusBadge
                           label={t('Hidden')}
                           variant='danger'
@@ -284,7 +302,15 @@ function GroupSection(props: GroupSectionProps) {
                 <div className='col-start-1 row-start-2 flex min-w-0 items-center gap-1.5 sm:col-start-auto sm:row-start-auto'>
                   <GroupSelect
                     className='min-w-0 flex-1'
-                    options={props.groupOptions}
+                    options={props.groupOptions.filter(
+                      (group) =>
+                        !props.items.some(
+                          (other) =>
+                            other._id !== rule._id &&
+                            other.targetGroup === group &&
+                            other.visible === rule.visible
+                        )
+                    )}
                     value={rule.targetGroup}
                     placeholder={t('Group name')}
                     onValueChange={(v) =>
@@ -339,6 +365,29 @@ export function GroupSpecialUsableRulesEditor(
   const [rules, setRules] = useState<Rule[]>(() =>
     flattenRules(safeParseJson(props.value))
   )
+  const [sourceValue, setSourceValue] = useState(props.value)
+  const [sourceUserGroups, setSourceUserGroups] = useState(
+    props.userGroupOptions
+  )
+  if (
+    props.value !== sourceValue ||
+    props.userGroupOptions !== sourceUserGroups
+  ) {
+    setSourceValue(props.value)
+    setSourceUserGroups(props.userGroupOptions)
+    // Keep unfinished local rows when our own serialized value comes back,
+    // but discard stale rules after a group deletion or configuration reload.
+    let nextRules = rules
+    if (props.value !== serializeRules(rules)) {
+      nextRules = flattenRules(safeParseJson(props.value))
+    }
+    const removed = new Set(
+      sourceUserGroups.filter(
+        (group) => !props.userGroupOptions.includes(group)
+      )
+    )
+    setRules(nextRules.filter((rule) => !removed.has(rule.userGroup)))
+  }
 
   const { onChange } = props
   const emitChange = useCallback(
@@ -355,6 +404,18 @@ export function GroupSpecialUsableRulesEditor(
         rules.map((r) => {
           if (r._id !== id) return r
           const updated = { ...r, [field]: val }
+          if (
+            updated.targetGroup &&
+            rules.some(
+              (other) =>
+                other._id !== id &&
+                other.userGroup === updated.userGroup &&
+                other.targetGroup === updated.targetGroup &&
+                other.visible === updated.visible
+            )
+          ) {
+            return r
+          }
           if (field === 'visible' && val === false) {
             updated.description = 'remove'
           } else if (field === 'visible' && val === true && !r.visible) {
@@ -410,8 +471,8 @@ export function GroupSpecialUsableRulesEditor(
 
   const newGroupCandidates = useMemo(() => {
     const used = new Set(grouped.map((g) => g.name))
-    return props.groupOptions.filter((name) => !used.has(name))
-  }, [grouped, props.groupOptions])
+    return props.userGroupOptions.filter((name) => !used.has(name))
+  }, [grouped, props.userGroupOptions])
 
   return (
     <Card className={sectionCardClassName}>
@@ -437,6 +498,7 @@ export function GroupSpecialUsableRulesEditor(
                 groupName={group.name}
                 items={group.items}
                 groupOptions={props.groupOptions}
+                userGroupOptions={props.userGroupOptions}
                 onUpdate={updateRule}
                 onRemove={removeRule}
                 onAdd={addRuleToGroup}

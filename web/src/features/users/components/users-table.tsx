@@ -102,7 +102,7 @@ export function UsersTable() {
       | undefined) ?? []
 
   const { data: groupsData } = useQuery({
-    queryKey: ['groups'],
+    queryKey: ['account-user-groups'],
     queryFn: async () => requireServerSuccess(await getGroups()),
     staleTime: 5 * 60 * 1000,
   })

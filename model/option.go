@@ -32,6 +32,19 @@ func AllOption() ([]*Option, error) {
 }
 
 func InitOptionMap() {
+	groupSettingsMutex.Lock()
+	defer groupSettingsMutex.Unlock()
+	requestPolicyOptionMutex.Lock()
+	defer requestPolicyOptionMutex.Unlock()
+	passkeyOptionMutex.Lock()
+	defer passkeyOptionMutex.Unlock()
+	options, err := AllOption()
+	if err != nil {
+		common.SysError(common.LogText("failed to update option map: %s", err.Error()))
+	}
+	setting.GroupSettingsPublicationMutex.Lock()
+	defer setting.GroupSettingsPublicationMutex.Unlock()
+	setting.ResetUserGroups()
 	common.OptionMapRWMutex.Lock()
 	common.OptionMap = make(map[string]string)
 
@@ -162,6 +175,7 @@ func InitOptionMap() {
 	common.OptionMap["GroupRatio"] = ratio_setting.GroupRatio2JSONString()
 	common.OptionMap["GroupGroupRatio"] = ratio_setting.GroupGroupRatio2JSONString()
 	common.OptionMap["UserUsableGroups"] = setting.UserUsableGroups2JSONString()
+	common.OptionMap["UserGroups"] = setting.UserGroups2JSONString()
 	common.OptionMap["CompletionRatio"] = ratio_setting.CompletionRatio2JSONString()
 	common.OptionMap["ImageRatio"] = ratio_setting.ImageRatio2JSONString()
 	common.OptionMap["AudioRatio"] = ratio_setting.AudioRatio2JSONString()
@@ -197,27 +211,62 @@ func InitOptionMap() {
 	maps.Copy(common.OptionMap, modelConfigs)
 
 	common.OptionMapRWMutex.Unlock()
-	loadOptionsFromDatabase()
+	applyOptionsFromDatabaseLocked(options)
 }
 
 func loadOptionsFromDatabase() {
+	groupSettingsMutex.Lock()
+	defer groupSettingsMutex.Unlock()
 	requestPolicyOptionMutex.Lock()
 	defer requestPolicyOptionMutex.Unlock()
+	passkeyOptionMutex.Lock()
+	defer passkeyOptionMutex.Unlock()
+	options, err := AllOption()
+	if err != nil {
+		common.SysError(common.LogText("failed to update option map: %s", err.Error()))
+		return
+	}
+	setting.GroupSettingsPublicationMutex.Lock()
+	defer setting.GroupSettingsPublicationMutex.Unlock()
+	applyOptionsFromDatabaseLocked(options)
+}
+
+// The caller serializes group/request-policy/passkey writers before querying
+// the database. Only this in-memory apply runs under the publication lock.
+func applyOptionsFromDatabaseLocked(options []*Option) {
 	defer func() {
 		if err := refreshRequestPolicySnapshot(); err != nil {
 			common.SysError(common.LogText("invalid request policy: %s", err.Error()))
 		}
 	}()
-	passkeyOptionMutex.Lock()
-	defer passkeyOptionMutex.Unlock()
-	options, _ := AllOption()
+	persistedKeys := make(map[string]bool, len(options))
+	for _, option := range options {
+		persistedKeys[option.Key] = true
+	}
 	passkeyOptions := make(map[string]string)
 	for _, option := range options {
 		if IsPasskeyDomainOption(option.Key) {
 			passkeyOptions[option.Key] = option.Value
 			continue
 		}
-		err := updateOptionMap(option.Key, option.Value)
+		key := option.Key
+		switch key {
+		case "group_ratio_setting.group_ratio":
+			key = "GroupRatio"
+		case "group_ratio_setting.group_group_ratio":
+			key = "GroupGroupRatio"
+		}
+		// A canonical persisted key wins regardless of row/query order. An
+		// alias-only database loads into both canonical UI state and runtime.
+		if key != option.Key && persistedKeys[key] {
+			continue
+		}
+		var err error
+		if IsGroupSettingsOption(key) {
+			err = applyGroupSettingOption(key, option.Value)
+		} else {
+			err = updateOptionMap(key, option.Value)
+		}
 		if err != nil {
 			common.SysLog(common.LogText("failed to update option map: %s", err.Error()))
 		}
@@ -280,6 +329,9 @@ func validateOptionValue(key string, value string) error {
 }
 
 func UpdateOption(key string, value string) error {
+	if IsGroupSettingsOption(key) {
+		return UpdateGroupSettingsOptions(map[string]string{key: value})
+	}
 	if IsRequestPolicyOption(key) {
 		return UpdateRequestPolicyOptions(map[string]string{key: value})
 	}
@@ -316,6 +368,11 @@ func UpdateOption(key string, value string) error {
 func UpdateOptionsBulk(values map[string]string) error {
 	if len(values) == 0 {
 		return nil
+	}
+	for key := range values {
+		if IsGroupSettingsOption(key) {
+			return UpdateGroupSettingsOptions(values)
+		}
 	}
 	for key := range values {
 		if IsPasskeyDomainOption(key) {
@@ -672,6 +729,8 @@ func updateOptionMap(key string, value string) (err error) {
 		err = ratio_setting.UpdateGroupGroupRatioByJSONString(value)
 	case "UserUsableGroups":
 		err = setting.UpdateUserUsableGroupsByJSONString(value)
+	case "UserGroups":
+		err = setting.UpdateUserGroupsByJSONString(value)
 	case "CompletionRatio":
 		err = ratio_setting.UpdateCompletionRatioByJSONString(value)
 	case "ModelPrice":

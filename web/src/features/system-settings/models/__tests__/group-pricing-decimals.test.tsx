@@ -33,6 +33,7 @@ function PricingFixture() {
     <>
       <GroupRatioVisualEditor
         section='pricing'
+        userGroups='{"default":"default"}'
         onSectionChange={() => {}}
         defaultUseAutoGroupField={null}
         groupRatio={settings.GroupRatio}
@@ -51,15 +52,14 @@ function PricingFixture() {
   )
 }
 
-test.each([
-  ['GroupRatio', 0],
-  ['TopupGroupRatio', 1],
-] as const)(
+test.each([['GroupRatio', 0]] as const)(
   '%s preserves typed decimals and accepts them as valid numeric ratios',
   async (key, index) => {
     const user = userEvent.setup()
     render(<PricingFixture />)
-    const row = screen.getByDisplayValue('default').closest('tr')
+    const row = screen
+      .getByRole('textbox', { name: 'Group name' })
+      .closest('tr')
     assert(row)
     const input = within(row).getAllByRole('spinbutton')[
       index

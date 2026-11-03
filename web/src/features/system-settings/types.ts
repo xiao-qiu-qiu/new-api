@@ -302,6 +302,7 @@ export type BillingSettings = {
   'billing_setting.billing_expr': string
   'billing_setting.plugin_billing_expr': string
   'tool_price_setting.prices': string
+  UserGroups: string
   TopupGroupRatio: string
   GroupRatio: string
   UserUsableGroups: string

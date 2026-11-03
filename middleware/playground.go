@@ -9,8 +9,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
-	"github.com/QuantumNous/new-api/service"
-	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/gin-gonic/gin"
 )
 
@@ -38,14 +37,15 @@ func PreparePlaygroundRelay() gin.HandlerFunc {
 		}
 
 		userGroup := common.GetContextKeyString(c, constant.ContextKeyUserGroup)
+		groupSettings := setting.PinGroupSettings(c)
 		if group == "" {
-			group = userGroup
+			group = groupSettings.DefaultGroup(userGroup)
 		}
-		if !service.GroupInUserUsableGroups(userGroup, group) {
+		if _, allowed := groupSettings.Usable(userGroup)[group]; !allowed {
 			abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgDistributorGroupAccessDenied))
 			return
 		}
-		if group != "auto" && !ratio_setting.ContainsGroupRatio(group) {
+		if group != "auto" && !groupSettings.ContainsRatio(group) {
 			abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgAuthTokenGroupDeprecated, map[string]any{"Group": group}))
 			return
 		}

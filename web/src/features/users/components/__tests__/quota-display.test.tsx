@@ -285,7 +285,7 @@ async function renderUsersList(emptyInvitation = false) {
   const get = vi
     .spyOn(api, 'get')
     .mockImplementation(async (url) =>
-      url === '/api/group/'
+      url === '/api/group/user'
         ? { data: { success: true, data: ['default'] } }
         : usersResponse
     )

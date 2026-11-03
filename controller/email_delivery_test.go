@@ -140,6 +140,8 @@ func TestSMTPAndLegacyConfigurationNeverUseResend(t *testing.T) {
 }
 
 func TestEmailOptionsNeverReturnResendCredentials(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.SubscriptionPlan{}, &model.UserSubscription{}))
 	configureEmailDelivery(t, map[string]string{"EmailProvider": "resend", "ResendApiKey": "private-email-credential", "ResendFrom": "sender@example.com"})
 	response := httptest.NewRecorder()
 	context, _ := gin.CreateTestContext(response)
@@ -234,6 +236,8 @@ func TestResendSettingsChangesKeepActiveDeliveryWorking(t *testing.T) {
 }
 
 func TestEmailKeyStatusIsDerivedAndReadOnly(t *testing.T) {
+	db := setupManageUserTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.SubscriptionPlan{}, &model.UserSubscription{}))
 	configureEmailDelivery(t, map[string]string{"EmailProvider": "smtp", "ResendKeyConfigured": "true"})
 	response := httptest.NewRecorder()
 	context, _ := gin.CreateTestContext(response)

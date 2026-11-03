@@ -256,6 +256,8 @@ var accessTokenRouteRules = map[string]accessTokenRouteRule{
 
 	// router/api-router.go: /api/group, /api/prefill_group
 	"GET /api/group/":               accessTokenScopeRule("group:read"),
+	"GET /api/group/user":           accessTokenScopeRule("group:read"),
+	"PUT /api/group/settings":       accessTokenScopeRule("option:write"),
 	"GET /api/prefill_group/":       accessTokenScopeRule("group:read"),
 	"POST /api/prefill_group/":      accessTokenScopeRule("group:write"),
 	"PUT /api/prefill_group/":       accessTokenScopeRule("group:write"),

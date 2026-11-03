@@ -54,7 +54,7 @@ afterEach(() => {
 
 async function renderUsers(initialEntry = '/users/') {
   const get = vi.spyOn(api, 'get').mockImplementation(async (url) => {
-    if (url === '/api/group/') {
+    if (url === '/api/group/user') {
       return { data: { success: true, data: ['default', 'premium'] } }
     }
     return {

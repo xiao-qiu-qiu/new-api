@@ -681,6 +681,12 @@ func UpdateUser(c *gin.Context) {
 		return
 	}
 	updatePassword := updatedUser.Password != ""
+	if updatedUser.Group != "" && updatedUser.Group != originUser.Group {
+		if err := model.ValidateUserGroup(updatedUser.Group); err != nil {
+			common.ApiError(c, err)
+			return
+		}
+	}
 	auditParams := map[string]any{
 		"username": originUser.Username,
 		"id":       updatedUser.Id,
@@ -1021,6 +1027,13 @@ func CreateUser(c *gin.Context) {
 		return
 	}
 	auditParams := map[string]any{"role": user.Role}
+	if user.Group == "" {
+		user.Group = "default"
+	}
+	if err := model.ValidateUserGroup(user.Group); err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	// Creating an administrator grants privilege just like promoting one.
 	if user.Role >= common.RoleAdminUser {
 		authorization := requireAdminUserProof(c, service.VerificationScopeAdminUserCreate, service.AdminUserCreateContext{Role: user.Role})
@@ -1035,6 +1048,7 @@ func CreateUser(c *gin.Context) {
 		Password:    user.Password,
 		DisplayName: user.DisplayName,
 		Role:        user.Role, // 保持管理员设置的角色
+		Group:       user.Group,
 	}
 	authzTouched := false
 	if err := model.DB.Transaction(func(tx *gorm.DB) error {

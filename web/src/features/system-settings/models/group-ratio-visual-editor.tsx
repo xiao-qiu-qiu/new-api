@@ -84,9 +84,11 @@ import { formatNumber } from '@/lib/format'
 
 import { safeJsonParse } from '../utils/json-parser'
 import { GroupSpecialUsableRulesEditor } from './group-special-usable-editor'
+import { UserGroupsEditor } from './user-groups-editor'
 
 export type GroupSettingsSection =
   | 'pricing'
+  | 'users'
   | 'overrides'
   | 'visibility'
   | 'auto'
@@ -96,6 +98,7 @@ type GroupRatioVisualEditorProps = {
   onSectionChange: (section: GroupSettingsSection) => void
   defaultUseAutoGroupField: ReactNode
   groupRatio: string
+  userGroups: string
   topupGroupRatio: string
   userUsableGroups: string
   groupGroupRatio: string
@@ -103,13 +106,13 @@ type GroupRatioVisualEditorProps = {
   maxTokenAutoGroupsField: ReactNode
   groupSpecialUsableGroup: string
   onChange: (field: string, value: string) => void
+  onValidationChange?: (valid: boolean) => void
 }
 
 type GroupPricingRow = {
   _id: string
   name: string
   ratio: string
-  topupRatio: string
   selectable: boolean
   description: string
 }
@@ -158,23 +161,16 @@ function parseNestedRatioMap(
 
 function buildGroupPricingRows(
   groupRatio: string,
-  userUsableGroups: string,
-  topupGroupRatio: string
+  userUsableGroups: string
 ): GroupPricingRow[] {
   const ratioMap = parseRatioMap(groupRatio)
   const usableMap = parseUsableMap(userUsableGroups)
-  const topupMap = parseRatioMap(topupGroupRatio)
-  const names = new Set([
-    ...Object.keys(ratioMap),
-    ...Object.keys(usableMap),
-    ...Object.keys(topupMap),
-  ])
+  const names = Object.keys(ratioMap)
 
   return [...names].map((name) => ({
     _id: createGroupPricingId(),
     name,
     ratio: String(normalizeRatio(ratioMap[name])),
-    topupRatio: Object.hasOwn(topupMap, name) ? String(topupMap[name]) : '',
     selectable: Object.hasOwn(usableMap, name),
     description: String(usableMap[name] ?? ''),
   }))
@@ -183,7 +179,6 @@ function buildGroupPricingRows(
 function serializeGroupPricingRows(rows: GroupPricingRow[]) {
   const groupRatio: Record<string, number> = {}
   const userUsableGroups: Record<string, string> = {}
-  const topupGroupRatio: Record<string, number> = {}
 
   for (const row of rows) {
     const name = row.name.trim()
@@ -192,16 +187,11 @@ function serializeGroupPricingRows(rows: GroupPricingRow[]) {
     if (row.selectable) {
       userUsableGroups[name] = row.description
     }
-    const topup = row.topupRatio.trim()
-    if (topup !== '' && Number.isFinite(Number(topup))) {
-      topupGroupRatio[name] = Number(topup)
-    }
   }
 
   return {
     GroupRatio: JSON.stringify(groupRatio, null, 2),
     UserUsableGroups: JSON.stringify(userUsableGroups, null, 2),
-    TopupGroupRatio: JSON.stringify(topupGroupRatio, null, 2),
   }
 }
 
@@ -210,19 +200,22 @@ function groupPricingSignature(rows: GroupPricingRow[]): string {
   return JSON.stringify({
     groupRatio: parseRatioMap(serialized.GroupRatio),
     userUsableGroups: parseUsableMap(serialized.UserUsableGroups),
-    topupGroupRatio: parseRatioMap(serialized.TopupGroupRatio),
   })
 }
 
 function sourceGroupPricingSignature(
   groupRatio: string,
-  userUsableGroups: string,
-  topupGroupRatio: string
+  userUsableGroups: string
 ): string {
+  const usableMap = parseUsableMap(userUsableGroups)
+  const ratioMap = parseRatioMap(groupRatio)
   return JSON.stringify({
-    groupRatio: parseRatioMap(groupRatio),
-    userUsableGroups: parseUsableMap(userUsableGroups),
-    topupGroupRatio: parseRatioMap(topupGroupRatio),
+    groupRatio: ratioMap,
+    userUsableGroups: Object.fromEntries(
+      Object.entries(usableMap).filter(([name]) =>
+        Object.hasOwn(ratioMap, name)
+      )
+    ),
   })
 }
 
@@ -271,6 +264,7 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
   onSectionChange,
   defaultUseAutoGroupField,
   groupRatio,
+  userGroups,
   topupGroupRatio,
   userUsableGroups,
   groupGroupRatio,
@@ -278,6 +272,7 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
   maxTokenAutoGroupsField,
   groupSpecialUsableGroup,
   onChange,
+  onValidationChange,
 }: GroupRatioVisualEditorProps) {
   const { t, i18n } = useTranslation()
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
@@ -285,22 +280,19 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
 
   const registry = useMemo<RegistryEntry[]>(() => {
     const ratioMap = parseRatioMap(groupRatio)
-    const usableMap = parseUsableMap(userUsableGroups)
-    const topupMap = parseRatioMap(topupGroupRatio)
-    const names = new Set([
-      ...Object.keys(ratioMap),
-      ...Object.keys(usableMap),
-      ...Object.keys(topupMap),
-    ])
-    return [...names].map((name) => ({
+    return Object.keys(ratioMap).map((name) => ({
       name,
       ratio: normalizeRatio(ratioMap[name]),
     }))
-  }, [groupRatio, userUsableGroups, topupGroupRatio])
+  }, [groupRatio])
 
   const registryNames = useMemo(
     () => registry.map((entry) => entry.name),
     [registry]
+  )
+  const userGroupNames = useMemo(
+    () => Object.keys(parseUsableMap(userGroups)),
+    [userGroups]
   )
 
   // Auto groups
@@ -349,34 +341,49 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
       onValueChange={(value) => onSectionChange(value as GroupSettingsSection)}
       className='min-w-0 gap-5'
     >
-      <div className='min-w-0 overflow-x-auto pb-1'>
-        <TabsList aria-label={t('Group settings')} className='w-full min-w-max'>
-          <TabsTrigger value='pricing' className='px-3'>
-            {t('Pricing groups')}
-          </TabsTrigger>
-          <TabsTrigger value='overrides' className='px-3'>
-            {t('Special ratio rules')}
-          </TabsTrigger>
-          <TabsTrigger value='visibility' className='px-3'>
-            {t('Group visibility')}
-          </TabsTrigger>
-          <TabsTrigger value='auto' className='px-3'>
-            {t('Auto group order')}
-          </TabsTrigger>
-        </TabsList>
-      </div>
+      <GroupSettingsNavigation />
       <TabsContent value='pricing' keepMounted>
         <GroupPricingTable
           groupRatio={groupRatio}
           userUsableGroups={userUsableGroups}
-          topupGroupRatio={topupGroupRatio}
           onChange={onChange}
+          onValidationChange={onValidationChange}
           onShowDetail={setDetailGroup}
+        />
+      </TabsContent>
+      <TabsContent value='users' keepMounted>
+        <UserGroupsEditor
+          userGroups={userGroups}
+          topupGroupRatio={topupGroupRatio}
+          groupOptions={registryNames}
+          onChange={(field, value) => {
+            if (field === 'UserGroups') {
+              const nextGroups = parseUsableMap(value)
+              const removed = userGroupNames.filter(
+                (name) => !Object.hasOwn(nextGroups, name)
+              )
+              if (removed.length) {
+                for (const [ruleField, raw] of [
+                  ['GroupGroupRatio', groupGroupRatio],
+                  ['GroupSpecialUsableGroup', groupSpecialUsableGroup],
+                ] as const) {
+                  const rules = safeJsonParse<Record<string, unknown>>(raw, {
+                    fallback: {},
+                    context: ruleField,
+                  })
+                  for (const name of removed) delete rules[name]
+                  onChange(ruleField, JSON.stringify(rules, null, 2))
+                }
+              }
+            }
+            onChange(field, value)
+          }}
         />
       </TabsContent>
       <TabsContent value='overrides' keepMounted>
         <GroupOverrideRules
           registry={registry}
+          userGroupNames={userGroupNames}
           groupGroupRatio={groupGroupRatio}
           onChange={onChange}
         />
@@ -385,6 +392,7 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
         <GroupSpecialUsableRulesEditor
           value={groupSpecialUsableGroup}
           groupOptions={registryNames}
+          userGroupOptions={userGroupNames}
           onChange={(value) => onChange('GroupSpecialUsableGroup', value)}
         />
       </TabsContent>
@@ -461,7 +469,6 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
           if (!open) setDetailGroup(null)
         }}
         registry={registry}
-        topupGroupRatio={topupGroupRatio}
         userUsableGroups={userUsableGroups}
         groupGroupRatio={groupGroupRatio}
         autoGroups={autoGroupsList}
@@ -471,54 +478,85 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
   )
 })
 
+export function GroupSettingsNavigation() {
+  const { t } = useTranslation()
+  return (
+    <div className='min-w-0 overflow-x-auto pb-1'>
+      <TabsList aria-label={t('Group settings')} className='w-full min-w-max'>
+        <TabsTrigger value='pricing' className='px-3'>
+          {t('Multiplier groups')}
+        </TabsTrigger>
+        <TabsTrigger value='users' className='px-3'>
+          {t('User groups')}
+        </TabsTrigger>
+        <TabsTrigger value='overrides' className='px-3'>
+          {t('Special ratio rules')}
+        </TabsTrigger>
+        <TabsTrigger value='visibility' className='px-3'>
+          {t('Group visibility')}
+        </TabsTrigger>
+        <TabsTrigger value='auto' className='px-3'>
+          {t('Auto group order')}
+        </TabsTrigger>
+      </TabsList>
+    </div>
+  )
+}
+
 type GroupPricingTableProps = {
   groupRatio: string
   userUsableGroups: string
-  topupGroupRatio: string
   onChange: (field: string, value: string) => void
+  onValidationChange?: (valid: boolean) => void
   onShowDetail: (name: string) => void
 }
 
 function GroupPricingTable({
   groupRatio,
   userUsableGroups,
-  topupGroupRatio,
   onChange,
+  onValidationChange,
   onShowDetail,
 }: GroupPricingTableProps) {
   const { t } = useTranslation()
   const [search, setSearch] = useState('')
   const [rows, setRows] = useState<GroupPricingRow[]>(() =>
-    buildGroupPricingRows(groupRatio, userUsableGroups, topupGroupRatio)
+    buildGroupPricingRows(groupRatio, userUsableGroups)
   )
 
   useEffect(() => {
     const incomingSignature = sourceGroupPricingSignature(
       groupRatio,
-      userUsableGroups,
-      topupGroupRatio
+      userUsableGroups
     )
     setRows((currentRows) => {
       if (groupPricingSignature(currentRows) === incomingSignature) {
         return currentRows
       }
-      return buildGroupPricingRows(
-        groupRatio,
-        userUsableGroups,
-        topupGroupRatio
-      )
+      return buildGroupPricingRows(groupRatio, userUsableGroups)
     })
-  }, [groupRatio, userUsableGroups, topupGroupRatio])
+  }, [groupRatio, userUsableGroups])
 
   const emitRows = useCallback(
     (nextRows: GroupPricingRow[]) => {
       setRows(nextRows)
       const serialized = serializeGroupPricingRows(nextRows)
+      const usableMap = parseUsableMap(userUsableGroups)
+      for (const row of rows) delete usableMap[row.name.trim()]
       onChange('GroupRatio', serialized.GroupRatio)
-      onChange('UserUsableGroups', serialized.UserUsableGroups)
-      onChange('TopupGroupRatio', serialized.TopupGroupRatio)
+      onChange(
+        'UserUsableGroups',
+        JSON.stringify(
+          {
+            ...usableMap,
+            ...parseUsableMap(serialized.UserUsableGroups),
+          },
+          null,
+          2
+        )
+      )
     },
-    [onChange]
+    [onChange, rows, userUsableGroups]
   )
 
   const updateRow = useCallback(
@@ -548,7 +586,6 @@ function GroupPricingTable({
         _id: createGroupPricingId(),
         name,
         ratio: '1',
-        topupRatio: '',
         selectable: true,
         description: '',
       },
@@ -575,6 +612,20 @@ function GroupPricingTable({
       .map(([name]) => name)
   }, [rows])
 
+  const valid =
+    duplicateNames.length === 0 &&
+    rows.every(
+      (row) =>
+        row.name.trim() !== '' &&
+        row.name.trim() !== 'auto' &&
+        row.ratio.trim() !== '' &&
+        Number.isFinite(Number(row.ratio)) &&
+        Number(row.ratio) >= 0
+    )
+  useEffect(() => {
+    onValidationChange?.(valid)
+  }, [valid, onValidationChange])
+
   const query = search.trim().toLowerCase()
   const visibleRows = rows.filter(
     (row) =>
@@ -588,10 +639,10 @@ function GroupPricingTable({
       <CardHeader className={sectionHeaderClassName}>
         <div className='flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between'>
           <div>
-            <CardTitle>{t('Pricing groups')}</CardTitle>
+            <CardTitle>{t('Multiplier groups')}</CardTitle>
             <CardDescription>
               {t(
-                'All group names live here. Ratio applies when calls are billed as this group; top-up ratio applies to users whose account is in this group.'
+                'Multiplier groups define channel routing and the base ratio for API calls.'
               )}
             </CardDescription>
           </div>
@@ -627,7 +678,7 @@ function GroupPricingTable({
           </InputGroup>
           <StaticDataTable
             tableClassName='min-w-[760px]'
-            tableProps={{ 'aria-label': t('Pricing groups') }}
+            tableProps={{ 'aria-label': t('Multiplier groups') }}
             data={visibleRows}
             getRowKey={(row) => row._id}
             emptyClassName='text-muted-foreground h-20 text-sm'
@@ -664,7 +715,11 @@ function GroupPricingTable({
                     onChange={(event) =>
                       updateRow(row._id, 'name', event.target.value)
                     }
-                    aria-invalid={duplicateNames.includes(row.name.trim())}
+                    aria-invalid={
+                      duplicateNames.includes(row.name.trim()) ||
+                      !row.name.trim() ||
+                      row.name.trim() === 'auto'
+                    }
                   />
                 ),
               },
@@ -679,26 +734,13 @@ function GroupPricingTable({
                     step={0.0001}
                     value={row.ratio}
                     aria-label={t('Ratio')}
+                    aria-invalid={
+                      !row.ratio.trim() ||
+                      !Number.isFinite(Number(row.ratio)) ||
+                      Number(row.ratio) < 0
+                    }
                     onChange={(event) =>
                       updateRow(row._id, 'ratio', event.target.value)
-                    }
-                  />
-                ),
-              },
-              {
-                id: 'topup-ratio',
-                header: t('Top-up ratio'),
-                className: 'w-28',
-                cell: (row) => (
-                  <Input
-                    type='number'
-                    min={0}
-                    step={0.0001}
-                    value={row.topupRatio}
-                    aria-label={t('Top-up ratio')}
-                    placeholder={t('Not set')}
-                    onChange={(event) =>
-                      updateRow(row._id, 'topupRatio', event.target.value)
                     }
                   />
                 ),
@@ -789,12 +831,14 @@ type GroupOverride = {
 
 type GroupOverrideRulesProps = {
   registry: RegistryEntry[]
+  userGroupNames: string[]
   groupGroupRatio: string
   onChange: (field: string, value: string) => void
 }
 
 function GroupOverrideRules({
   registry,
+  userGroupNames,
   groupGroupRatio,
   onChange,
 }: GroupOverrideRulesProps) {
@@ -879,6 +923,12 @@ function GroupOverrideRules({
       if (!map[overrideUserGroup]) {
         map[overrideUserGroup] = {}
       }
+      if (
+        targetGroup !== oldTargetGroup &&
+        Object.hasOwn(map[overrideUserGroup], targetGroup)
+      ) {
+        return
+      }
       if (oldTargetGroup && oldTargetGroup !== targetGroup) {
         delete map[overrideUserGroup][oldTargetGroup]
       }
@@ -958,10 +1008,10 @@ function GroupOverrideRules({
                         <span className='min-w-0 truncate font-semibold'>
                           {userGroupData.userGroup}
                         </span>
-                        {!registryNames.includes(userGroupData.userGroup) && (
+                        {!userGroupNames.includes(userGroupData.userGroup) && (
                           <AlertTriangle
                             className='text-destructive h-4 w-4'
-                            aria-label={t('Not in pricing table')}
+                            aria-label={t('Unknown user group')}
                           />
                         )}
                         <span className='text-muted-foreground text-sm'>
@@ -1005,7 +1055,7 @@ function GroupOverrideRules({
                             columns={[
                               {
                                 id: 'target-group',
-                                header: t('Billing group'),
+                                header: t('Multiplier group'),
                                 cellClassName: 'font-medium',
                                 cell: (override) => (
                                   <span className='inline-flex max-w-48 items-center gap-1.5'>
@@ -1115,9 +1165,9 @@ function GroupOverrideRules({
             <Label>{t('User group name')}</Label>
             <GroupNameSelect
               className='w-full'
-              options={registryNames}
+              options={userGroupNames}
               value={userGroupInput}
-              placeholder={t('Select a group')}
+              placeholder={t('Select a user group')}
               onValueChange={setUserGroupInput}
             />
           </div>
@@ -1131,6 +1181,11 @@ function GroupOverrideRules({
         editData={overrideEditData}
         userGroup={overrideUserGroup}
         groupOptions={registryNames}
+        occupiedTargets={
+          groupGroupRatioList
+            .find((entry) => entry.userGroup === overrideUserGroup)
+            ?.overrides.map((entry) => entry.targetGroup) ?? []
+        }
         baseRatioByName={baseRatioByName}
       />
     </Card>
@@ -1144,6 +1199,7 @@ type GroupOverrideDialogProps = {
   editData: GroupOverride | null
   userGroup: string | null
   groupOptions: string[]
+  occupiedTargets: string[]
   baseRatioByName: Map<string, number>
 }
 
@@ -1154,6 +1210,7 @@ function GroupOverrideDialog({
   editData,
   userGroup,
   groupOptions,
+  occupiedTargets,
   baseRatioByName,
 }: GroupOverrideDialogProps) {
   const { t } = useTranslation()
@@ -1173,10 +1230,19 @@ function GroupOverrideDialog({
 
   const baseRatio = targetGroup ? baseRatioByName.get(targetGroup) : undefined
 
+  const availableGroups = groupOptions.filter(
+    (group) =>
+      group === editData?.targetGroup || !occupiedTargets.includes(group)
+  )
+  const targetOccupied =
+    targetGroup !== null &&
+    targetGroup !== editData?.targetGroup &&
+    occupiedTargets.includes(targetGroup)
+
   const handleSave = () => {
-    if (!targetGroup || !ratio.trim()) return
+    if (!targetGroup || targetOccupied || !ratio.trim()) return
     const parsedRatio = Number.parseFloat(ratio)
-    if (Number.isNaN(parsedRatio)) return
+    if (!Number.isFinite(parsedRatio) || parsedRatio < 0) return
 
     onSave(targetGroup, parsedRatio, editData?.targetGroup)
     setTargetGroup(null)
@@ -1205,7 +1271,16 @@ function GroupOverrideDialog({
           <Button variant='outline' onClick={() => onOpenChange(false)}>
             {t('Cancel')}
           </Button>
-          <Button onClick={handleSave}>
+          <Button
+            onClick={handleSave}
+            disabled={
+              !targetGroup ||
+              targetOccupied ||
+              !ratio.trim() ||
+              !Number.isFinite(Number(ratio)) ||
+              Number(ratio) < 0
+            }
+          >
             {editData ? t('Update') : t('Add')}
           </Button>
         </>
@@ -1213,12 +1288,12 @@ function GroupOverrideDialog({
     >
       <div className='space-y-4 py-4'>
         <div className='space-y-2'>
-          <Label>{t('Billing group')}</Label>
+          <Label>{t('Multiplier group')}</Label>
           <GroupNameSelect
             className='w-full'
-            options={groupOptions}
+            options={availableGroups}
             value={targetGroup}
-            placeholder={t('Select a group')}
+            placeholder={t('Select a multiplier group')}
             onValueChange={setTargetGroup}
           />
           <p className='text-muted-foreground text-xs'>
@@ -1258,7 +1333,6 @@ type GroupDetailSheetProps = {
   groupName: string | null
   onOpenChange: (open: boolean) => void
   registry: RegistryEntry[]
-  topupGroupRatio: string
   userUsableGroups: string
   groupGroupRatio: string
   autoGroups: string[]
@@ -1292,7 +1366,6 @@ function GroupDetailSheet(props: GroupDetailSheetProps) {
     if (!name) return null
 
     const entry = props.registry.find((item) => item.name === name)
-    const topupMap = parseRatioMap(props.topupGroupRatio)
     const usableMap = parseUsableMap(props.userUsableGroups)
     const overrideMap = parseNestedRatioMap(props.groupGroupRatio)
     const specialMap = safeJsonParse<Record<string, Record<string, string>>>(
@@ -1308,12 +1381,7 @@ function GroupDetailSheet(props: GroupDetailSheetProps) {
       }
     }
 
-    // Overrides that apply when users of this group bill as other groups
-    const outgoingOverrides = Object.entries(overrideMap[name] ?? {}).map(
-      ([targetGroup, ratio]) => ({ targetGroup, ratio })
-    )
-
-    // Visibility rules targeting this group
+    // Visibility rules targeting this multiplier group
     const visibilityRules: VisibilityRule[] = []
     for (const [userGroup, inner] of Object.entries(specialMap)) {
       if (typeof inner !== 'object' || inner === null) continue
@@ -1332,18 +1400,15 @@ function GroupDetailSheet(props: GroupDetailSheetProps) {
 
     return {
       ratio: entry?.ratio,
-      topupRatio: Object.hasOwn(topupMap, name) ? String(topupMap[name]) : null,
       selectable: Object.hasOwn(usableMap, name),
       description: String(usableMap[name] ?? ''),
       incomingOverrides,
-      outgoingOverrides,
       visibilityRules,
       autoIndex,
     }
   }, [
     name,
     props.registry,
-    props.topupGroupRatio,
     props.userUsableGroups,
     props.groupGroupRatio,
     props.autoGroups,
@@ -1362,7 +1427,9 @@ function GroupDetailSheet(props: GroupDetailSheetProps) {
             {name ? `: ${name}` : ''}
           </SheetTitle>
           <SheetDescription>
-            {t('Everything configured for this group, in one place.')}
+            {t(
+              'Channel routing, call pricing and access rules for this multiplier group.'
+            )}
           </SheetDescription>
         </SheetHeader>
 
@@ -1374,12 +1441,6 @@ function GroupDetailSheet(props: GroupDetailSheetProps) {
                 <div className='flex justify-between'>
                   <dt className='text-muted-foreground'>{t('Ratio')}</dt>
                   <dd className='font-medium'>{detail.ratio ?? '-'}</dd>
-                </div>
-                <div className='flex justify-between'>
-                  <dt className='text-muted-foreground'>{t('Top-up ratio')}</dt>
-                  <dd className='font-medium'>
-                    {detail.topupRatio ?? t('Not set')}
-                  </dd>
                 </div>
                 <div className='flex justify-between'>
                   <dt className='text-muted-foreground'>
@@ -1429,31 +1490,6 @@ function GroupDetailSheet(props: GroupDetailSheetProps) {
                     >
                       <span>
                         {t('Users in {{group}}', { group: item.userGroup })}
-                      </span>
-                      <span className='font-medium'>{item.ratio}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
-
-            <section className='space-y-2'>
-              <h3 className='text-sm font-semibold'>
-                {t('Ratio overrides for users of this group')}
-              </h3>
-              {detail.outgoingOverrides.length === 0 ? (
-                <p className='text-muted-foreground text-sm'>{t('None')}</p>
-              ) : (
-                <ul className='space-y-1 text-sm'>
-                  {detail.outgoingOverrides.map((item) => (
-                    <li
-                      key={item.targetGroup}
-                      className='flex justify-between rounded-md border px-3 py-1.5'
-                    >
-                      <span>
-                        {t('When billed as {{group}}', {
-                          group: item.targetGroup,
-                        })}
                       </span>
                       <span className='font-medium'>{item.ratio}</span>
                     </li>

@@ -7,7 +7,6 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
-	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 )
@@ -186,15 +185,15 @@ func AdminCreateSubscriptionPlan(c *gin.Context) {
 	}
 	req.Plan.UpgradeGroup = strings.TrimSpace(req.Plan.UpgradeGroup)
 	if req.Plan.UpgradeGroup != "" {
-		if _, ok := ratio_setting.GetGroupRatioCopy()[req.Plan.UpgradeGroup]; !ok {
-			common.ApiErrorT(c, "Upgrade group does not exist")
+		if err := model.ValidateUserGroup(req.Plan.UpgradeGroup); err != nil {
+			common.ApiError(c, err)
 			return
 		}
 	}
 	req.Plan.DowngradeGroup = strings.TrimSpace(req.Plan.DowngradeGroup)
 	if req.Plan.DowngradeGroup != "" {
-		if _, ok := ratio_setting.GetGroupRatioCopy()[req.Plan.DowngradeGroup]; !ok {
-			common.ApiErrorT(c, "Downgrade group does not exist")
+		if err := model.ValidateUserGroup(req.Plan.DowngradeGroup); err != nil {
+			common.ApiError(c, err)
 			return
 		}
 	}
@@ -260,15 +259,15 @@ func AdminUpdateSubscriptionPlan(c *gin.Context) {
 	}
 	req.Plan.UpgradeGroup = strings.TrimSpace(req.Plan.UpgradeGroup)
 	if req.Plan.UpgradeGroup != "" {
-		if _, ok := ratio_setting.GetGroupRatioCopy()[req.Plan.UpgradeGroup]; !ok {
-			common.ApiErrorT(c, "Upgrade group does not exist")
+		if err := model.ValidateUserGroup(req.Plan.UpgradeGroup); err != nil {
+			common.ApiError(c, err)
 			return
 		}
 	}
 	req.Plan.DowngradeGroup = strings.TrimSpace(req.Plan.DowngradeGroup)
 	if req.Plan.DowngradeGroup != "" {
-		if _, ok := ratio_setting.GetGroupRatioCopy()[req.Plan.DowngradeGroup]; !ok {
-			common.ApiErrorT(c, "Downgrade group does not exist")
+		if err := model.ValidateUserGroup(req.Plan.DowngradeGroup); err != nil {
+			common.ApiError(c, err)
 			return
 		}
 	}

@@ -12,8 +12,8 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
-	"github.com/QuantumNous/new-api/setting/ratio_setting"
 )
 
 type ChannelProbeView struct {
@@ -229,15 +229,13 @@ func BuildPublicChannelProbeModel(probe model.ChannelProbe, name string, now tim
 	}
 	basePrice := view.EstimatedPricePer100MTokens
 	view.EstimatedPricePer100MTokens = nil
+	groupSettings := setting.CaptureGroupSettings()
 	// An upstream can serve multiple billing groups, so it has no unique
 	// consumer price. Keep its operational/cache metrics without inventing one.
-	if basePrice == nil || probe.Scope != "group" || !IsUserSelectableGroup(userGroup, probe.GroupName) {
+	if basePrice == nil || probe.Scope != "group" || !groupSettings.Selectable(userGroup, probe.GroupName) {
 		return view, nil
 	}
-	ratio, special := ratio_setting.GetGroupGroupRatio(userGroup, probe.GroupName)
-	if !special {
-		ratio = ratio_setting.GetGroupRatio(probe.GroupName)
-	}
+	ratio := groupSettings.GroupRatio(userGroup, probe.GroupName)
 	if billing_setting.IgnoreGroupRatio(name) {
 		ratio = 1
 	}

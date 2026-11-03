@@ -202,10 +202,10 @@ export async function resetUserTwoFA(
 }
 
 /**
- * Get all available groups
+ * Get account user groups (not billing/routing groups)
  */
 export async function getGroups(): Promise<ApiResponse<string[]>> {
-  const res = await api.get('/api/group/')
+  const res = await api.get('/api/group/user')
   return res.data
 }
 

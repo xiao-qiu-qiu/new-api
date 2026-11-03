@@ -81,14 +81,27 @@ func buildCompletionRatioMetaValue(optionValues map[string]string) string {
 }
 
 func GetOptions(c *gin.Context) {
+	groupSettings, optionSnapshot := setting.CaptureGroupSettingsAndOptions()
+	userGroups, err := model.GetUserGroupRegistryWithSnapshot(groupSettings)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	userGroupsJSON, err := common.Marshal(userGroups)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	var options []*model.Option
 	optionValues := make(map[string]string)
-	common.OptionMapRWMutex.Lock()
-	for k, v := range common.OptionMap {
+	for k, v := range optionSnapshot {
 		if k == "theme.frontend" || k == "billing_setting.billing_mode" || k == "billing_setting.billing_expr" || k == "ResendKeyConfigured" {
 			continue
 		}
 		value := common.Interface2String(v)
+		if k == "UserGroups" {
+			continue
+		}
 		isSensitiveKey := strings.HasSuffix(k, "Token") ||
 			strings.HasSuffix(k, "Secret") ||
 			strings.HasSuffix(k, "Key") ||
@@ -106,9 +119,9 @@ func GetOptions(c *gin.Context) {
 		}
 	}
 	options = append(options, &model.Option{
-		Key: "ResendKeyConfigured", Value: strconv.FormatBool(strings.TrimSpace(common.OptionMap["ResendApiKey"]) != ""),
+		Key: "ResendKeyConfigured", Value: strconv.FormatBool(strings.TrimSpace(optionSnapshot["ResendApiKey"]) != ""),
 	})
-	common.OptionMapRWMutex.Unlock()
+	options = append(options, &model.Option{Key: "UserGroups", Value: string(userGroupsJSON)})
 	// Display the same effective expressions used by pricing and settlement,
 	// including built-in defaults absent from persisted administrator options.
 	for key, values := range map[string]map[string]string{

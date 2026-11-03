@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/QuantumNous/new-api/types"
@@ -399,23 +400,18 @@ func RecalculateTaskQuotaByTokens(ctx context.Context, task *model.Task, totalTo
 		if !configured {
 			return false
 		}
+		user, err := model.GetUserById(task.UserId, false)
+		if err != nil || user.Group == "" {
+			return false
+		}
+		groupSettings := setting.CaptureGroupSettings()
 		group := task.Group
 		if group == "" {
-			user, err := model.GetUserById(task.UserId, false)
-			if err == nil {
-				group = user.Group
-			}
-		}
-		if group == "" {
-			return false
+			group = groupSettings.DefaultGroup(user.Group)
 		}
 		finalGroupRatio = 1
 		if !billing_setting.IgnoreGroupRatio(modelName) {
-			var special bool
-			finalGroupRatio, special = ratio_setting.GetGroupGroupRatio(group, group)
-			if !special {
-				finalGroupRatio = ratio_setting.GetGroupRatio(group)
-			}
+			finalGroupRatio = groupSettings.GroupRatio(user.Group, group)
 		}
 	}
 	if modelRatio <= 0 {
