@@ -23,6 +23,7 @@ import {
   SettingsSwitchField,
 } from '../components/settings-form-layout'
 import { safeNumberFieldProps } from '../utils/numeric-field'
+import { FailoverRules } from './failover-rules'
 import type { RoutingPolicyFormValues } from './routing-form'
 
 export function FailoverSection() {
@@ -149,6 +150,17 @@ export function FailoverSection() {
         />
       </SettingsFormGrid>
       <Accordion className='mt-4'>
+        <SettingsAccordion
+          value='model-backups'
+          title={t('Model-specific backups (first match)')}
+          keepMounted
+        >
+          <FailoverRules
+            enabled={enabled}
+            channelsDisabled={channels.isPending || channels.isError}
+            options={options}
+          />
+        </SettingsAccordion>
         <SettingsAccordion
           value='availability-checks'
           title={t('Availability checks')}

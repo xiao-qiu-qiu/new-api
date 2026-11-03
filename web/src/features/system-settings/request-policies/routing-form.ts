@@ -18,6 +18,17 @@ export function createRoutingPolicySchema(t: TFunction) {
         primary_channel_id: z.number().int().min(0),
         fallback_channel_id: z.number().int().min(0),
         model_regex: z.string(),
+        fallback_rules: z
+          .array(
+            z.object({
+              model_regex: z.string(),
+              channel_id: z
+                .number()
+                .int()
+                .positive(t('Select a valid channel ID')),
+            })
+          )
+          .max(32, t('Use up to 32 backup rules')),
         poll_interval_seconds: z.number().int().min(1).max(60),
         recovery_successes: z.number().int().min(1).max(10),
       })
@@ -49,6 +60,34 @@ export function createRoutingPolicySchema(t: TFunction) {
             path: ['model_regex'],
             message: t('Use up to 32 model patterns, each at most 256 bytes'),
           })
+        }
+        for (const [index, rule] of value.fallback_rules.entries()) {
+          if (rule.channel_id === value.primary_channel_id) {
+            context.addIssue({
+              code: 'custom',
+              path: ['fallback_rules', index, 'channel_id'],
+              message: t('Choose two different channels'),
+            })
+          }
+          const rulePatterns = rule.model_regex
+            .split('\n')
+            .map((pattern) => pattern.trim())
+            .filter(Boolean)
+          if (
+            rulePatterns.length === 0 ||
+            rulePatterns.length > 32 ||
+            rulePatterns.some(
+              (pattern) => new TextEncoder().encode(pattern).length > 256
+            )
+          ) {
+            context.addIssue({
+              code: 'custom',
+              path: ['fallback_rules', index, 'model_regex'],
+              message: t(
+                'Enter 1 to 32 model patterns, each at most 256 bytes'
+              ),
+            })
+          }
         }
       }),
     channel_affinity_setting: z.object({
@@ -100,6 +139,11 @@ export function routingPolicyFormValues(
         (JSON.parse(options['channel_failover_setting.model_regex'] || '[]') ??
           []) as string[]
       ).join('\n'),
+      fallback_rules: (
+        (JSON.parse(
+          options['channel_failover_setting.fallback_rules'] || '[]'
+        ) ?? []) as { model_regex: string[]; channel_id: number }[]
+      ).map((rule) => ({ ...rule, model_regex: rule.model_regex.join('\n') })),
       poll_interval_seconds: Number(
         options['channel_failover_setting.poll_interval_seconds'] || 3
       ),
@@ -127,11 +171,12 @@ export function routingPolicyFormValues(
 export function routingPolicyOptions(
   values: RoutingPolicyFormValues
 ): Record<string, string> {
+  const { fallback_rules, ...failover } = values.channel_failover_setting
   return {
     RetryTimes: String(values.RetryTimes),
     AutomaticRetryStatusCodes: values.AutomaticRetryStatusCodes,
     ...Object.fromEntries(
-      Object.entries(values.channel_failover_setting).map(([key, value]) => [
+      Object.entries(failover).map(([key, value]) => [
         `channel_failover_setting.${key}`,
         key === 'model_regex'
           ? JSON.stringify(
@@ -142,6 +187,15 @@ export function routingPolicyOptions(
             )
           : String(value),
       ])
+    ),
+    'channel_failover_setting.fallback_rules': JSON.stringify(
+      fallback_rules.map((rule) => ({
+        channel_id: rule.channel_id,
+        model_regex: rule.model_regex
+          .split('\n')
+          .map((pattern) => pattern.trim())
+          .filter(Boolean),
+      }))
     ),
     ...Object.fromEntries(
       Object.entries(values.channel_affinity_setting).map(([key, value]) => [

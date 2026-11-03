@@ -47,12 +47,14 @@ type channelAvailability struct {
 // Only the digest identifies credentials/configuration in cache keys. Neither
 // keys nor upstream response text enter policy events or logs.
 type channelFailoverKey struct {
-	ChannelID int
-	Version   [32]byte
-	Model     string
-	Tier      string
-	Transport string
-	Compact   bool
+	ChannelID         int
+	FallbackChannelID int
+	Version           [32]byte
+	RequestModel      string
+	Model             string
+	Tier              string
+	Transport         string
+	Compact           bool
 }
 
 type channelFailoverEntry struct {
@@ -107,6 +109,7 @@ func (r *channelFailoverRuntime) run(ctx context.Context) {
 				case entry := <-r.jobs:
 					checkContext, cancelCheck := context.WithTimeout(ctx, channelFailoverTimeout)
 					setting := model.CurrentRequestPolicy().Failover
+					fallbackID := channelFailoverBackup(setting, entry.key.RequestModel)
 					var current *model.Channel
 					var err error
 					if common.MemoryCacheEnabled {
@@ -115,7 +118,7 @@ func (r *channelFailoverRuntime) run(ctx context.Context) {
 						current = &model.Channel{}
 						err = model.DB.WithContext(checkContext).First(current, entry.key.ChannelID).Error
 					}
-					if err != nil || current == nil || !setting.Enabled || current.Status != common.ChannelStatusEnabled || channelFailoverConfigVersion(current, setting) != entry.key.Version {
+					if err != nil || current == nil || fallbackID == 0 || setting.PrimaryChannelID != entry.key.ChannelID || current.Status != common.ChannelStatusEnabled || channelFailoverConfigVersion(current, setting, fallbackID) != entry.key.Version {
 						cancelCheck()
 						r.mu.Lock()
 						if r.entries[entry.key] == entry {
@@ -148,21 +151,26 @@ func (r *channelFailoverRuntime) run(ctx context.Context) {
 		}
 		r.mu.Unlock()
 	}()
+	var previousPolicy *model.RequestPolicySnapshot
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			setting := model.CurrentRequestPolicy().Failover
+			policy := model.CurrentRequestPolicy()
+			setting := policy.Failover
 			r.mu.Lock()
 			for key, entry := range r.entries {
-				if !setting.Enabled || now.Sub(entry.lastUsed) > channelFailoverIdleTTL || setting.PrimaryChannelID != key.ChannelID {
+				fallbackID := channelFailoverBackup(setting, key.RequestModel)
+				// Immutable snapshots let unchanged policies skip configuration hashing.
+				if fallbackID == 0 || now.Sub(entry.lastUsed) > channelFailoverIdleTTL || setting.PrimaryChannelID != key.ChannelID || policy != previousPolicy && channelFailoverConfigVersion(entry.channel, setting, fallbackID) != key.Version {
 					delete(r.entries, key)
 					continue
 				}
 				r.enqueue(entry, now)
 			}
 			r.mu.Unlock()
+			previousPolicy = policy
 		}
 	}
 }
@@ -203,16 +211,17 @@ func makeChannelFailoverKey(c *gin.Context, channel *model.Channel, modelName st
 	if channel.ParamOverride != nil && common.UnmarshalJsonStr(*channel.ParamOverride, &override) == nil && override.ServiceTier != "" {
 		tier = override.ServiceTier
 	}
-	return channelFailoverKey{ChannelID: channel.Id, Version: channelFailoverConfigVersion(channel, setting), Model: channel.ResolveServiceTierModel(modelName), Tier: tier, Transport: transport, Compact: compact}
+	fallbackID := channelFailoverBackup(setting, modelName)
+	return channelFailoverKey{ChannelID: channel.Id, FallbackChannelID: fallbackID, Version: channelFailoverConfigVersion(channel, setting, fallbackID), RequestModel: modelName, Model: channel.ResolveServiceTierModel(modelName), Tier: tier, Transport: transport, Compact: compact}
 }
 
-func channelFailoverConfigVersion(channel *model.Channel, setting operation_setting.ChannelFailoverSetting) [32]byte {
+func channelFailoverConfigVersion(channel *model.Channel, setting operation_setting.ChannelFailoverSetting, fallbackID int) [32]byte {
 	// Include every declarative routing/credential field, but exclude mutable
 	// polling indexes and counters. A changed key, URL, mapping, proxy, header
 	// override, or policy starts with a fresh unknown availability state.
 	config, _ := common.Marshal([]any{channel.Type, channel.Key, channel.BaseURL, channel.ModelMapping,
 		channel.Setting, channel.OtherSettings, channel.ParamOverride, channel.HeaderOverride,
-		channel.OpenAIOrganization, channel.ChannelInfo.IsMultiKey, channel.ChannelInfo.MultiKeyStatusList, setting})
+		channel.OpenAIOrganization, channel.ChannelInfo.IsMultiKey, channel.ChannelInfo.MultiKeyStatusList, setting, fallbackID})
 	return sha256.Sum256(config)
 }
 
@@ -390,6 +399,39 @@ func requestChannelFailover(c *gin.Context) *channelFailoverRequest {
 	return nil
 }
 
+// The global filter gates every rule. The first matching rule replaces the
+// default backup, while invalid pairs leave normal channel selection in charge.
+func channelFailoverBackup(setting operation_setting.ChannelFailoverSetting, modelName string) int {
+	if !setting.Enabled || setting.PrimaryChannelID <= 0 || len(setting.ModelRegex) > 0 && !matchAnyRegexCached(setting.ModelRegex, modelName) {
+		return 0
+	}
+	fallbackID := setting.FallbackChannelID
+	for _, rule := range setting.FallbackRules {
+		if matchAnyRegexCached(rule.ModelRegex, modelName) {
+			fallbackID = rule.ChannelID
+			break
+		}
+	}
+	if fallbackID <= 0 || fallbackID == setting.PrimaryChannelID {
+		return 0
+	}
+	return fallbackID
+}
+
+// Sessions on any configured backup can return to the primary after a model
+// rule changes. Channels outside the configured pool retain their affinity.
+func isChannelFailoverMember(setting operation_setting.ChannelFailoverSetting, channelID int) bool {
+	if channelID == setting.PrimaryChannelID || channelID == setting.FallbackChannelID {
+		return true
+	}
+	for _, rule := range setting.FallbackRules {
+		if channelID == rule.ChannelID {
+			return true
+		}
+	}
+	return false
+}
+
 // prepareChannelFailover runs after pins and affinity lookup. Existing sessions
 // bound to a third channel keep their session rules and fallback chains.
 func prepareChannelFailover(c *gin.Context, modelName, usingGroup string, preferredID int) *channelFailoverRequest {
@@ -397,8 +439,8 @@ func prepareChannelFailover(c *gin.Context, modelName, usingGroup string, prefer
 		return state
 	}
 	setting := model.CurrentRequestPolicy().Failover
-	if !setting.Enabled || len(setting.ModelRegex) > 0 && !matchAnyRegexCached(setting.ModelRegex, modelName) ||
-		(preferredID != 0 && preferredID != setting.PrimaryChannelID && preferredID != setting.FallbackChannelID) {
+	fallbackID := channelFailoverBackup(setting, modelName)
+	if fallbackID == 0 || preferredID != 0 && !isChannelFailoverMember(setting, preferredID) {
 		return nil
 	}
 	primary, err := model.CacheGetChannel(setting.PrimaryChannelID)
@@ -440,10 +482,10 @@ func prepareChannelFailover(c *gin.Context, modelName, usingGroup string, prefer
 	}
 	key := makeChannelFailoverKey(c, primary, modelName, setting)
 	availability := channelFailover.observe(key, primary, setting, time.Now())
-	order := []int{setting.PrimaryChannelID, setting.FallbackChannelID}
+	order := []int{setting.PrimaryChannelID, fallbackID}
 	if availability == "empty" || availability == "busy" || availability == "recovering" {
-		if fallback := eligibleFailoverChannel(c, setting.FallbackChannelID, group, modelName); fallback != nil {
-			order = []int{setting.FallbackChannelID}
+		if fallback := eligibleFailoverChannel(c, fallbackID, group, modelName); fallback != nil {
+			order = []int{fallbackID}
 		}
 	}
 	state := &channelFailoverRequest{key: key, setting: setting, modelName: modelName, group: group, order: order, visited: make(map[int]bool), state: availability}
@@ -485,7 +527,7 @@ func selectChannelFailover(c *gin.Context, state *channelFailoverRequest) (*mode
 		common.SetContextKey(c, constant.ContextKeyAutoGroup, state.group)
 		MarkChannelAffinityUsed(c, state.group, channelID)
 		reason := "primary_" + state.state
-		if channelID == state.setting.FallbackChannelID {
+		if channelID == state.key.FallbackChannelID {
 			reason = "backup_" + state.state
 			if state.visited[state.setting.PrimaryChannelID] {
 				reason = "backup_after_primary_failure"
@@ -588,7 +630,7 @@ func ChannelFailoverMayReroute(c *gin.Context, modelName, usingGroup string, cha
 		return false
 	}
 	setting := model.CurrentRequestPolicy().Failover
-	if channelID != setting.PrimaryChannelID && channelID != setting.FallbackChannelID {
+	if !isChannelFailoverMember(setting, channelID) {
 		return false
 	}
 	preferredID, found := GetPreferredChannelByAffinity(c, modelName, usingGroup)

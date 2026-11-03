@@ -29,6 +29,7 @@ const options = {
   'channel_failover_setting.primary_channel_id': '0',
   'channel_failover_setting.fallback_channel_id': '0',
   'channel_failover_setting.model_regex': '[]',
+  'channel_failover_setting.fallback_rules': '[]',
   'channel_failover_setting.poll_interval_seconds': '3',
   'channel_failover_setting.recovery_successes': '2',
   RetryTimes: '2',
@@ -75,8 +76,9 @@ beforeEach(() => {
             items: [
               { id: 101, name: 'Primary pool', models: 'model-a' },
               { id: 102, name: 'Backup pool', models: 'model-a' },
+              { id: 103, name: 'Model backup pool', models: 'model-a' },
             ],
-            total: 2,
+            total: 3,
           },
         },
       }
@@ -130,7 +132,7 @@ function show() {
     routeTree: createRootRoute(),
     history: createMemoryHistory({ initialEntries: ['/'] }),
   })
-  render(
+  return render(
     <QueryClientProvider client={client}>
       <RouterContextProvider router={router}>
         <Workspace />
@@ -138,6 +140,196 @@ function show() {
     </QueryClientProvider>
   )
 }
+
+async function showModelBackups() {
+  const view = show()
+  const trigger = await screen.findByRole('button', {
+    name: 'Model-specific backups (first match)',
+  })
+  expect(trigger).toHaveAttribute('aria-expanded', 'false')
+  await userEvent.click(trigger)
+  expect(trigger).toHaveAttribute('aria-expanded', 'true')
+  const backups = within(
+    await screen.findByRole('region', {
+      name: 'Model-specific backups (first match)',
+    })
+  )
+  return { view, backups }
+}
+
+it('adding a model backup saves trimmed pattern arrays and restores the rule after reopening', async () => {
+  currentOptions = {
+    ...currentOptions,
+    'channel_failover_setting.enabled': 'true',
+    'channel_failover_setting.primary_channel_id': '101',
+    'channel_failover_setting.fallback_channel_id': '102',
+  }
+  const { view, backups } = await showModelBackups()
+  await userEvent.click(
+    backups.getByRole('button', { name: 'Add model backup' })
+  )
+  fireEvent.change(
+    backups.getByRole('textbox', { name: 'Model patterns (one per line)' }),
+    { target: { value: ' ^gpt-5[.]4$\n\n ^gpt-5[.]5$ \n' } }
+  )
+  const backup = backups.getByRole('combobox', { name: 'Backup channel' })
+  await waitFor(() => expect(backup).toBeEnabled())
+  await userEvent.click(backup)
+  await userEvent.click(
+    await screen.findByRole('option', { name: 'Model backup pool (#103)' })
+  )
+  expect(api.patch).not.toHaveBeenCalled()
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  const saved = JSON.stringify([
+    { channel_id: 103, model_regex: ['^gpt-5[.]4$', '^gpt-5[.]5$'] },
+  ])
+  await waitFor(() =>
+    expect(api.patch).toHaveBeenCalledWith('/api/option/request_policy', {
+      options: { 'channel_failover_setting.fallback_rules': saved },
+    })
+  )
+  view.unmount()
+  client.clear()
+  const reopened = await showModelBackups()
+  expect(
+    reopened.backups.getByRole('textbox', {
+      name: 'Model patterns (one per line)',
+    })
+  ).toHaveValue('^gpt-5[.]4$\n^gpt-5[.]5$')
+  await waitFor(() =>
+    expect(
+      reopened.backups.getByRole('combobox', { name: 'Backup channel' })
+    ).toHaveValue('Model backup pool (#103)')
+  )
+})
+
+it('moving overlapping backup rules up and down saves their first-match order with their channels', async () => {
+  const rules = [
+    { channel_id: 103, model_regex: ['^gpt-5[.]4$'] },
+    { channel_id: 102, model_regex: ['^gpt-'] },
+  ]
+  currentOptions = {
+    ...currentOptions,
+    'channel_failover_setting.enabled': 'true',
+    'channel_failover_setting.primary_channel_id': '101',
+    'channel_failover_setting.fallback_channel_id': '102',
+    'channel_failover_setting.fallback_rules': JSON.stringify(rules),
+  }
+  const { backups } = await showModelBackups()
+  expect(backups.getAllByRole('button', { name: 'Move up' })[0]).toBeDisabled()
+  expect(
+    backups.getAllByRole('button', { name: 'Move down' })[1]
+  ).toBeDisabled()
+  await userEvent.click(backups.getAllByRole('button', { name: 'Move up' })[1])
+  const patterns = backups.getAllByRole('textbox', {
+    name: 'Model patterns (one per line)',
+  })
+  expect(patterns[0]).toHaveValue('^gpt-')
+  expect(patterns[1]).toHaveValue('^gpt-5[.]4$')
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1))
+  expect(
+    JSON.parse(currentOptions['channel_failover_setting.fallback_rules'])
+  ).toEqual([rules[1], rules[0]])
+  await userEvent.click(
+    backups.getAllByRole('button', { name: 'Move down' })[0]
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(2))
+  expect(
+    JSON.parse(currentOptions['channel_failover_setting.fallback_rules'])
+  ).toEqual(rules)
+})
+
+it('deleting a model backup preserves the remaining rule and persists an empty list after the last deletion', async () => {
+  const remaining = { channel_id: 102, model_regex: ['^gpt-'] }
+  currentOptions = {
+    ...currentOptions,
+    'channel_failover_setting.enabled': 'true',
+    'channel_failover_setting.primary_channel_id': '101',
+    'channel_failover_setting.fallback_channel_id': '102',
+    'channel_failover_setting.fallback_rules': JSON.stringify([
+      { channel_id: 103, model_regex: ['^gpt-5[.]4$'] },
+      remaining,
+    ]),
+  }
+  const { view, backups } = await showModelBackups()
+  await userEvent.click(backups.getAllByRole('button', { name: 'Delete' })[0])
+  expect(api.patch).not.toHaveBeenCalled()
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1))
+  expect(currentOptions['channel_failover_setting.fallback_rules']).toBe(
+    JSON.stringify([remaining])
+  )
+  view.unmount()
+  client.clear()
+  const reopened = await showModelBackups()
+  expect(reopened.backups.getAllByRole('textbox')).toHaveLength(1)
+  expect(reopened.backups.getByRole('textbox')).toHaveValue('^gpt-')
+  await userEvent.click(
+    reopened.backups.getByRole('button', { name: 'Delete' })
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(2))
+  expect(currentOptions['channel_failover_setting.fallback_rules']).toBe('[]')
+  reopened.view.unmount()
+  client.clear()
+  const empty = await showModelBackups()
+  expect(empty.backups.queryByRole('textbox')).not.toBeInTheDocument()
+  expect(empty.backups.queryByRole('combobox')).not.toBeInTheDocument()
+  expect(
+    empty.backups.getByRole('button', { name: 'Add model backup' })
+  ).toBeEnabled()
+})
+
+it('model backups reject blank patterns and the primary channel before allowing a corrected rule to save', async () => {
+  currentOptions = {
+    ...currentOptions,
+    'channel_failover_setting.enabled': 'true',
+    'channel_failover_setting.primary_channel_id': '101',
+    'channel_failover_setting.fallback_channel_id': '102',
+  }
+  const { backups } = await showModelBackups()
+  await userEvent.click(
+    backups.getByRole('button', { name: 'Add model backup' })
+  )
+  const patterns = backups.getByRole('textbox', {
+    name: 'Model patterns (one per line)',
+  })
+  const backup = backups.getByRole('combobox', { name: 'Backup channel' })
+  await waitFor(() => expect(backup).toBeEnabled())
+  await userEvent.click(backup)
+  await userEvent.click(
+    await screen.findByRole('option', { name: 'Model backup pool (#103)' })
+  )
+  fireEvent.change(patterns, { target: { value: ' \n ' } })
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  expect(
+    await backups.findByText(
+      'Enter 1 to 32 model patterns, each at most 256 bytes'
+    )
+  ).toBeVisible()
+  expect(api.patch).not.toHaveBeenCalled()
+  fireEvent.change(patterns, { target: { value: '^gpt-' } })
+  await userEvent.click(backup)
+  await userEvent.click(
+    await screen.findByRole('option', { name: 'Primary pool (#101)' })
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  expect(
+    await backups.findByText('Choose two different channels')
+  ).toBeVisible()
+  expect(api.patch).not.toHaveBeenCalled()
+  await userEvent.click(backup)
+  await userEvent.click(
+    await screen.findByRole('option', { name: 'Model backup pool (#103)' })
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1))
+  expect(
+    JSON.parse(currentOptions['channel_failover_setting.fallback_rules'])
+  ).toEqual([{ channel_id: 103, model_regex: ['^gpt-'] }])
+})
 
 it('enabling failover selects primary and backup channels and saves with the routing draft', async () => {
   show()

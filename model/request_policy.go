@@ -133,7 +133,7 @@ func BuildRequestPolicy(options map[string]string) (*RequestPolicySnapshot, erro
 	for key, value := range raw {
 		if field, ok := strings.CutPrefix(key, "channel_failover_setting."); ok {
 			switch field {
-			case "enabled", "primary_channel_id", "fallback_channel_id", "model_regex", "poll_interval_seconds", "recovery_successes":
+			case "enabled", "primary_channel_id", "fallback_channel_id", "fallback_rules", "model_regex", "poll_interval_seconds", "recovery_successes":
 				failoverJSON[field] = json.RawMessage(value)
 			default:
 				return nil, common.NewMessage("Unknown failover setting: {{key}}", map[string]any{"key": key})

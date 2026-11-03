@@ -28,6 +28,7 @@ export type FailoverSettings = {
   'channel_failover_setting.primary_channel_id': number
   'channel_failover_setting.fallback_channel_id': number
   'channel_failover_setting.model_regex': string
+  'channel_failover_setting.fallback_rules': string
   'channel_failover_setting.poll_interval_seconds': number
   'channel_failover_setting.recovery_successes': number
 }
@@ -60,6 +61,7 @@ export const defaultRequestPolicySettings: RequestPolicySettings = {
   'channel_failover_setting.primary_channel_id': 0,
   'channel_failover_setting.fallback_channel_id': 0,
   'channel_failover_setting.model_regex': '[]',
+  'channel_failover_setting.fallback_rules': '[]',
   'channel_failover_setting.poll_interval_seconds': 3,
   'channel_failover_setting.recovery_successes': 2,
   RetryTimes: 0,

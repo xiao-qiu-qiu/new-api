@@ -56,7 +56,8 @@ func channelFailoverFixture(t *testing.T, db *gorm.DB, memoryCache bool) (*model
 	require.NoError(t, model.UpdateRequestPolicyOptions(map[string]string{
 		"channel_failover_setting.enabled": "true", "channel_failover_setting.primary_channel_id": "7141", "channel_failover_setting.fallback_channel_id": "15",
 		"channel_failover_setting.model_regex": "[]", "channel_failover_setting.poll_interval_seconds": "3", "channel_failover_setting.recovery_successes": "2",
-		"channel_affinity_setting.enabled": "false", "RetryTimes": "0",
+		"channel_failover_setting.fallback_rules": "[]",
+		"channel_affinity_setting.enabled":        "false", "RetryTimes": "0",
 	}))
 	setting := model.CurrentRequestPolicy().Failover
 	model.InitChannelCache()
@@ -110,19 +111,27 @@ func newChannelFailoverContext(t *testing.T) *gin.Context {
 	return c
 }
 
-func selectChannelFailoverForTest(t *testing.T, c *gin.Context) *model.Channel {
+func selectChannelFailoverForTest(t *testing.T, c *gin.Context, models ...string) *model.Channel {
 	t.Helper()
-	channel, group, err := SelectChannelForRequest(c, "alias", &RetryParam{Ctx: c, TokenGroup: "default", ModelName: "alias"})
+	modelName := "alias"
+	if len(models) > 0 {
+		modelName = models[0]
+	}
+	channel, group, err := SelectChannelForRequest(c, modelName, &RetryParam{Ctx: c, TokenGroup: "default", ModelName: modelName})
 	require.Nil(t, err)
 	require.NotNil(t, channel)
 	assert.Equal(t, "default", group)
 	return channel
 }
 
-func recordChannelFailoverAvailability(t *testing.T, primary *model.Channel, setting operation_setting.ChannelFailoverSetting, state string) *channelFailoverEntry {
+func recordChannelFailoverAvailability(t *testing.T, primary *model.Channel, setting operation_setting.ChannelFailoverSetting, state string, models ...string) *channelFailoverEntry {
 	t.Helper()
 	c := newChannelFailoverContext(t)
-	key := makeChannelFailoverKey(c, primary, "alias", setting)
+	modelName := "alias"
+	if len(models) > 0 {
+		modelName = models[0]
+	}
+	key := makeChannelFailoverKey(c, primary, modelName, setting)
 	channelFailover.observe(key, primary, setting, time.Now())
 	entry := channelFailover.entries[key]
 	channelFailover.finish(entry, entry.revision, channelAvailability{State: state}, time.Now())
@@ -170,6 +179,95 @@ func TestChannelFailoverRoutingAcrossDatabases(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestChannelFailoverModelBackups(t *testing.T) {
+	db := channelFailoverDatabase(t, sqlite.Open(":memory:"))
+	channelFailoverFixture(t, db, true)
+	for _, id := range []int{3, 38, 39, 57, 76} {
+		createChannelSelectAutoGroupsChannel(t, db, id, "default", "gpt-6-astra")
+		require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", id).Update("models", "gpt-6-astra,gpt-6-sol,codex-auto-review").Error)
+		for _, modelName := range []string{"gpt-6-sol", "codex-auto-review"} {
+			require.NoError(t, db.Create(&model.Ability{ChannelId: id, Group: "default", Model: modelName, Enabled: true}).Error)
+		}
+	}
+	require.NoError(t, model.UpdateRequestPolicyOptions(map[string]string{
+		"channel_failover_setting.primary_channel_id":  "3",
+		"channel_failover_setting.fallback_channel_id": "38",
+		"channel_failover_setting.model_regex":         `["^gpt-6-","^codex-auto-review$"]`,
+		"channel_failover_setting.fallback_rules":      `[{"model_regex":["^gpt-6-astra$"],"channel_id":39},{"model_regex":["^codex-auto-review$"],"channel_id":76},{"model_regex":["^gpt-6-astra$"],"channel_id":38}]`,
+		"channel_affinity_setting.enabled":             "true",
+		"channel_affinity_setting.rules":               `[{"name":"model-backup","model_regex":["^gpt-6-","^codex-auto-review$"],"session_mode":"strict","key_sources":[{"type":"request_header","key":"X-Session"}],"fallback_channel_ids":[57],"channel_lifetimes":[{"channel_id":38,"idle_ttl_seconds":300,"max_residence_seconds":3600},{"channel_id":39,"idle_ttl_seconds":300,"max_residence_seconds":3600},{"channel_id":76,"idle_ttl_seconds":300,"max_residence_seconds":3600}]}]`,
+	}))
+	model.InitChannelCache()
+	primary, err := model.CacheGetChannel(3)
+	require.NoError(t, err)
+	setting := model.CurrentRequestPolicy().Failover
+	for _, tc := range []struct {
+		model  string
+		backup int
+	}{{"gpt-6-astra", 39}, {"gpt-6-sol", 38}, {"codex-auto-review", 76}} {
+		t.Run(tc.model, func(t *testing.T) {
+			c := newChannelFailoverContext(t)
+			assert.Equal(t, 3, selectChannelFailoverForTest(t, c, tc.model).Id)
+			assert.Equal(t, 1, ChannelFailoverRetryBudget(c))
+			capacity := types.WithOpenAIError(types.OpenAIError{Code: "model_capacity_exhausted", Type: "api_error"}, 503)
+			assert.Equal(t, "retry", DecideRelayRetry(c, capacity, 0).Action)
+			backup, _, selectionErr := CacheGetRandomSatisfiedChannel(&RetryParam{Ctx: c, ModelName: tc.model, TokenGroup: "default", Retry: common.GetPointer(1)})
+			require.NoError(t, selectionErr)
+			require.NotNil(t, backup)
+			assert.Equal(t, tc.backup, backup.Id)
+			assert.Equal(t, tc.model, backup.ResolveServiceTierModel(tc.model), "backup selection preserves the requested model")
+			assert.Equal(t, "stop", DecideRelayRetry(c, capacity, 10).Action, "only the selected pair may be retried")
+			assert.Equal(t, tc.backup, selectChannelFailoverForTest(t, newChannelFailoverContext(t), tc.model).Id)
+			for _, oldBackup := range []int{38, 39, 76} {
+				session := fmt.Sprintf("%s-%d", t.Name(), oldBackup)
+				seed := newChannelFailoverContext(t)
+				seed.Request.Header.Set("X-Session", session)
+				GetPreferredChannelByAffinity(seed, tc.model, "default")
+				RecordChannelAffinity(seed, oldBackup)
+				t.Cleanup(func() { ClearCurrentChannelAffinityCache(seed) })
+				for _, ready := range []bool{false, true} {
+					recordChannelFailoverAvailability(t, primary, setting, "empty", tc.model)
+					want := tc.backup
+					if ready {
+						recordChannelFailoverAvailability(t, primary, setting, "ready", tc.model)
+						recordChannelFailoverAvailability(t, primary, setting, "ready", tc.model)
+						want = 3
+					}
+					request := newChannelFailoverContext(t)
+					request.Request.Header.Set("X-Session", session)
+					assert.Equal(t, want, selectChannelFailoverForTest(t, request, tc.model).Id, "old backup %d, primary ready %t", oldBackup, ready)
+					ws := newChannelFailoverContext(t)
+					assert.True(t, ChannelFailoverMayReroute(ws, tc.model, "default", oldBackup))
+					assert.Equal(t, want, selectChannelFailoverForTest(t, ws, tc.model).Id)
+				}
+			}
+			unrelated := newChannelFailoverContext(t)
+			unrelated.Request.Header.Set("X-Session", t.Name()+"-third")
+			GetPreferredChannelByAffinity(unrelated, tc.model, "default")
+			RecordChannelAffinity(unrelated, 57)
+			t.Cleanup(func() { ClearCurrentChannelAffinityCache(unrelated) })
+			request := newChannelFailoverContext(t)
+			request.Request.Header.Set("X-Session", t.Name()+"-third")
+			assert.Equal(t, 57, selectChannelFailoverForTest(t, request, tc.model).Id)
+			assert.False(t, HasChannelFailover(request))
+			assert.Equal(t, "strict_session", DecideRelayRetry(request, capacity, 1).Reason)
+			assert.False(t, ChannelFailoverMayReroute(newChannelFailoverContext(t), tc.model, "default", 57))
+		})
+	}
+	// A specific backup rule cannot widen the global model filter.
+	require.NoError(t, model.UpdateRequestPolicyOptions(map[string]string{"channel_failover_setting.model_regex": `["^gpt-6-sol$"]`}))
+	assert.Nil(t, prepareChannelFailover(newChannelFailoverContext(t), "gpt-6-astra", "default", 38))
+	assert.False(t, ChannelFailoverMayReroute(newChannelFailoverContext(t), "gpt-6-astra", "default", 39))
+	// A matching but disabled backup must not leak traffic to the default or a third channel.
+	require.NoError(t, model.UpdateRequestPolicyOptions(map[string]string{"channel_failover_setting.model_regex": "[]"}))
+	require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", 39).Update("status", common.ChannelStatusManuallyDisabled).Error)
+	model.InitChannelCache()
+	recordChannelFailoverAvailability(t, primary, model.CurrentRequestPolicy().Failover, "empty", "gpt-6-astra")
+	c := newChannelFailoverContext(t)
+	assert.Equal(t, 3, selectChannelFailoverForTest(t, c, "gpt-6-astra").Id)
+	assert.Equal(t, "stop", DecideRelayRetry(c, types.NewOpenAIError(errors.New("failed"), types.ErrorCodeBadResponse, 503), 1).Action)
 }
 
 func TestChannelFailoverZeroGlobalRetryAndStructuredCapacity(t *testing.T) {
@@ -432,6 +530,68 @@ func TestChannelFailoverWorkerDropsRetiredCredentialsAndStops(t *testing.T) {
 	assert.Zero(t, retiredCalls.Load(), "queued old work cannot send revoked credentials to the retired URL")
 	assert.NotContains(t, runtime.entries, oldKey)
 	assert.False(t, runtime.running)
+}
+
+func TestChannelFailoverRuleUpdateRetiresAvailability(t *testing.T) {
+	InitHttpClient()
+	db := channelFailoverDatabase(t, sqlite.Open(":memory:"))
+	primary, _ := channelFailoverFixture(t, db, true)
+	var calls atomic.Int32
+	seen := make(chan string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		calls.Add(1)
+		seen <- req.URL.Query().Get("model")
+		body, _ := common.Marshal(channelAvailability{Object: "routing.availability", Model: "mapped-model", State: "ready", CheckedAt: time.Now().Unix()})
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+	require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", primary.Id).Updates(map[string]any{"base_url": server.URL, "model_mapping": `{"alias":"mapped-model"}`}).Error)
+	model.InitChannelCache()
+	primary, err := model.CacheGetChannel(primary.Id)
+	require.NoError(t, err)
+	require.NoError(t, model.UpdateRequestPolicyOptions(map[string]string{"channel_failover_setting.fallback_rules": `[{"model_regex":["^alias$"],"channel_id":38}]`}))
+	old := recordChannelFailoverAvailability(t, primary, model.CurrentRequestPolicy().Failover, "empty")
+	old.nextCheck = time.Time{}
+	runtime := channelFailover
+	runtime.running = true
+	runtime.observe(old.key, primary, old.setting, time.Now())
+	require.NoError(t, model.UpdateRequestPolicyOptions(map[string]string{"channel_failover_setting.fallback_rules": `[{"model_regex":["^alias$"],"channel_id":39}]`}))
+	c := newChannelFailoverContext(t)
+	assert.Equal(t, primary.Id, selectChannelFailoverForTest(t, c).Id, "the previous rule's empty state cannot survive an update")
+	fresh := requestChannelFailover(c)
+	require.NotNil(t, fresh)
+	assert.Equal(t, "unknown", fresh.state)
+	assert.Equal(t, 39, fresh.key.FallbackChannelID)
+	assert.NotEqual(t, old.key.Version, fresh.key.Version)
+	runtime.running = false
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { defer close(done); runtime.run(ctx) }()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("failover worker pool did not stop")
+		}
+	})
+	select {
+	case modelName := <-seen:
+		assert.Equal(t, "mapped-model", modelName, "worker selects rules using the original model and probes the mapped model")
+	case <-time.After(5 * time.Second):
+		t.Fatal("updated model backup was not checked")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("failover worker pool did not stop")
+	}
+	assert.EqualValues(t, 1, calls.Load(), "queued work from the old rule must be discarded before probing")
+	assert.NotContains(t, runtime.entries, old.key)
+	assert.Contains(t, runtime.entries, fresh.key)
+	runtime.finish(old, old.revision, channelAvailability{State: "ready"}, time.Now())
+	assert.NotContains(t, runtime.entries, old.key, "a retired probe result cannot revive its old rule")
 }
 
 func TestChannelFailoverOverridesOnlyPrimaryBackupSessionRules(t *testing.T) {
