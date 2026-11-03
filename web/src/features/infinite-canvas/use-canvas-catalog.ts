@@ -18,12 +18,17 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useMemo } from 'react'
+import { useTranslation } from 'react-i18next'
 
 import { requireServerSuccess } from '@/lib/server-error-message'
+import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import { getUserGroups, getUserModels } from '../playground/api'
 import type { GroupOption, ModelOption } from '../playground/types'
 import { getPricing } from '../pricing/api'
+import { useBillingTime } from '../pricing/hooks/use-billing-time'
+import { compileBillingExpression } from '../pricing/lib/billing-expression/parser'
+import { TIME_FUNCTIONS } from '../pricing/lib/billing-expression/types'
 import { buildCanvasChannels, type CanvasChannel } from './model-catalog'
 
 export type CanvasCatalog = {
@@ -39,6 +44,9 @@ const emptyModels: ModelOption[] = []
 const staleTime = 5 * 60 * 1000
 
 export function useCanvasCatalog(): CanvasCatalog {
+  const { t, i18n } = useTranslation()
+  const language = i18n.resolvedLanguage || i18n.language
+  const currency = useSystemConfigStore((state) => state.config.currency)
   const queryClient = useQueryClient()
   const groupsQuery = useQuery({
     queryKey: ['playground-groups'],
@@ -51,6 +59,26 @@ export function useCanvasCatalog(): CanvasCatalog {
     staleTime,
   })
   const groups = groupsQuery.data ?? emptyGroups
+  const timeExpression = useMemo(
+    () =>
+      pricingQuery.data?.data
+        .flatMap((model) => [
+          model.billing_expr,
+          ...(model.billing_plugin_variants ?? []).map(
+            (variant) => variant.billing_expr
+          ),
+        ])
+        .find((expression) => {
+          if (!expression) return false
+          const compiled = compileBillingExpression(expression)
+          return (
+            compiled.status === 'ready' &&
+            TIME_FUNCTIONS.some((name) => compiled.functions.has(name))
+          )
+        }),
+    [pricingQuery.data]
+  )
+  const billingTime = useBillingTime(timeExpression)
   // Models only depend on groups, never on pricing or another group's models.
   // Keys and data shapes match usePlaygroundOptions, sharing in-flight requests.
   const modelsQuery = useQueries({
@@ -73,9 +101,24 @@ export function useCanvasCatalog(): CanvasCatalog {
           groups.map((group, index) => [group.value, modelsQuery.models[index]])
         ),
         pricingQuery.data,
-        window.location.origin
+        window.location.origin,
+        {
+          t,
+          language,
+          now: billingTime === undefined ? undefined : new Date(billingTime),
+        }
       ),
-    [groups, modelsQuery.models, pricingQuery.data]
+    // Currency is read by the shared pricing formatters.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [
+      groups,
+      modelsQuery.models,
+      pricingQuery.data,
+      t,
+      language,
+      billingTime,
+      currency,
+    ]
   )
 
   const refetchGroups = groupsQuery.refetch

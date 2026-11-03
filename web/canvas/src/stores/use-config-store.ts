@@ -16,6 +16,8 @@ export type ChannelModel = {
     capability: ModelCapability;
     capabilities?: ModelCapability[];
     videoCapabilities?: VideoModelCapabilities;
+    pricing?: { summary: string; details?: string[] };
+    description?: string;
     script?: string;
 };
 
@@ -300,7 +302,17 @@ export function normalizeChannelModels(models: Array<string | ChannelModel> | un
         const script = typeof item === "string" ? undefined : item.script?.trim() || undefined;
         const capabilities = typeof item === "string" ? undefined : item.capabilities;
         const videoCapabilities = typeof item === "string" ? undefined : item.videoCapabilities;
-        result.push({ name, capability, capabilities, script, ...(videoCapabilities ? { videoCapabilities } : {}) });
+        const pricing = typeof item === "string" ? undefined : item.pricing;
+        const description = typeof item === "string" ? undefined : item.description;
+        result.push({
+            name,
+            capability,
+            capabilities,
+            script,
+            ...(videoCapabilities ? { videoCapabilities } : {}),
+            ...(pricing ? { pricing } : {}),
+            ...(description !== undefined ? { description } : {}),
+        });
     }
     return result;
 }

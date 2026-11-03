@@ -40,6 +40,7 @@
   "No reference images. Drop files here (maximum {{max}}).": "暂无参考图片。将文件拖到此处（最多 {{max}} 张）。",
   "Only audio files are supported": "仅支持音频文件",
   "Preview audio: {{name}}": "试听音频：{{name}}",
+  "Price unavailable": "暂无价格",
   "Remove audio": "移除音频",
   "Retrieve video": "取回视频",
   "Search models...": "搜索模型…",

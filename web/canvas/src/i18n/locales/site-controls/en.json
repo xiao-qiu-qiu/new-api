@@ -40,6 +40,7 @@
   "No reference images. Drop files here (maximum {{max}}).": "No reference images. Drop files here (maximum {{max}}).",
   "Only audio files are supported": "Only audio files are supported",
   "Preview audio: {{name}}": "Preview audio: {{name}}",
+  "Price unavailable": "Price unavailable",
   "Remove audio": "Remove audio",
   "Retrieve video": "Retrieve video",
   "Search models...": "Search models...",

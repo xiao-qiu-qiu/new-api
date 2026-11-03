@@ -5162,6 +5162,7 @@
     "Price per request": "リクエスト単価",
     "Price source": "価格の取得元",
     "Price summary": "価格概要",
+    "Price unavailable": "料金情報なし",
     "price_xxx": "price_xxx",
     "Price:": "価格：",
     "Prices are in {{currency}}, with units shown below. Use USD when editing expressions directly.": "価格は{{currency}}で入力してください。単位は下に表示されています。式を直接編集する場合は米ドルを使用してください。",

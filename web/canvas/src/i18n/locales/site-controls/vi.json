@@ -40,6 +40,7 @@
   "No reference images. Drop files here (maximum {{max}}).": "Chưa có ảnh tham chiếu. Thả tệp vào đây (tối đa {{max}} ảnh).",
   "Only audio files are supported": "Chỉ hỗ trợ tệp âm thanh",
   "Preview audio: {{name}}": "Nghe thử âm thanh: {{name}}",
+  "Price unavailable": "Chưa có giá",
   "Remove audio": "Xóa âm thanh",
   "Retrieve video": "Lấy lại video",
   "Search models...": "Tìm mô hình…",

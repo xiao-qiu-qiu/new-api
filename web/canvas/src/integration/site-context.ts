@@ -12,6 +12,8 @@ export type SiteChannel = {
     capabilities?: Array<'image' | 'video' | 'text' | 'audio'>
     chatProtocol?: 'chat' | 'responses'
     videoCapabilities?: VideoModelCapabilities
+    pricing?: { summary: string; details?: string[] }
+    description?: string
   }>
 }
 

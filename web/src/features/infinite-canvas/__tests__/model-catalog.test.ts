@@ -632,6 +632,9 @@ it('reuses fresh playground/pricing caches and shares an in-flight playground mo
     models: [
       {
         name: 'chat',
+        pricing: expect.objectContaining({
+          summary: 'Input $2/1M token · Output $2/1M token',
+        }),
         capability: 'text',
         capabilities: ['text'],
         chatProtocol: 'chat',
@@ -687,6 +690,9 @@ it('starts groups and pricing together, then fetches all groups without waiting 
   expect(result.current.channels[0].models).toEqual([
     {
       name: 'custom',
+      pricing: expect.objectContaining({
+        summary: 'Input $2/1M token · Output $2/1M token',
+      }),
       capability: 'image',
       capabilities: ['image'],
       chatProtocol: 'chat',
@@ -737,6 +743,9 @@ it('exposes a pricing business failure and refetches models for newly added grou
       [
         {
           name: 'chat',
+          pricing: expect.objectContaining({
+            summary: 'Input $2/1M token · Output $2/1M token',
+          }),
           capability: 'text',
           capabilities: ['text'],
           chatProtocol: 'chat',
@@ -745,6 +754,9 @@ it('exposes a pricing business failure and refetches models for newly added grou
       [
         {
           name: 'chat',
+          pricing: expect.objectContaining({
+            summary: 'Input $4/1M token · Output $4/1M token',
+          }),
           capability: 'text',
           capabilities: ['text'],
           chatProtocol: 'chat',

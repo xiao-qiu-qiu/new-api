@@ -5162,6 +5162,7 @@
     "Price per request": "Giá mỗi yêu cầu",
     "Price source": "Nguồn giá",
     "Price summary": "Tóm tắt giá",
+    "Price unavailable": "Chưa có giá",
     "price_xxx": "price_xxx",
     "Price:": "Giá:",
     "Prices are in {{currency}}, with units shown below. Use USD when editing expressions directly.": "Giá tính bằng {{currency}}, theo đơn vị ghi bên dưới. Khi sửa trực tiếp biểu thức, hãy dùng USD.",

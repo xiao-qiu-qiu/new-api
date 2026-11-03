@@ -40,6 +40,7 @@
   "No reference images. Drop files here (maximum {{max}}).": "尚無參考圖片。將檔案拖曳至此處（最多 {{max}} 張）。",
   "Only audio files are supported": "僅支援音訊檔案",
   "Preview audio: {{name}}": "試聽音訊：{{name}}",
+  "Price unavailable": "暫無價格",
   "Remove audio": "移除音訊",
   "Retrieve video": "取回影片",
   "Search models...": "搜尋模型…",

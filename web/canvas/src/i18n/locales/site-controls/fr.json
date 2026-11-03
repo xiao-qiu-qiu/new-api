@@ -40,6 +40,7 @@
   "No reference images. Drop files here (maximum {{max}}).": "Aucune image de référence. Déposez les fichiers ici (maximum {{max}}).",
   "Only audio files are supported": "Seuls les fichiers audio sont acceptés",
   "Preview audio: {{name}}": "Écouter le fichier audio : {{name}}",
+  "Price unavailable": "Prix indisponible",
   "Remove audio": "Retirer le fichier audio",
   "Retrieve video": "Récupérer la vidéo",
   "Search models...": "Rechercher un modèle…",

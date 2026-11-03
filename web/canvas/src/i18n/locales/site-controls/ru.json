@@ -40,6 +40,7 @@
   "No reference images. Drop files here (maximum {{max}}).": "Нет референсных изображений. Перетащите файлы сюда (не более {{max}}).",
   "Only audio files are supported": "Поддерживаются только аудиофайлы",
   "Preview audio: {{name}}": "Прослушать аудио: {{name}}",
+  "Price unavailable": "Цена недоступна",
   "Remove audio": "Удалить аудио",
   "Retrieve video": "Получить видео",
   "Search models...": "Поиск моделей…",

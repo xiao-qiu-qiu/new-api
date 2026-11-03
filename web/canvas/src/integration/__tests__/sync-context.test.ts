@@ -105,3 +105,104 @@ it.each([
     }
   }
 )
+
+it('preserves model pricing and descriptions when normalizing channels', async () => {
+  const { normalizeChannelModels } = await import('@/stores/use-config-store')
+  const models: SiteContext['channels'][number]['models'] = [
+    {
+      name: 'image',
+      capability: 'image',
+      description: 'Image generation',
+      pricing: { summary: '$0.02 / image', details: ['Standard quality'] },
+    },
+    {
+      name: 'video',
+      capability: 'video',
+      description: 'Video generation\nSupports text and reference images',
+      pricing: { summary: '$0.10 / second' },
+    },
+  ]
+
+  expect(normalizeChannelModels(models)).toMatchObject(models)
+})
+
+it('normalizes legacy models without pricing or descriptions', async () => {
+  const { normalizeChannelModels } = await import('@/stores/use-config-store')
+
+  const models = normalizeChannelModels([
+    ' gpt-image-1 ',
+    { name: 'chat', capability: 'text' },
+    'gpt-image-1',
+    '',
+  ])
+
+  expect(models).toEqual([
+    { name: 'gpt-image-1', capability: 'image' },
+    { name: 'chat', capability: 'text' },
+  ])
+})
+
+it('keeps selected models when refreshed site prices and descriptions change', async () => {
+  context.channels = [currentChannel, {
+    ...currentChannel,
+    id: 'other',
+    models: [{
+      ...currentChannel.models[0],
+      pricing: { summary: '$0.02 / image' },
+      description: 'Original description',
+    }],
+  }]
+  const { defaultConfig, useConfigStore } = await import('@/stores/use-config-store')
+  const { applySiteContext } = await import('../sync-context')
+  const selections = {
+    imageModel: 'other::multimodal',
+    videoModel: 'other::multimodal',
+    textModel: 'other::multimodal',
+    audioModel: 'other::multimodal',
+  }
+  useConfigStore.setState({ config: { ...defaultConfig, ...selections } })
+  applySiteContext()
+
+  const updatedModel = {
+    ...currentChannel.models[0],
+    pricing: { summary: '$0.03 / image', details: ['Updated quality prices'] },
+    description: 'Updated description',
+  }
+  context.channels = context.channels.map((channel) => ({
+    ...channel,
+    models: channel.id === 'other' ? [updatedModel] : channel.models,
+  }))
+  applySiteContext()
+
+  const { config } = useConfigStore.getState()
+  expect(config).toMatchObject(selections)
+  expect(config.channels.find((channel) => channel.id === 'other')?.models)
+    .toEqual([updatedModel])
+})
+
+it('restores model metadata and selections when loading a saved channel configuration', async () => {
+  const { CONFIG_STORE_KEY, defaultConfig, useConfigStore } =
+    await import('@/stores/use-config-store')
+  const model: SiteContext['channels'][number]['models'][number] = {
+    name: 'video',
+    capability: 'video',
+    description: 'Supports reference images',
+    pricing: { summary: '$0.10 / second', details: ['720p output'] },
+  }
+  localStorage.setItem(CONFIG_STORE_KEY, JSON.stringify({
+    state: {
+      config: {
+        ...defaultConfig,
+        channels: [{ ...currentChannel, models: [model] }],
+        videoModel: 'current::video',
+      },
+    },
+    version: 0,
+  }))
+
+  await useConfigStore.persist.rehydrate()
+
+  const { config } = useConfigStore.getState()
+  expect(config.videoModel).toBe('current::video')
+  expect(config.channels[0].models).toMatchObject([model])
+})

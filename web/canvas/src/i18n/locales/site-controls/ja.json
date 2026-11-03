@@ -40,6 +40,7 @@
   "No reference images. Drop files here (maximum {{max}}).": "参照画像はありません。ここにファイルをドロップしてください（最大 {{max}} 枚）。",
   "Only audio files are supported": "音声ファイルのみ対応しています",
   "Preview audio: {{name}}": "音声をプレビュー：{{name}}",
+  "Price unavailable": "料金情報なし",
   "Remove audio": "音声を削除",
   "Retrieve video": "動画を取得",
   "Search models...": "モデルを検索…",

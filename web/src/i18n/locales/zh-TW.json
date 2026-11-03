@@ -5162,6 +5162,7 @@
     "Price per request": "每次請求價格",
     "Price source": "價格來源",
     "Price summary": "價格摘要",
+    "Price unavailable": "暫無價格",
     "price_xxx": "price_xxx",
     "Price:": "價格：",
     "Prices are in {{currency}}, with units shown below. Use USD when editing expressions directly.": "價格以 {{currency}} 計，單位見下方標示。手動編輯運算式時請使用美元。",

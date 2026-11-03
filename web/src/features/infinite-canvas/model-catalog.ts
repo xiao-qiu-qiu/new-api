@@ -18,6 +18,10 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import type { GroupOption, ModelOption } from '../playground/types'
 import type { PricingModel } from '../pricing/types'
+import {
+  buildCanvasModelPricing,
+  type CanvasPriceDisplayOptions,
+} from './model-pricing'
 
 export type { GroupOption } from '../playground/types'
 
@@ -38,6 +42,8 @@ export type CanvasVideoCapabilities = {
 
 export type CanvasModel = {
   name: string
+  description?: string
+  pricing?: { summary: string; details?: string[] }
   capability: CanvasCapability
   capabilities?: CanvasCapability[]
   chatProtocol: CanvasChatProtocol
@@ -62,17 +68,16 @@ export type CanvasTaskPlugin = {
 
 // Keep compatibility with the current PricingModel without changing its type.
 // Current servers omit task_plugins; newer catalog responses can supply it.
-export type CanvasPricingModel = Pick<
-  PricingModel,
-  'model_name' | 'supported_endpoint_types' | 'output_modalities'
-> & {
-  enable_groups?: string[]
-  task_plugins?: Array<CanvasTaskPlugin | string>
-  video_capabilities?: CanvasVideoCapabilities
-}
+export type CanvasPricingModel = Pick<PricingModel, 'model_name'> &
+  Partial<PricingModel> & {
+    enable_groups?: string[]
+    task_plugins?: Array<CanvasTaskPlugin | string>
+    video_capabilities?: CanvasVideoCapabilities
+  }
 
 export type CanvasPricingMetadata = {
   data: CanvasPricingModel[]
+  group_ratio?: Record<string, number>
   auto_groups?: string[]
   // The Go endpoint map returns EndpointInfo objects; older frontend types
   // describe string paths instead. Accept both actual wire representations.
@@ -229,7 +234,8 @@ export function buildCanvasChannels(
   groups: GroupOption[],
   modelsByGroup: ReadonlyMap<string, readonly ModelOption[]>,
   pricing: CanvasPricingMetadata | undefined,
-  baseUrl: string
+  baseUrl: string,
+  priceDisplay?: CanvasPriceDisplayOptions
 ): CanvasChannel[] {
   const metadataByName = new Map<string, CanvasPricingModel[]>()
   for (const metadata of pricing?.data ?? []) {
@@ -289,10 +295,24 @@ export function buildCanvasChannels(
         const videoCapabilities = metadata.find(
           (entry) => entry.video_capabilities
         )?.video_capabilities
+        const description = metadata.find(
+          (entry) => entry.description
+        )?.description
         // One entry per name: upstream lookups select the first name match.
         // Consumers filter capabilities for a node's actual generation mode.
         models.push({
           name: option.value,
+          ...(description ? { description } : {}),
+          ...(priceDisplay
+            ? {
+                pricing: buildCanvasModelPricing(
+                  metadata,
+                  group,
+                  pricing,
+                  priceDisplay
+                ),
+              }
+            : {}),
           capability: primary,
           capabilities: ordered,
           chatProtocol,
