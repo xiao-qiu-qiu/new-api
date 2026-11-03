@@ -264,8 +264,22 @@ export async function sendSiteAgent(navigate: NavigateFunction) {
                 useAgentStore.getState().addMessage({ id, threadId: thread.id, turnId, role: "tool", title: label, text: i18n.t("agent.eventMore.executeTool", { tool: label }), detail: toolCallDetail(name, input, "inProgress") });
                 try {
                     const result = await executeSiteAgentTool(name, input, { getCanvas: () => currentRunCanvas(run), navigate, attachments: threadAttachments, signal: run.controller.signal, confirm: (tool, args) => confirmSiteAgentTool(run, tool, args) });
-                    // Let the canvas publish its new snapshot/undo callback before another tool reads it.
-                    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+                    // Let React publish the new snapshot/undo callback, including when a hidden iframe stops painting.
+                    await new Promise<void>((resolve, reject) => {
+                        const signal = run.controller.signal;
+                        let frame: number | null = null;
+                        const finish = () => {
+                            clearTimeout(timer);
+                            if (frame !== null) cancelAnimationFrame(frame);
+                            signal.removeEventListener("abort", finish);
+                            if (signal.aborted) reject(signal.reason);
+                            else resolve();
+                        };
+                        const timer = setTimeout(finish, 100);
+                        frame = requestAnimationFrame(finish);
+                        signal.addEventListener("abort", finish, { once: true });
+                        if (signal.aborted) finish();
+                    });
                     currentRunCanvas(run);
                     const canceled = result && typeof result === "object" && "canceled" in result;
                     const text = i18n.t(canceled ? "agent.runtime.canvasToolCanceled" : "agent.runtime.toolCompleted", { tool: label });

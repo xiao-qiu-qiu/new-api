@@ -590,6 +590,7 @@ function InfiniteCanvasPage() {
 
         const updateSize = () => {
             const rect = el.getBoundingClientRect();
+            if (rect.width <= 0 || rect.height <= 0) return;
             setSize({ width: rect.width, height: rect.height });
         };
 

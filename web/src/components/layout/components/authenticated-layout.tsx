@@ -1,4 +1,4 @@
-import { useRouterState } from '@tanstack/react-router'
+import { Outlet, useRouterState } from '@tanstack/react-router'
 
 /*
 Copyright (C) 2023-2026 QuantumNous
@@ -38,7 +38,12 @@ type AuthenticatedLayoutProps = {
 export function AuthenticatedLayout(props: AuthenticatedLayoutProps) {
   const defaultOpen = getCookie('sidebar_state') !== 'false'
   const isCanvas = useRouterState({
-    select: (state) => /^\/canvas\/?$/.test(state.location.pathname),
+    // During navigation location changes before the rendered matches do.
+    // Keep the outlet stable until the destination actually replaces the canvas.
+    select: (state) =>
+      state.matches.some(
+        (match) => match.routeId === '/_authenticated/canvas/'
+      ),
   })
   const signedIn = useAuthStore((s) => !!s.auth.user)
   // Unmount pages on sign-out, otherwise their queries refetch and toast "Session expired!" / "invalid access token"
@@ -62,7 +67,7 @@ export function AuthenticatedLayout(props: AuthenticatedLayoutProps) {
                   : 'peer-data-[variant=inset]:h-[calc(100svh-var(--app-header-height,0px)-(var(--spacing)*4))]'
               )}
             >
-              {props.children ?? <AnimatedOutlet />}
+              {props.children ?? (isCanvas ? <Outlet /> : <AnimatedOutlet />)}
             </SidebarInset>
           </div>
         </SidebarProvider>

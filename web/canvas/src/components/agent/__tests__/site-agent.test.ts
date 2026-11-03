@@ -1,4 +1,5 @@
-import { beforeEach, expect, test, vi } from "vitest";
+// @vitest-environment jsdom
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { SiteAgentMessage, SiteAgentToolCall } from "@/services/api/site-agent";
 import type { CanvasAgentOp, CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
 import type { AgentCanvasContext } from "@/stores/use-agent-store";
@@ -40,6 +41,11 @@ beforeEach(() => {
     fixtures.historyWrites = 0;
     fixtures.historyRead = undefined;
     fixtures.context.userId = 7;
+});
+
+afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
 });
 
 const tools = [{ type: "function" as const, function: { name: "canvas_get_state", description: "Read canvas", parameters: { type: "object", properties: {} } } }];
@@ -456,6 +462,98 @@ test("canvas mutation validates the whole batch, supports intra-batch links, and
     await executeSiteAgentTool("canvas_undo_ops", {}, options);
     expect(context.undoOps).toHaveBeenCalledTimes(1);
     expect(context.snapshot.nodes).toEqual([]);
+});
+
+test.each(["timer", "frame"])("consecutive tools read the committed canvas snapshot when the %s releases the wait", async (wake) => {
+    const { act, createElement, useRef, useState } = await import("react");
+    const { createRoot } = await import("react-dom/client");
+    const { useAgentBridge } = await import("@/pages/canvas/hooks/use-agent-bridge");
+    const runtime = await import("../site-agent-runtime");
+    const { useAgentStore } = await import("@/stores/use-agent-store");
+    await runtime.initializeSiteAgent();
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", vi.fn((callback: FrameRequestCallback) => frames.push(callback)));
+    const cancelFrame = vi.fn();
+    vi.stubGlobal("cancelAnimationFrame", cancelFrame);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+
+    function CanvasBridge() {
+        const [nodes, setNodes] = useState<CanvasAgentSnapshot["nodes"]>([{ id: "a", type: "text", title: "Before", position: { x: 0, y: 0 }, width: 340, height: 240 }]);
+        const [connections, setConnections] = useState<CanvasAgentSnapshot["connections"]>([]);
+        const [selectedNodeIds, setSelectedNodeIds] = useState(new Set<string>());
+        const [viewport, setViewport] = useState({ x: 0, y: 0, k: 1 });
+        useAgentBridge({
+            projectId: "project", title: "Canvas", nodes, connections, selectedNodeIds, viewport,
+            nodesRef: useRef(nodes), connectionsRef: useRef(connections), selectedNodeIdsRef: useRef(selectedNodeIds), viewportRef: useRef(viewport), generateNodeRef: useRef(null),
+            setNodes, setConnections, setSelectedNodeIds, setViewport, setSelectedConnectionId: vi.fn(), setContextMenu: vi.fn(),
+        });
+        return null;
+    }
+
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    let sending: Promise<void> | undefined;
+    try {
+        await act(async () => root.render(createElement(CanvasBridge)));
+        fixtures.request.mockResolvedValueOnce(Response.json({ status: "completed", output: [
+            { type: "function_call", call_id: "update", name: "canvas_apply_ops", arguments: JSON.stringify({ ops: [{ type: "update_node", id: "a", patch: { title: "After" } }] }) },
+            { type: "function_call", call_id: "read", name: "canvas_get_node", arguments: JSON.stringify({ id: "a" }) },
+        ] })).mockResolvedValueOnce(Response.json({ status: "completed", output: [{ type: "message", content: [{ type: "output_text", text: "Done" }] }] }));
+        useAgentStore.setState({ prompt: "Update the node, then read it", confirmTools: false });
+        await act(async () => { sending = runtime.sendSiteAgent(vi.fn()); });
+        expect(useAgentStore.getState().sending).toBe(true);
+        expect(useAgentStore.getState().canvasContext).toMatchObject({ snapshot: { nodes: [{ title: "After" }] }, canUndo: true });
+
+        if (wake === "timer") {
+            // Never invoke rAF: a hidden iframe must still finish both tools.
+            await act(async () => { await vi.advanceTimersByTimeAsync(200); });
+        } else {
+            await act(async () => { frames.shift()?.(0); });
+            await act(async () => { frames.shift()?.(16); });
+        }
+        expect(useAgentStore.getState().sending).toBe(false);
+        await sending;
+        const results = useAgentStore.getState().siteThreads[0].conversation.filter((item) => item.role === "tool");
+        expect(results).toHaveLength(2);
+        expect(JSON.parse(String(results[1].content))).toMatchObject({ id: "a", title: "After" });
+        expect(fixtures.request).toHaveBeenCalledTimes(2);
+        expect(cancelFrame).toHaveBeenCalledTimes(2);
+        expect(vi.getTimerCount()).toBe(0);
+    } finally {
+        runtime.stopSiteAgent();
+        for (const frame of frames) frame(0);
+        await act(async () => { await vi.runAllTimersAsync(); await sending; root.unmount(); });
+    }
+});
+
+test("stopping during a suspended frame wait cancels queued tools and clears the fallback", async () => {
+    const runtime = await import("../site-agent-runtime");
+    const { useAgentStore } = await import("@/stores/use-agent-store");
+    await runtime.initializeSiteAgent();
+    let waiting!: () => void;
+    const frameRequested = new Promise<void>((resolve) => { waiting = resolve; });
+    vi.stubGlobal("requestAnimationFrame", vi.fn(() => { waiting(); return 1; }));
+    const cancelFrame = vi.fn();
+    vi.stubGlobal("cancelAnimationFrame", cancelFrame);
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    useAgentStore.setState({ prompt: "Read twice", canvasContext: { snapshot: { projectId: "project", title: "Canvas", nodes: [], connections: [], selectedNodeIds: [], viewport: { x: 0, y: 0, k: 1 } }, canUndo: false, applyOps: vi.fn(), undoOps: vi.fn() } });
+    fixtures.request.mockResolvedValueOnce(Response.json({ status: "completed", output: ["first", "second"].map((id) => ({ type: "function_call", call_id: id, name: "canvas_get_state", arguments: "{}" })) }));
+    const sending = runtime.sendSiteAgent(vi.fn());
+    try {
+        await frameRequested;
+        runtime.stopSiteAgent();
+        await sending;
+        expect(useAgentStore.getState().sending).toBe(false);
+        expect(useAgentStore.getState().messages.filter((item) => item.role === "tool")).toHaveLength(1);
+        expect(fixtures.request).toHaveBeenCalledTimes(1);
+        expect(cancelFrame).toHaveBeenCalledExactlyOnceWith(1);
+        expect(vi.getTimerCount()).toBe(0);
+    } finally {
+        runtime.stopSiteAgent();
+        await vi.runAllTimersAsync();
+        await sending;
+    }
 });
 
 test("parent protocol/capabilities drive Agent requests; history reload isolates users and excludes credentials/usage", async () => {

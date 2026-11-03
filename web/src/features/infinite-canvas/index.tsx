@@ -3,7 +3,6 @@ import { useTranslation } from 'react-i18next'
 
 import { ErrorState } from '@/components/error-state'
 import { LoadingState } from '@/components/loading-state'
-import { useSidebar } from '@/components/ui/sidebar'
 import { useTheme } from '@/context/theme-provider'
 import { useAuthStore } from '@/stores/auth-store'
 
@@ -26,16 +25,6 @@ export function InfiniteCanvasPage() {
 function CanvasWorkspace(props: { userId: number }) {
   const { t, i18n } = useTranslation()
   const { resolvedTheme } = useTheme()
-  const sidebar = useSidebar()
-  const sidebarRef = useRef(sidebar)
-  sidebarRef.current = sidebar
-
-  useEffect(() => {
-    const previousOpen = sidebarRef.current.open
-    sidebarRef.current.setOpen(false)
-    sidebarRef.current.setOpenMobile(false)
-    return () => sidebarRef.current.setOpen(previousOpen)
-  }, [])
   const catalog = useCanvasCatalog()
   const storageKey = `new-api:canvas-selection:${props.userId}`
   const [selection, setSelection] = useState<Selection>(() => {
@@ -134,6 +123,8 @@ function CanvasWorkspace(props: { userId: number }) {
   contextRef.current = context
 
   useEffect(() => {
+    // Requests belong to this user's editor lifetime, not the visible route.
+    const lifetime = new AbortController()
     const receive = (event: MessageEvent) => {
       const frame = frameRef.current?.contentWindow
       if (
@@ -156,7 +147,12 @@ function CanvasWorkspace(props: { userId: number }) {
       hostFrame.__newApiCanvasHost = {
         context: contextRef.current,
         fetch: (path: string, init?: RequestInit) =>
-          fetchCanvasRelay(props.userId, path, init),
+          fetchCanvasRelay(props.userId, path, {
+            ...init,
+            signal: init?.signal
+              ? AbortSignal.any([init.signal, lifetime.signal])
+              : lifetime.signal,
+          }),
         selectAgentModel: (nextGroup: string, nextModel: string) =>
           setSelection((current) => ({
             ...current,
@@ -172,6 +168,7 @@ function CanvasWorkspace(props: { userId: number }) {
     window.addEventListener('message', receive)
     const timeout = window.setTimeout(() => setFailed(true), 30_000)
     return () => {
+      lifetime.abort()
       window.removeEventListener('message', receive)
       window.clearTimeout(timeout)
     }
@@ -190,8 +187,8 @@ function CanvasWorkspace(props: { userId: number }) {
     )
   }, [ready, context])
 
-  if (catalog.isLoading) return <LoadingState />
-  if (catalog.error) {
+  if (!ready && catalog.isLoading) return <LoadingState />
+  if (!ready && catalog.error) {
     return (
       <ErrorState
         description={t('Failed to load canvas models')}

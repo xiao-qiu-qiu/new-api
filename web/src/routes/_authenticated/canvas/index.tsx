@@ -1,7 +1,6 @@
 import { createFileRoute, redirect } from '@tanstack/react-router'
 
-import { Main } from '@/components/layout'
-import { InfiniteCanvasPage } from '@/features/infinite-canvas'
+import { CanvasViewport } from '@/features/infinite-canvas/persistent-canvas'
 import { isSidebarModuleEnabled } from '@/lib/nav-modules'
 
 export const Route = createFileRoute('/_authenticated/canvas/')({
@@ -10,9 +9,5 @@ export const Route = createFileRoute('/_authenticated/canvas/')({
       throw redirect({ to: '/dashboard' })
     }
   },
-  component: () => (
-    <Main className='p-0'>
-      <InfiniteCanvasPage />
-    </Main>
-  ),
+  component: CanvasViewport,
 })
