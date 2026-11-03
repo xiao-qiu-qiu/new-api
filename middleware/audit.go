@@ -107,6 +107,10 @@ var auditRouteActions = map[string]string{
 // 无需在路由上再单独挂一层审计中间件（避免漏挂）。
 func beginAdminAudit(c *gin.Context) *auditResponseWriter {
 	method := c.Request.Method
+	// Target preview uses POST for the selected binding references, but is read-only.
+	if method == "POST" && c.FullPath() == "/api/channel/affinity/targets" {
+		return nil
+	}
 	if method != "POST" && method != "PUT" && method != "PATCH" && method != "DELETE" {
 		return nil
 	}

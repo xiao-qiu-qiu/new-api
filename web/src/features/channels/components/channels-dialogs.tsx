@@ -16,6 +16,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { ChannelAffinityManagerDialog } from '@/features/channel-affinity/manager-dialog'
+import {
+  ADMIN_PERMISSION_ACTIONS,
+  ADMIN_PERMISSION_RESOURCES,
+  hasPermission,
+} from '@/lib/admin-permissions'
+import { useAuthStore } from '@/stores/auth-store'
+
 import { CHANNEL_TYPE_VLLM, CHANNEL_TYPE_SGLANG } from '../constants'
 import { useChannels } from './channels-provider'
 import { BalanceQueryDialog } from './dialogs/balance-query-dialog'
@@ -32,9 +40,23 @@ import { ChannelMutateDrawer } from './drawers/channel-mutate-drawer'
 
 export function ChannelsDialogs() {
   const { open, setOpen, currentRow, upstream } = useChannels()
+  const currentUser = useAuthStore((state) => state.auth.user)
+  const canReadChannels = hasPermission(
+    currentUser,
+    ADMIN_PERMISSION_RESOURCES.CHANNEL,
+    ADMIN_PERMISSION_ACTIONS.READ
+  )
 
   return (
     <>
+      {open === 'affinity' && currentRow && canReadChannels && (
+        <ChannelAffinityManagerDialog
+          open
+          onOpenChange={(value) => !value && setOpen(null)}
+          channelId={currentRow.id}
+          channelName={currentRow.name}
+        />
+      )}
       {open === 'inference-status' &&
         currentRow &&
         [CHANNEL_TYPE_VLLM, CHANNEL_TYPE_SGLANG].includes(currentRow.type) && (

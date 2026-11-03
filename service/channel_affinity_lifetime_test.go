@@ -32,6 +32,8 @@ func newAffinityLifetimeFixture(t *testing.T, redisEnabled bool) *affinityLifeti
 	previousSetting := *setting
 	previousRedis, previousRDB := common.RedisEnabled, common.RDB
 	previousCache, previousLifetimeCache := channelAffinityCache, channelAffinityLifetimeCache
+	previousManagementCache := channelAffinityManagementCache
+	previousClearFenceCache := channelAffinityClearFenceCache
 	previousNow := channelAffinityLifetimeNow
 	*setting = operation_setting.ChannelAffinitySetting{
 		Enabled: true, SwitchOnSuccess: true, DefaultTTLSeconds: 3600, MaxEntries: 64,
@@ -53,6 +55,8 @@ func newAffinityLifetimeFixture(t *testing.T, redisEnabled bool) *affinityLifeti
 	}
 	channelAffinityCacheOnce, channelAffinityLifetimeOnce = sync.Once{}, sync.Once{}
 	channelAffinityCache, channelAffinityLifetimeCache = nil, nil
+	channelAffinityManagementOnce, channelAffinityManagementCache = sync.Once{}, nil
+	channelAffinityClearFenceCache = nil
 	channelAffinityLifetimeNow = func() time.Time { return f.now }
 	t.Cleanup(func() {
 		*setting = previousSetting
@@ -60,6 +64,11 @@ func newAffinityLifetimeFixture(t *testing.T, redisEnabled bool) *affinityLifeti
 		channelAffinityLifetimeNow = previousNow
 		channelAffinityCacheOnce, channelAffinityLifetimeOnce = sync.Once{}, sync.Once{}
 		channelAffinityCache, channelAffinityLifetimeCache = nil, nil
+		channelAffinityManagementOnce, channelAffinityManagementCache = sync.Once{}, nil
+		channelAffinityClearFenceCache = previousClearFenceCache
+		if previousManagementCache != nil {
+			channelAffinityManagementOnce.Do(func() { channelAffinityManagementCache = previousManagementCache })
+		}
 		if previousCache != nil {
 			channelAffinityCacheOnce.Do(func() { channelAffinityCache = previousCache })
 		}
@@ -356,14 +365,18 @@ func TestChannelAffinityLifetime(t *testing.T) {
 				require.NoError(t, err)
 				assert.Equal(t, 1, deleted)
 				for _, ctx := range []*gin.Context{current, orphan} {
-					_, found := f.state(ctx)
-					assert.False(t, found)
+					state, found := f.state(ctx)
+					require.True(t, found)
+					assert.NotEmpty(t, state.ManualEpoch)
+					assert.False(t, state.limited())
 				}
 				_, found := f.state(other)
 				assert.True(t, found, "glob characters in a rule name must not broaden deletion")
 				assert.True(t, ClearCurrentChannelAffinityCache(other))
-				_, found = f.state(other)
-				assert.False(t, found)
+				state, found := f.state(other)
+				require.True(t, found)
+				assert.NotEmpty(t, state.ManualEpoch)
+				assert.False(t, state.limited())
 				current, _, _ = f.request("all")
 				orphan, _, _ = f.request("all-orphan")
 				f.complete(current, 19)
@@ -372,8 +385,10 @@ func TestChannelAffinityLifetime(t *testing.T) {
 				_, err = getChannelAffinityCache().DeleteMany([]string{orphanMeta.CacheKey})
 				require.NoError(t, err)
 				assert.False(t, ClearCurrentChannelAffinityCache(orphan), "return value counts the main binding only")
-				_, found = f.state(orphan)
-				assert.False(t, found)
+				state, found = f.state(orphan)
+				require.True(t, found)
+				assert.NotEmpty(t, state.ManualEpoch)
+				assert.False(t, state.limited())
 				// All also clears an orphan tombstone left by a switch to another channel.
 				orphan, _, _ = f.request("all-orphan")
 				f.complete(orphan, 19)
@@ -387,7 +402,13 @@ func TestChannelAffinityLifetime(t *testing.T) {
 				assert.Equal(t, 1, ClearChannelAffinityCacheAll())
 				keys, err := getChannelAffinityLifetimeCache().Keys()
 				require.NoError(t, err)
-				assert.Empty(t, keys)
+				for _, key := range keys {
+					state, found, err := getChannelAffinityLifetimeCache().Get(key)
+					require.NoError(t, err)
+					require.True(t, found)
+					assert.False(t, state.limited())
+					assert.NotEmpty(t, state.ManualEpoch, "clear retains completion fences")
+				}
 				assert.Zero(t, GetChannelAffinityCacheStats().Total)
 				if f.server != nil {
 					assert.Empty(t, common.RDB.Keys(context.Background(), channelAffinityCacheNamespace+":*").Val())

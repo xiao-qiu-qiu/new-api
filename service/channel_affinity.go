@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
+	requestdto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/cachex"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -61,6 +63,13 @@ type channelAffinityMeta struct {
 	UsingGroup         string
 	ModelName          string
 	RequestPath        string
+	UserID             int
+	UserName           string
+	TokenID            int
+	TokenName          string
+	SessionMode        string
+	Groups             []string
+	Filters            []requestdto.ChannelFilter
 }
 
 type ChannelAffinityStatsContext struct {
@@ -508,6 +517,7 @@ func appendChannelAffinityTemplateAdminInfo(c *gin.Context, meta channelAffinity
 		}
 	}
 	c.Set(ginKeyChannelAffinityLogInfo, map[string]any{
+		"binding_id":        channelAffinityBindingID(meta.CacheKey),
 		"reason":            meta.RuleName,
 		"rule_name":         meta.RuleName,
 		"using_group":       meta.UsingGroup,
@@ -589,6 +599,10 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 		cacheKeyFull := channelAffinityCacheNamespace + ":" + cacheKeySuffix
 		state.SessionMode, state.SessionModeSource = EffectiveSessionMode(setting, rule)
 		state.RuleName = rule.Name
+		groups := []string{usingGroup}
+		if usingGroup == "auto" {
+			groups = GetRequestAutoGroups(c, common.GetContextKeyString(c, constant.ContextKeyUserGroup))
+		}
 		setChannelAffinityContext(c, channelAffinityMeta{
 			FallbackChannelIDs: slices.Clone(rule.FallbackChannelIDs),
 			ChannelLifetimes:   slices.Clone(rule.ChannelLifetimes),
@@ -605,6 +619,13 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 			UsingGroup:         usingGroup,
 			ModelName:          modelName,
 			RequestPath:        path,
+			UserID:             c.GetInt("id"),
+			UserName:           safeChannelAffinityName(c.GetString("username")),
+			TokenID:            c.GetInt("token_id"),
+			TokenName:          safeChannelAffinityName(c.GetString("token_name")),
+			SessionMode:        state.SessionMode,
+			Groups:             slices.Clone(groups),
+			Filters:            cloneChannelAffinityFilters(GetChannelConstraints(c).Filters),
 		})
 		c.Set(ginKeyChannelAffinityFallbackIndex, 0)
 
@@ -668,7 +689,8 @@ func ClearCurrentChannelAffinityCache(c *gin.Context) bool {
 		return false
 	}
 
-	deleted, err := deleteChannelAffinityBinding(cacheKey)
+	meta, _ := getChannelAffinityMeta(c)
+	deleted, err := deleteChannelAffinityBinding(cacheKey, meta.LifetimeObserved)
 	if err != nil {
 		common.SysError(common.LogText("channel affinity cache delete current failed: err=%v", err))
 		return false
@@ -706,6 +728,7 @@ func MarkChannelAffinityUsed(c *gin.Context, selectedGroup string, channelID int
 		c.Set(ginKeyChannelAffinityFallbackIndex, next)
 	}
 	info := map[string]any{
+		"binding_id":     channelAffinityBindingID(meta.CacheKey),
 		"reason":         meta.RuleName,
 		"rule_name":      meta.RuleName,
 		"using_group":    meta.UsingGroup,
@@ -728,7 +751,15 @@ func AppendChannelAffinityAdminInfo(c *gin.Context, other *model.LogOther) {
 	}
 	anyInfo, ok := c.Get(ginKeyChannelAffinityLogInfo)
 	if !ok || anyInfo == nil {
-		return
+		meta, exists := getChannelAffinityMeta(c)
+		if !exists || meta.SessionMode == "off" {
+			return
+		}
+		anyInfo = map[string]any{
+			"binding_id": channelAffinityBindingID(meta.CacheKey), "rule_name": meta.RuleName,
+			"using_group": meta.UsingGroup, "model": meta.ModelName,
+			"request_path": meta.RequestPath, "key_fp": meta.KeyFingerprint,
+		}
 	}
 	// The hint can be the whole session value for short keys; logs keep only
 	// the fingerprint.
@@ -769,6 +800,7 @@ func RecordChannelAffinity(c *gin.Context, channelID int) {
 	}
 	meta, _ := getChannelAffinityMeta(c)
 	meta.CacheKey = cacheKey
+	meta.Filters = cloneChannelAffinityFilters(GetChannelConstraints(c).Filters)
 	if err := recordChannelAffinityBinding(meta, channelID, ttlSeconds); err != nil {
 		common.SysError(common.LogText("channel affinity cache set failed: err=%v", err))
 	}

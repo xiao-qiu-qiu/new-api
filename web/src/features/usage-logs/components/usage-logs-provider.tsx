@@ -22,7 +22,7 @@ import { createContext, useContext, useState, type ReactNode } from 'react'
 import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 
-import type { ChannelAffinityInfo } from '../types'
+import type { ChannelAffinityTarget } from '../types'
 
 export type LogsViewScope = 'all' | 'self'
 export type LogsViewAccess = 'self' | 'admin' | 'root'
@@ -40,8 +40,8 @@ interface UsageLogsContextValue {
   setSelectedUserId: (userId: number | null) => void
   userInfoDialogOpen: boolean
   setUserInfoDialogOpen: (open: boolean) => void
-  affinityTarget: ChannelAffinityInfo | null
-  setAffinityTarget: (target: ChannelAffinityInfo | null) => void
+  affinityTarget: ChannelAffinityTarget | null
+  setAffinityTarget: (target: ChannelAffinityTarget | null) => void
   affinityDialogOpen: boolean
   setAffinityDialogOpen: (open: boolean) => void
   sensitiveVisible: boolean
@@ -58,7 +58,7 @@ export function UsageLogsProvider({ children }: { children: ReactNode }) {
   const [selectedUserId, setSelectedUserId] = useState<number | null>(null)
   const [userInfoDialogOpen, setUserInfoDialogOpen] = useState(false)
   const [affinityTarget, setAffinityTarget] =
-    useState<ChannelAffinityInfo | null>(null)
+    useState<ChannelAffinityTarget | null>(null)
   const [affinityDialogOpen, setAffinityDialogOpen] = useState(false)
   const [sensitiveVisible, setSensitiveVisible] = useState(true)
   const [viewScope, setViewScope] = useState<LogsViewScope>('all')

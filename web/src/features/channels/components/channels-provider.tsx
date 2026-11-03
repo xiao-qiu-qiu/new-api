@@ -48,6 +48,7 @@ type DialogType =
   | 'tag-batch-edit'
   | 'edit-tag'
   | 'copy-channel'
+  | 'affinity'
   | null
 
 type UpstreamUpdateState = ReturnType<typeof useChannelUpstreamUpdates>

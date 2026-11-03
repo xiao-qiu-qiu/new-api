@@ -81,8 +81,11 @@ var accessTokenExemptRoutes = []string{
 // accessTokenHelperRoutes are declared through handlePermissionRoute outside
 // channelPermissionRoutes.
 var accessTokenHelperRoutes = map[string]authz.Permission{
-	"GET /api/task_plugin_options": authz.TaskPluginBind,
-	"GET /api/audit":               authz.AuditRead,
+	"GET /api/task_plugin_options":       authz.TaskPluginBind,
+	"GET /api/audit":                     authz.AuditRead,
+	"GET /api/channel/affinity/bindings": authz.ChannelRead,
+	"POST /api/channel/affinity/targets": authz.ChannelRead,
+	"POST /api/channel/affinity/actions": authz.ChannelOperate,
 }
 
 func newAccessTokenScopeTestEngine(t *testing.T) *gin.Engine {
@@ -146,6 +149,25 @@ func TestAccessTokenRouteRulesCoverEveryDashboardRoute(t *testing.T) {
 		require.True(t, ok, key)
 		assert.Equal(t, "scope", rule.Kind(), key)
 		assert.Equal(t, service.AccessTokenScopeOf(permission), rule.Scope(), key)
+	}
+}
+
+func TestChannelAffinityManagementRouteScopes(t *testing.T) {
+	engine := newAccessTokenScopeTestEngine(t)
+	registered := make(map[string]bool)
+	for _, route := range engine.Routes() {
+		registered[route.Method+" "+route.Path] = true
+	}
+	for key, scope := range map[string]string{
+		"GET /api/channel/affinity/bindings": "channel:read",
+		"POST /api/channel/affinity/targets": "channel:read",
+		"POST /api/channel/affinity/actions": "channel:operate",
+	} {
+		require.True(t, registered[key], key)
+		rule, ok := middleware.AccessTokenRouteRule(key)
+		require.True(t, ok, key)
+		assert.Equal(t, "scope", rule.Kind(), key)
+		assert.Equal(t, scope, rule.Scope(), key)
 	}
 }
 

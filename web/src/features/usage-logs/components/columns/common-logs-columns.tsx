@@ -24,6 +24,7 @@ import { useTranslation } from 'react-i18next'
 import { GroupBadge } from '@/components/group-badge'
 import { StatusBadge, type StatusBadgeProps } from '@/components/status-badge'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
+import { Button } from '@/components/ui/button'
 import {
   Popover,
   PopoverContent,
@@ -47,11 +48,17 @@ import {
 import { pluginUsageSchema } from '@/features/pricing/lib/plugin-pricing'
 import { taskUsageUnitLabel } from '@/features/pricing/lib/task-price-display'
 import type { BillingUsageSchema } from '@/features/pricing/types'
+import {
+  ADMIN_PERMISSION_ACTIONS,
+  ADMIN_PERMISSION_RESOURCES,
+  hasPermission,
+} from '@/lib/admin-permissions'
 import { getUserAvatarFallback, getUserAvatarStyle } from '@/lib/avatar'
 import { getLogCacheHitRate } from '@/lib/cache-hit-rate'
 import { formatBillingCurrencyFromUSD } from '@/lib/currency'
 import { formatLogQuota, formatTimestampToDate } from '@/lib/format'
 import { cn } from '@/lib/utils'
+import { useAuthStore } from '@/stores/auth-store'
 import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import { LOG_TYPE_ALL_VALUE } from '../../constants'
@@ -405,6 +412,12 @@ export function useCommonLogsColumns(
               setAffinityTarget,
               setAffinityDialogOpen,
             } = useUsageLogsContext()
+            const currentUser = useAuthStore((state) => state.auth.user)
+            const canReadChannels = hasPermission(
+              currentUser,
+              ADMIN_PERMISSION_RESOURCES.CHANNEL,
+              ADMIN_PERMISSION_ACTIONS.READ
+            )
             const log = row.original
 
             if (!isDisplayableLogType(log.type)) return null
@@ -490,12 +503,21 @@ export function useCommonLogsColumns(
                         </Popover>
                       )}
                       {affinity && (
-                        <button
+                        <Button
                           type='button'
-                          className='absolute -top-1 -right-1 leading-none text-amber-500'
+                          variant='ghost'
+                          size='icon-xs'
+                          className='absolute -top-2 -right-2 text-amber-500'
+                          aria-label={
+                            canReadChannels
+                              ? t('Manage affinity')
+                              : t('Channel Affinity')
+                          }
+                          aria-haspopup='dialog'
                           onClick={(e) => {
                             e.stopPropagation()
                             setAffinityTarget({
+                              binding_id: affinity.binding_id,
                               rule_name: affinity.rule_name || '',
                               using_group:
                                 affinity.using_group ||
@@ -503,12 +525,17 @@ export function useCommonLogsColumns(
                                 '',
                               key_hint: affinity.key_hint || '',
                               key_fp: affinity.key_fp || '',
+                              user_id: log.user_id,
+                              token_id: log.token_id,
                             })
                             setAffinityDialogOpen(true)
                           }}
                         >
-                          <Sparkles className='size-3 fill-current' />
-                        </button>
+                          <Sparkles
+                            className='size-3 fill-current'
+                            aria-hidden='true'
+                          />
+                        </Button>
                       )}
                     </div>
                     {log.channel_name && (

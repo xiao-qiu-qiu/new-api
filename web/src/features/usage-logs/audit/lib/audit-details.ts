@@ -92,6 +92,20 @@ export function auditFieldLabel(key: string, t: TFunction): string {
       return t('State changed')
     case 'count':
       return t('Count')
+    case 'source_channel_ids':
+      return t('Source channel IDs')
+    case 'target_channel_id':
+      return t('Target channel ID')
+    case 'requested':
+      return t('Requested items')
+    case 'succeeded':
+      return t('Succeeded')
+    case 'expired':
+      return t('Expired')
+    case 'conflicted':
+      return t('Conflicts')
+    case 'failed':
+      return t('Failed')
     case 'total':
       return t('Total')
     case 'requested_redemption_ids':
@@ -440,7 +454,7 @@ export function buildAuditDetails(
   if (entry.category === 'login') fallback = t('Login')
   if (entry.category === 'security') fallback = t('Account security')
   if (entry.category === 'access_token') fallback = t('Access Token')
-  const summary =
+  let summary =
     renderAuditContent(
       {
         op: { action, params: summaryParams },
@@ -454,6 +468,13 @@ export function buildAuditDetails(
       },
       t
     ) || (entry.content && entry.content !== action ? entry.content : fallback)
+  if (action === 'channel.affinity_reset') {
+    summary = t('Reset affinity')
+    if (params.action === 'reset') params.action = t('Reset affinity')
+  } else if (action === 'channel.affinity_migrate') {
+    summary = t('Migrate affinity')
+    if (params.action === 'migrate') params.action = t('Migrate affinity')
+  }
   const admin = isAuditDetailObject(metadata.admin_info)
     ? metadata.admin_info
     : {}
