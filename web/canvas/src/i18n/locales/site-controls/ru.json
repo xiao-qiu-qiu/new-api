@@ -31,6 +31,7 @@
   "agent.site.placeholder": "Опишите задачу или введите @ для ссылки на ресурсы холста",
   "agent.site.requestFailed": "Ошибка запроса ({{status}})",
   "agent.site.truncatedResponse": "Ответ модели обрезан. Сократите запрос и повторите попытку.",
+  "Back to canvases": "К списку холстов",
   "Check task status": "Проверить статус задачи",
   "Failed to upload audio": "Не удалось загрузить аудио",
   "Generate again": "Создать заново",

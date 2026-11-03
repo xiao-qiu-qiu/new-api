@@ -31,6 +31,7 @@
   "agent.site.placeholder": "Décrivez une tâche ou tapez @ pour référencer des ressources du canevas",
   "agent.site.requestFailed": "Échec de la requête ({{status}})",
   "agent.site.truncatedResponse": "La réponse du modèle a été tronquée. Raccourcissez la requête et réessayez.",
+  "Back to canvases": "Retour aux canevas",
   "Check task status": "Vérifier le statut",
   "Failed to upload audio": "Échec de l’importation du fichier audio",
   "Generate again": "Générer à nouveau",

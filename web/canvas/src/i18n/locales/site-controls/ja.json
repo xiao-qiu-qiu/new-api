@@ -31,6 +31,7 @@
   "agent.site.placeholder": "タスクを説明するか、@ でキャンバスの素材を参照してください",
   "agent.site.requestFailed": "リクエストに失敗しました（{{status}}）",
   "agent.site.truncatedResponse": "モデルの応答が途中で切れました。リクエストを短くして再試行してください。",
+  "Back to canvases": "キャンバス一覧に戻る",
   "Check task status": "タスクの状況を確認",
   "Failed to upload audio": "音声をアップロードできませんでした",
   "Generate again": "再生成",

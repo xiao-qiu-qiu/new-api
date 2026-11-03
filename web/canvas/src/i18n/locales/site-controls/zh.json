@@ -31,6 +31,7 @@
   "agent.site.placeholder": "描述任务，或输入 @ 引用画布素材",
   "agent.site.requestFailed": "请求失败（{{status}}）",
   "agent.site.truncatedResponse": "模型回复被截断，请缩短请求后重试",
+  "Back to canvases": "返回画布列表",
   "Check task status": "查询任务状态",
   "Failed to upload audio": "上传音频失败",
   "Generate again": "重新生成",

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { BookOpen, Bot, Download, Home, Images, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Trash2, Undo2, Upload } from "lucide-react";
+import { ArrowLeft, BookOpen, Bot, Download, Home, Images, Menu, PanelLeftClose, PanelLeftOpen, Plus, Redo2, Trash2, Undo2, Upload } from "lucide-react";
 import { Button, Dropdown, Modal, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
@@ -74,8 +74,15 @@ export function CanvasTopBar({
 
     return (
         <>
-            <div className="site-canvas-topbar pointer-events-none absolute left-0 right-0 top-0 z-50 flex h-16 items-center justify-between gap-2 pl-1 pr-4">
-                <div className="pointer-events-auto flex min-w-0 items-center gap-2">
+            <div className="site-canvas-topbar relative z-50 col-span-2 flex h-14 items-center justify-between gap-2 border-b px-3" style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border }}>
+                <div className="flex min-w-0 items-center gap-1.5">
+                    <Button
+                        className="!h-9 !shrink-0 !rounded-lg !px-2.5 !font-medium"
+                        icon={<ArrowLeft className="size-4" aria-hidden="true" />}
+                        onClick={onProjects}
+                    >
+                        {t("Back to canvases")}
+                    </Button>
                     <Tooltip title={sidePanelOpen ? t("canvas.collapsePanel") : t("canvas.expandPanel")}>
                         <button
                             type="button"
@@ -111,7 +118,7 @@ export function CanvasTopBar({
                         </button>
                     </Dropdown>
 
-                    <div ref={titleRef} className="flex min-w-0 items-center gap-2">
+                    <div ref={titleRef} className="flex min-w-0 flex-1 items-center gap-2">
                         {isTitleEditing ? (
                             <input
                                 autoFocus
@@ -147,9 +154,10 @@ export function CanvasTopBar({
                         className="!h-10 !rounded-xl !px-3 !font-medium"
                         style={{ background: agentOpen ? theme.toolbar.activeBg : theme.toolbar.panel, color: theme.node.text, boxShadow: "0 10px 30px rgba(28,25,23,.10)" }}
                         icon={<Bot className="size-4" />}
+                        aria-label={t(agentOpen ? "topNav.closeAgent" : "topNav.openAgent")}
                         onClick={onToggleAgent}
                     >
-                        Agent
+                        <span className="site-canvas-agent-label">Agent</span>
                     </Button>
                 </div>
             </div>

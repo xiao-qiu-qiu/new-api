@@ -14,6 +14,11 @@
   container-name: canvas-workspace;
 }
 
+.site-canvas-topbar {
+  container-type: inline-size;
+  container-name: canvas-topbar;
+}
+
 .site-canvas-topbar > :first-child {
   flex: 1;
 }
@@ -26,12 +31,20 @@
   min-width: 0;
 }
 
-@container canvas-workspace (max-width: 700px) {
+@container canvas-topbar (max-width: 700px) {
   .site-canvas-agent-status,
   .site-canvas-quick-actions {
     display: none;
   }
+}
 
+@container canvas-topbar (max-width: 520px) {
+  .site-canvas-agent-label {
+    display: none;
+  }
+}
+
+@container canvas-workspace (max-width: 700px) {
   [data-canvas-bottom-toolbar] {
     left: 16px !important;
     right: 16px !important;

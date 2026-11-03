@@ -31,6 +31,7 @@
   "agent.site.placeholder": "Mô tả tác vụ hoặc nhập @ để tham chiếu tài nguyên trên canvas",
   "agent.site.requestFailed": "Yêu cầu thất bại ({{status}})",
   "agent.site.truncatedResponse": "Phản hồi của mô hình bị cắt ngắn. Hãy rút gọn yêu cầu rồi thử lại.",
+  "Back to canvases": "Về danh sách canvas",
   "Check task status": "Kiểm tra trạng thái tác vụ",
   "Failed to upload audio": "Tải âm thanh lên thất bại",
   "Generate again": "Tạo lại",

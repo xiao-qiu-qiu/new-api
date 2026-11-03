@@ -3193,33 +3193,32 @@ function InfiniteCanvasPage() {
     if (!projectLoaded) return <CanvasRefreshShell />;
 
     return (
-        <main className="flex h-full min-h-0 overflow-hidden" style={{ background: theme.canvas.background, color: theme.node.text }}>
+        <main className="grid h-full min-h-0 grid-cols-[auto_minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden" style={{ background: theme.canvas.background, color: theme.node.text }}>
+            <CanvasTopBar
+                title={currentProject?.title || t("canvas.projectPage.untitledCanvas")}
+                titleDraft={titleDraft}
+                isTitleEditing={titleEditing}
+                onTitleDraftChange={setTitleDraft}
+                onStartTitleEditing={startTitleEditing}
+                onFinishTitleEditing={finishTitleEditing}
+                onCancelTitleEditing={() => setTitleEditing(false)}
+                canUndo={historyState.canUndo}
+                canRedo={historyState.canRedo}
+                onHome={() => navigate("/")}
+                onProjects={() => navigate("/canvas")}
+                onCreateProject={createAndOpenProject}
+                onDeleteProject={deleteCurrentProject}
+                onExportProject={exportCurrentProject}
+                onImportImage={() => handleUploadRequest()}
+                onOpenPlugins={() => setPluginManagerOpen(true)}
+                onUndo={undoCanvas}
+                onRedo={redoCanvas}
+                agentOpen={agentPanelOpen}
+                compactAgentStatus={{ connected: localAgentConnected, enabled: localAgentEnabled, activity: localAgentActivity }}
+                onToggleAgent={toggleAgentPanel}
+            />
             <CanvasSidePanel nodes={nodes} selectedNodeIds={selectedNodeIds} onFocusNode={focusNode} onPreviewNode={setPreviewNodeId} onHoverNode={setHoverPreviewNodeId} onInsertAsset={handleAssetInsert} />
-            <section className="relative min-w-0 flex-1 overflow-hidden">
-                <CanvasTopBar
-                    title={currentProject?.title || t("canvas.projectPage.untitledCanvas")}
-                    titleDraft={titleDraft}
-                    isTitleEditing={titleEditing}
-                    onTitleDraftChange={setTitleDraft}
-                    onStartTitleEditing={startTitleEditing}
-                    onFinishTitleEditing={finishTitleEditing}
-                    onCancelTitleEditing={() => setTitleEditing(false)}
-                    canUndo={historyState.canUndo}
-                    canRedo={historyState.canRedo}
-                    onHome={() => navigate("/")}
-                    onProjects={() => navigate("/canvas")}
-                    onCreateProject={createAndOpenProject}
-                    onDeleteProject={deleteCurrentProject}
-                    onExportProject={exportCurrentProject}
-                    onImportImage={() => handleUploadRequest()}
-                    onOpenPlugins={() => setPluginManagerOpen(true)}
-                    onUndo={undoCanvas}
-                    onRedo={redoCanvas}
-                    agentOpen={agentPanelOpen}
-                    compactAgentStatus={{ connected: localAgentConnected, enabled: localAgentEnabled, activity: localAgentActivity }}
-                    onToggleAgent={toggleAgentPanel}
-                />
-
+            <section className="relative col-start-2 row-start-2 min-w-0 overflow-hidden">
                 <InfiniteCanvas
                     containerRef={containerRef}
                     viewport={viewport}
