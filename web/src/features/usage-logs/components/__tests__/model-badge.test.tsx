@@ -365,6 +365,74 @@ it('shows a non-default speed tier with the requested tier in its tooltip', () =
   )
 })
 
+it.each([false, true])(
+  'shows the sent Fast tier separately from an upstream default response (mobile: %s)',
+  async (mobile) => {
+    const user = userEvent.setup()
+    const inspect = vi.fn()
+    render(
+      <ModelBadge
+        modelName='gpt-6-astra'
+        serviceTier='default'
+        outboundServiceTier='priority'
+        observedServiceTier='default'
+        wrapText={mobile}
+        onInspect={mobile ? inspect : undefined}
+      />
+    )
+
+    expect(screen.getByLabelText('Sent Speed Tier: fast')).toHaveTextContent(
+      'Sent: fast'
+    )
+    expect(
+      screen.getByLabelText('Upstream Response Tier: default')
+    ).toHaveTextContent('Reported: default')
+    const trigger = screen.getByRole('button', { name: 'Model: gpt-6-astra' })
+    trigger.focus()
+    await user.keyboard('{Enter}')
+    if (mobile) {
+      expect(inspect).toHaveBeenCalledOnce()
+    } else {
+      expect(await screen.findByText('Billing Speed Tier')).toBeVisible()
+      expect(screen.getByText('Sent Speed Tier')).toBeVisible()
+      expect(screen.getByText('Upstream Response Tier')).toBeVisible()
+    }
+  }
+)
+
+it('uses the final sent tier when the client requested a different tier', () => {
+  render(
+    <ModelBadge
+      modelName='gpt-6-astra'
+      requestedServiceTier='flex'
+      outboundServiceTier='priority'
+      observedServiceTier='default'
+      serviceTier='default'
+    />
+  )
+
+  expect(screen.getByLabelText('Sent Speed Tier: fast')).toHaveAttribute(
+    'title',
+    expect.stringContaining('Requested Speed Tier: flex')
+  )
+  expect(screen.queryByText('Sent: flex')).not.toBeInTheDocument()
+})
+
+it('keeps matching sent and response tiers compact', () => {
+  render(
+    <ModelBadge
+      modelName='gpt-6-astra'
+      outboundServiceTier='priority'
+      observedServiceTier='priority'
+      serviceTier='priority'
+    />
+  )
+
+  expect(screen.getByLabelText('Speed Tier: fast')).toHaveTextContent('fast')
+  expect(screen.queryByText('Sent: fast')).not.toBeInTheDocument()
+  expect(screen.queryByText('Reported: fast')).not.toBeInTheDocument()
+})
+
 it('makes the Wan icon available to model icon selectors', () => {
   expect(getLobeIconNames()).toContain('Wan')
 })

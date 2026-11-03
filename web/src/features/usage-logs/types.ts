@@ -239,6 +239,8 @@ export interface LogOtherData {
   reasoning_effort?: string
   service_tier?: string
   requested_service_tier?: string
+  outbound_service_tier?: string
+  observed_service_tier?: string
   image?: boolean
   image_ratio?: number
   image_output?: number

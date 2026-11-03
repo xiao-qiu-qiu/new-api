@@ -114,6 +114,9 @@ func GenerateTextOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, m
 	if relayInfo.RequestedServiceTier != "" {
 		other.SetPublic("requested_service_tier", relayInfo.RequestedServiceTier)
 	}
+	if relayInfo.OutboundServiceTier != "" {
+		other.SetPublic("outbound_service_tier", relayInfo.OutboundServiceTier)
+	}
 	if relayInfo.ServiceTier != "" {
 		other.SetPublic("service_tier", relayInfo.ServiceTier)
 	}

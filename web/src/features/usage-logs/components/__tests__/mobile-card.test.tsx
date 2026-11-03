@@ -121,6 +121,32 @@ function renderLogs(props: Parameters<typeof Fixture>[0] = {}) {
   )
 }
 
+it('shows the forwarded Fast tier and its response when tapping a mobile model', async () => {
+  const user = userEvent.setup()
+  renderLogs({
+    logs: [
+      {
+        ...log,
+        model_name: 'gpt-6-astra',
+        other: JSON.stringify({
+          service_tier: 'default',
+          outbound_service_tier: 'priority',
+          observed_service_tier: 'default',
+        }),
+      },
+    ],
+  })
+
+  expect(screen.getByLabelText('Sent Speed Tier: fast')).toBeVisible()
+  expect(screen.getByLabelText('Upstream Response Tier: default')).toBeVisible()
+  await user.click(screen.getByRole('button', { name: 'Model: gpt-6-astra' }))
+  const details = within(await screen.findByRole('dialog'))
+  expect(details.getByText('Sent Speed Tier')).toBeVisible()
+  expect(details.getByText('Upstream Response Tier')).toBeVisible()
+  expect(details.getByText('Billing Speed Tier')).toBeVisible()
+  expect(details.queryByText('Requested Speed Tier')).not.toBeInTheDocument()
+})
+
 it('shows model mismatch evidence when tapping the mobile model badge', async () => {
   const user = userEvent.setup()
   renderLogs({

@@ -132,6 +132,26 @@ function renderPreview(other: LogOtherData, isAdmin = true, type?: number) {
   return screen.getByRole('button', { name: /./ })
 }
 
+test('keeps client, sent, response and billing tiers distinct in log details', async () => {
+  const trigger = renderPreview({
+    model_price: 0.25,
+    requested_service_tier: 'flex',
+    outbound_service_tier: 'priority',
+    observed_service_tier: 'default',
+    service_tier: 'default',
+  })
+  fireEvent.click(trigger)
+  const dialog = within(await screen.findByRole('dialog'))
+  const details = within(dialog.getByRole('group', { name: 'Speed Tier' }))
+  expect(details.getByText('Requested Speed Tier')).toBeVisible()
+  expect(details.getByText('Sent Speed Tier')).toBeVisible()
+  expect(details.getByText('Upstream Response Tier')).toBeVisible()
+  expect(details.getByText('Billing Speed Tier')).toBeVisible()
+  expect(details.getByText('flex')).toBeVisible()
+  expect(details.getByText('fast')).toBeVisible()
+  expect(details.getAllByText('default')).toHaveLength(2)
+})
+
 test('keeps log details open when the parent refreshes with unchanged data', async () => {
   const other = { model_price: 0.25 }
   const wrapper = ({ children }: { children: React.ReactNode }) => (

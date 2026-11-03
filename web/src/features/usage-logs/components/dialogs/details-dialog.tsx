@@ -91,7 +91,7 @@ import {
   isTimingLogType,
 } from '../../lib/utils'
 import { USAGE_BILLING_PATH, type LogOtherData } from '../../types'
-import { ResponseModelDetails } from '../model-badge'
+import { ResponseModelDetails, ServiceTierDetails } from '../model-badge'
 import { PluginAuthorLink } from '../plugin-author-link'
 import { DetailRow, DetailSection } from './log-detail-layout'
 
@@ -1171,25 +1171,12 @@ export function DetailsDialog(props: DetailsDialogProps) {
           />
         )}
 
-        {other?.service_tier && (
-          <DetailRow
-            label={t('Speed Tier')}
-            value={
-              other.service_tier === 'priority' ? 'fast' : other.service_tier
-            }
-          />
-        )}
-        {other?.requested_service_tier &&
-          other.requested_service_tier !== other.service_tier && (
-            <DetailRow
-              label={t('Requested Speed Tier')}
-              value={
-                other.requested_service_tier === 'priority'
-                  ? 'fast'
-                  : other.requested_service_tier
-              }
-            />
-          )}
+        <ServiceTierDetails
+          serviceTier={other?.service_tier}
+          requestedServiceTier={other?.requested_service_tier}
+          outboundServiceTier={other?.outbound_service_tier}
+          observedServiceTier={other?.observed_service_tier}
+        />
 
         {/* System prompt override */}
         {other?.is_system_prompt_overwritten && (

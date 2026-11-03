@@ -36,32 +36,52 @@ import { isResponseModelMismatch } from '../lib/response-model'
 import type { LogOtherData } from '../types'
 import { DetailRow } from './dialogs/log-detail-layout'
 
-interface ModelBadgeProps {
+interface ServiceTierDetailsProps {
+  serviceTier?: string
+  requestedServiceTier?: string
+  outboundServiceTier?: string
+  observedServiceTier?: string
+}
+
+interface ModelBadgeProps extends ServiceTierDetailsProps {
   modelName: string
   actualModel?: string
   responseModel?: LogOtherData['response_model']
   reasoningEffort?: string
-  serviceTier?: string
-  requestedServiceTier?: string
   className?: string
   wrapText?: boolean
   onInspect?: () => void
+}
+
+function formatServiceTier(tier?: string): string {
+  const normalized = tier?.trim().toLowerCase() ?? ''
+  return normalized === 'priority' ? 'fast' : normalized
 }
 
 function ModelBadgeContent(props: ModelBadgeProps & { copyable: boolean }) {
   const { t } = useTranslation()
   const provider = resolveModelProvider(props.modelName)
   const effort = props.reasoningEffort?.trim()
-  const tier = props.serviceTier?.trim().toLowerCase()
-  const serviceTier = tier === 'priority' ? 'fast' : tier
-  const requestedTier = props.requestedServiceTier?.trim().toLowerCase()
-  const requestedServiceTier =
-    requestedTier === 'priority' ? 'fast' : requestedTier
+  const serviceTier = formatServiceTier(props.serviceTier)
+  const requestedServiceTier = formatServiceTier(props.requestedServiceTier)
+  const outboundServiceTier = formatServiceTier(props.outboundServiceTier)
+  const observedServiceTier = formatServiceTier(props.observedServiceTier)
+  const showSentTier =
+    !!outboundServiceTier &&
+    ((!!serviceTier && serviceTier !== outboundServiceTier) ||
+      (!!observedServiceTier && observedServiceTier !== outboundServiceTier))
   const tierLabel = `${t('Speed Tier')}: ${serviceTier}`
-  const tierTitle =
-    requestedServiceTier && requestedServiceTier !== serviceTier
-      ? `${tierLabel} · ${t('Requested Speed Tier')}: ${requestedServiceTier}`
-      : tierLabel
+  const tierTitle = [
+    serviceTier && tierLabel,
+    requestedServiceTier &&
+      requestedServiceTier !== serviceTier &&
+      `${t('Requested Speed Tier')}: ${requestedServiceTier}`,
+    outboundServiceTier && `${t('Sent Speed Tier')}: ${outboundServiceTier}`,
+    observedServiceTier &&
+      `${t('Upstream Response Tier')}: ${observedServiceTier}`,
+  ]
+    .filter(Boolean)
+    .join(' · ')
 
   return (
     <StatusBadge
@@ -80,7 +100,7 @@ function ModelBadgeContent(props: ModelBadgeProps & { copyable: boolean }) {
       <span
         className={cn(
           'flex items-center gap-1.5',
-          props.wrapText ? 'max-w-full min-w-0' : 'max-w-none'
+          props.wrapText ? 'max-w-full min-w-0 flex-wrap' : 'max-w-none'
         )}
       >
         {provider?.icon && (
@@ -113,7 +133,30 @@ function ModelBadgeContent(props: ModelBadgeProps & { copyable: boolean }) {
             className='border-border/60 h-4 shrink-0 border-l pl-1.5 text-xs [&>svg]:size-3'
           />
         )}
-        {serviceTier && serviceTier !== 'default' && (
+        {showSentTier && (
+          <StatusBadge
+            type='text'
+            icon={Zap}
+            label={t('Sent: {{tier}}', { tier: outboundServiceTier })}
+            variant='info'
+            copyable={false}
+            aria-label={`${t('Sent Speed Tier')}: ${outboundServiceTier}`}
+            title={tierTitle}
+            className='border-border/60 h-4 shrink-0 border-l pl-1.5 text-xs [&>svg]:size-3'
+          />
+        )}
+        {showSentTier && observedServiceTier && (
+          <StatusBadge
+            type='text'
+            label={t('Reported: {{tier}}', { tier: observedServiceTier })}
+            variant='neutral'
+            copyable={false}
+            aria-label={`${t('Upstream Response Tier')}: ${observedServiceTier}`}
+            title={tierTitle}
+            className='border-border/60 h-4 shrink-0 border-l pl-1.5 text-xs'
+          />
+        )}
+        {!showSentTier && serviceTier && serviceTier !== 'default' && (
           <StatusBadge
             type='text'
             icon={Zap}
@@ -142,6 +185,8 @@ export function ModelBadge(props: ModelBadgeProps) {
   const modelLabel = `${t('Model')}: ${props.modelName}${responseModelLabel ? `, ${responseModelLabel}` : ''}`
   const hasDetails =
     !!props.actualModel ||
+    !!props.outboundServiceTier ||
+    !!props.observedServiceTier ||
     !!(
       props.responseModel &&
       (mismatch ||
@@ -219,10 +264,11 @@ export function ModelBadge(props: ModelBadgeProps) {
       >
         {content}
       </PopoverTrigger>
-      <PopoverContent className='w-96 max-w-[calc(100vw-2rem)]'>
-        {props.responseModel ? (
+      <PopoverContent className='w-96 max-w-[calc(100vw-2rem)] space-y-3'>
+        {props.responseModel && (
           <ResponseModelDetails observation={props.responseModel} />
-        ) : (
+        )}
+        {!props.responseModel && props.actualModel && (
           <div className='space-y-2'>
             <div className='flex items-start justify-between gap-3'>
               <span className='text-muted-foreground text-xs'>
@@ -242,8 +288,43 @@ export function ModelBadge(props: ModelBadgeProps) {
             </div>
           </div>
         )}
+        <ServiceTierDetails
+          serviceTier={props.serviceTier}
+          requestedServiceTier={props.requestedServiceTier}
+          outboundServiceTier={props.outboundServiceTier}
+          observedServiceTier={props.observedServiceTier}
+        />
       </PopoverContent>
     </Popover>
+  )
+}
+
+export function ServiceTierDetails(props: ServiceTierDetailsProps) {
+  const { t } = useTranslation()
+  const tiers = [
+    { label: t('Requested Speed Tier'), value: props.requestedServiceTier },
+    { label: t('Sent Speed Tier'), value: props.outboundServiceTier },
+    { label: t('Upstream Response Tier'), value: props.observedServiceTier },
+    { label: t('Billing Speed Tier'), value: props.serviceTier },
+  ]
+  const visibleTiers = tiers.filter((tier) => tier.value?.trim())
+  if (visibleTiers.length === 0) return null
+
+  return (
+    <div
+      className='min-w-0 space-y-2'
+      role='group'
+      aria-label={t('Speed Tier')}
+    >
+      {visibleTiers.map((tier) => (
+        <DetailRow
+          key={tier.label}
+          label={tier.label}
+          value={formatServiceTier(tier.value)}
+          mono
+        />
+      ))}
+    </div>
   )
 }
 
