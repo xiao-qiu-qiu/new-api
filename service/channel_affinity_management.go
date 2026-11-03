@@ -265,7 +265,7 @@ func (s channelAffinityBindingSnapshot) live(now int64) bool {
 	return s.management.Active && s.management.Binding.ChannelID == s.channelID && s.management.ExpiresAtMillis > now
 }
 
-func nextChannelAffinityManagement(meta channelAffinityMeta, snapshot channelAffinityBindingSnapshot, channelID int, expiresAt, now int64, legacy bool) channelAffinityManagedBinding {
+func nextChannelAffinityManagement(meta channelAffinityMeta, snapshot channelAffinityBindingSnapshot, channelID int, expiresAt, now int64) channelAffinityManagedBinding {
 	value := snapshot.management
 	value.Routes = slices.Clone(value.Routes)
 	value.Binding.Models = slices.Clone(value.Binding.Models)
@@ -278,8 +278,8 @@ func nextChannelAffinityManagement(meta channelAffinityMeta, snapshot channelAff
 		value.Binding = ChannelAffinityBinding{
 			ID: channelAffinityBindingID(meta.CacheKey), RuleName: meta.RuleName,
 			UsingGroup: meta.UsingGroup, SessionMode: meta.SessionMode, KeyFingerprint: meta.KeyFingerprint,
-			OwnershipKnown: !legacy && meta.UserID > 0, MetadataComplete: true,
-			Models: []string{}, UsingGroups: []string{}, RequestPaths: []string{}, RuleNames: []string{},
+			MetadataComplete: true,
+			Models:           []string{}, UsingGroups: []string{}, RequestPaths: []string{}, RuleNames: []string{},
 		}
 		changed = true
 	}
@@ -302,7 +302,12 @@ func nextChannelAffinityManagement(meta channelAffinityMeta, snapshot channelAff
 		} else if !value.OwnerObserved {
 			value.OwnerObserved, value.ObservedUserID, value.ObservedTokenID = true, meta.UserID, meta.TokenID
 		}
-		if value.Binding.OwnershipKnown && !value.Binding.Shared {
+		if !value.Binding.Shared {
+			// Authenticated observations identify legacy bindings too. A sliding
+			// TTL must not leave their original unknown-owner flag set forever.
+			if !value.Binding.OwnershipKnown {
+				value.Binding.OwnershipKnown, changed = true, true
+			}
 			value.Binding.UserID, value.Binding.TokenID = meta.UserID, meta.TokenID
 			value.Binding.UserName, value.Binding.TokenName = safeChannelAffinityName(meta.UserName), safeChannelAffinityName(meta.TokenName)
 		}
@@ -911,6 +916,13 @@ func mutateChannelAffinityBinding(action string, ref ChannelAffinityBindingRef, 
 				state.IdleTTLSeconds, state.AbsoluteExpiresAt = idleSeconds, now+int64(residenceSeconds)*1000
 				state.IdleExpiresAt = min(now+int64(idleSeconds)*1000, state.AbsoluteExpiresAt)
 				ttl = time.Duration(state.IdleExpiresAt-now) * time.Millisecond
+			}
+			// Older metadata retained the observed identity but did not expose
+			// it for legacy bindings. Migration preserves that identity, never
+			// the administrator performing the action.
+			if !value.Binding.OwnershipKnown && !value.Binding.Shared && value.OwnerObserved && value.ObservedUserID > 0 {
+				value.Binding.OwnershipKnown = true
+				value.Binding.UserID, value.Binding.TokenID = value.ObservedUserID, value.ObservedTokenID
 			}
 		}
 		value.Binding.Version, value.Binding.ChannelID = common.GetUUID(), state.ChannelID

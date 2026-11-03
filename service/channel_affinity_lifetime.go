@@ -231,7 +231,7 @@ func readChannelAffinityBinding(meta *channelAffinityMeta) (int, bool, error) {
 		if state.ChannelID == snapshot.channelID && state.limited() {
 			expiresAt = min(expiresAt, state.IdleExpiresAt, state.AbsoluteExpiresAt)
 		}
-		value := nextChannelAffinityManagement(*meta, snapshot, snapshot.channelID, expiresAt, now, true)
+		value := nextChannelAffinityManagement(*meta, snapshot, snapshot.channelID, expiresAt, now)
 		retention := max(24*time.Hour, time.Duration(max(meta.TTLSeconds, 1))*time.Second) + time.Duration(max(0, state.AbsoluteExpiresAt-now))*time.Millisecond
 		if common.RedisEnabled && common.RDB != nil {
 			raw, err := (channelAffinityManagementCodec{}).Encode(value)
@@ -370,8 +370,7 @@ func recordChannelAffinityBinding(meta channelAffinityMeta, channelID, ttlSecond
 		} else {
 			retention += remaining
 		}
-		legacy := snapshot.management.CacheKey == "" && snapshot.found
-		value := nextChannelAffinityManagement(meta, snapshot, channelID, now+ttl.Milliseconds(), now, legacy)
+		value := nextChannelAffinityManagement(meta, snapshot, channelID, now+ttl.Milliseconds(), now)
 		updated, err := writeChannelAffinityManagedBinding(meta.CacheKey, snapshot, channelID, ttl, state, value, retention, observedClear)
 		if err != nil {
 			return err

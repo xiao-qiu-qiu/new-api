@@ -140,21 +140,173 @@ func TestChannelAffinityManagement(t *testing.T) {
 				assert.Zero(t, result.Total)
 				_, _, _ = affinityManagementRequest(f, "secret-session-B", 2, 23, "lifetime-model", "default", "/v1/chat/completions")
 				assert.True(t, affinityManagementBinding(t, second).Shared, "a second token of the same user also makes a shared binding")
+				_, _, _ = affinityManagementRequest(f, "secret-session-A", 1, 11, "lifetime-model", "default", "/v1/chat/completions")
+				_, _, _ = affinityManagementRequest(f, "secret-session-B", 2, 22, "lifetime-model", "default", "/v1/chat/completions")
+				sharedRefs := []ChannelAffinityBindingRef{
+					affinityManagementRef(affinityManagementBinding(t, first)),
+					affinityManagementRef(affinityManagementBinding(t, second)),
+				}
+				migration, err := MutateChannelAffinityBindings("migrate", sharedRefs, 19)
+				require.NoError(t, err)
+				assert.Equal(t, 2, migration.Succeeded)
+				for _, c := range []*gin.Context{first, second} {
+					shared := affinityManagementBinding(t, c)
+					assert.True(t, shared.Shared, "returning original owners and migration must not erase a conflict")
+					assert.Zero(t, shared.UserID)
+					assert.Zero(t, shared.TokenID)
+					assert.Empty(t, shared.UserName)
+					assert.Empty(t, shared.TokenName)
+				}
+				for _, filter := range []ChannelAffinityBindingFilter{{UserID: 1}, {UserID: 2}, {TokenID: 11}, {TokenID: 22}, {TokenID: 23}} {
+					result, err := ListChannelAffinityBindings(filter)
+					require.NoError(t, err)
+					assert.Zero(t, result.Total)
+				}
 
-				// A legacy integer has no historical owner. Observing it must not
-				// retroactively label it as belonging to that request's user.
+				// Legacy bindings acquire the owner observed on an authenticated
+				// request without resetting the existing channel or extending its TTL.
 				legacyKey := buildChannelAffinityCacheKeySuffix(operation_setting.GetChannelAffinitySetting().Rules[0], "lifetime-model", "default", "old-secret")
 				require.NoError(t, getChannelAffinityCache().SetWithTTL(legacyKey, 19, time.Minute))
 				legacy, _, found := affinityManagementRequest(f, "old-secret", 3, 33, "lifetime-model", "default", "/v1/chat/completions")
 				require.True(t, found)
-				unknown := affinityManagementBinding(t, legacy)
-				assert.False(t, unknown.OwnershipKnown)
-				assert.Zero(t, unknown.UserID)
-				result, err = ListChannelAffinityBindings(ChannelAffinityBindingFilter{UserID: 3})
-				require.NoError(t, err)
-				assert.Zero(t, result.Total)
+				owned := affinityManagementBinding(t, legacy)
+				assert.True(t, owned.OwnershipKnown)
+				assert.Equal(t, 3, owned.UserID)
+				assert.Equal(t, 33, owned.TokenID)
+				assert.Equal(t, "user-3", owned.UserName)
+				assert.Equal(t, "token-33", owned.TokenName)
+				assert.Equal(t, 19, owned.ChannelID)
+				for _, filter := range []ChannelAffinityBindingFilter{{UserID: 3}, {TokenID: 33}} {
+					result, err = ListChannelAffinityBindings(filter)
+					require.NoError(t, err)
+					require.Len(t, result.Items, 1)
+					assert.Equal(t, owned.ID, result.Items[0].ID)
+				}
 				if f.server != nil {
 					assert.Equal(t, time.Minute, f.server.TTL(getChannelAffinityCache().FullKey(legacyKey)))
+				}
+			})
+
+			t.Run("stored_unknown_owner_recovers_on_request_or_migration", func(t *testing.T) {
+				for _, operation := range []string{"request", "migrate"} {
+					t.Run(operation, func(t *testing.T) {
+						f := newAffinityManagementFixture(t, redisEnabled)
+						c, _, _ := affinityManagementRequest(f, "stored-unknown", 1, 11, "lifetime-model", "default", "/v1/chat/completions")
+						f.complete(c, 56)
+						b := affinityManagementBinding(t, c)
+						stored, found, err := getChannelAffinityManagementCache().Get(b.ID)
+						require.NoError(t, err)
+						require.True(t, found)
+						require.True(t, stored.OwnerObserved)
+						require.Equal(t, 1, stored.ObservedUserID)
+						require.Equal(t, 11, stored.ObservedTokenID)
+						// Reproduce persisted metadata from the affected release: the
+						// observation is valid but the public ownership fields are blank.
+						stored.Binding.OwnershipKnown = false
+						stored.Binding.UserID, stored.Binding.TokenID = 0, 0
+						stored.Binding.UserName, stored.Binding.TokenName = "", ""
+						require.NoError(t, getChannelAffinityManagementCache().SetWithTTL(b.ID, stored, 24*time.Hour))
+						stale := affinityManagementRef(stored.Binding)
+						listed, err := ListChannelAffinityBindings(ChannelAffinityBindingFilter{BindingID: b.ID})
+						require.NoError(t, err)
+						require.Len(t, listed.Items, 1)
+						assert.False(t, listed.Items[0].OwnershipKnown, "listing alone does not promote ownership")
+						assert.Equal(t, stale.Version, listed.Items[0].Version)
+						wantChannel := 56
+						if operation == "request" {
+							_, id, found := affinityManagementRequest(f, "stored-unknown", 1, 11, "lifetime-model", "default", "/v1/chat/completions")
+							require.True(t, found)
+							assert.Equal(t, wantChannel, id)
+						} else {
+							result, err := MutateChannelAffinityBindings("migrate", []ChannelAffinityBindingRef{stale}, 40)
+							require.NoError(t, err)
+							require.Equal(t, 1, result.Succeeded)
+							wantChannel = 40
+						}
+						repaired, found, err := getChannelAffinityManagementCache().Get(b.ID)
+						require.NoError(t, err)
+						require.True(t, found)
+						assert.True(t, repaired.Binding.OwnershipKnown)
+						assert.False(t, repaired.Binding.Shared)
+						assert.Equal(t, 1, repaired.Binding.UserID)
+						assert.Equal(t, 11, repaired.Binding.TokenID)
+						assert.Equal(t, wantChannel, repaired.Binding.ChannelID)
+						assert.NotEqual(t, stale.Version, repaired.Binding.Version)
+						if operation == "request" {
+							assert.Equal(t, "user-1", repaired.Binding.UserName)
+							assert.Equal(t, "token-11", repaired.Binding.TokenName)
+							assert.Equal(t, stored.ExpiresAtMillis, repaired.ExpiresAtMillis, "owner repair preserves the live binding deadline")
+						} else {
+							assert.Empty(t, repaired.Binding.UserName)
+							assert.Empty(t, repaired.Binding.TokenName)
+						}
+						for _, filter := range []ChannelAffinityBindingFilter{{UserID: 1}, {TokenID: 11}} {
+							result, err := ListChannelAffinityBindings(filter)
+							require.NoError(t, err)
+							if assert.Len(t, result.Items, 1) {
+								assert.Equal(t, b.ID, result.Items[0].ID)
+							}
+						}
+						result, err := MutateChannelAffinityBindings("reset", []ChannelAffinityBindingRef{stale}, 0)
+						require.NoError(t, err)
+						assert.Equal(t, 1, result.Conflicted, "ownership repair invalidates the stale selection")
+						if operation == "migrate" {
+							_, id, found := affinityManagementRequest(f, "stored-unknown", 1, 11, "lifetime-model", "default", "/v1/chat/completions")
+							require.True(t, found)
+							assert.Equal(t, 40, id)
+							owned := affinityManagementBinding(t, c)
+							assert.Equal(t, "user-1", owned.UserName)
+							assert.Equal(t, "token-11", owned.TokenName)
+						}
+					})
+				}
+			})
+
+			t.Run("stored_unknown_conflicting_owner_stays_shared", func(t *testing.T) {
+				for _, other := range []struct {
+					name    string
+					userID  int
+					tokenID int
+				}{{"different_user", 2, 22}, {"different_token", 1, 12}} {
+					t.Run(other.name, func(t *testing.T) {
+						f := newAffinityManagementFixture(t, redisEnabled)
+						c, _, _ := affinityManagementRequest(f, "stored-conflict", 1, 11, "lifetime-model", "default", "/v1/chat/completions")
+						f.complete(c, 56)
+						b := affinityManagementBinding(t, c)
+						stored, found, err := getChannelAffinityManagementCache().Get(b.ID)
+						require.NoError(t, err)
+						require.True(t, found)
+						stored.Binding.OwnershipKnown = false
+						stored.Binding.UserID, stored.Binding.TokenID = 0, 0
+						stored.Binding.UserName, stored.Binding.TokenName = "", ""
+						require.NoError(t, getChannelAffinityManagementCache().SetWithTTL(b.ID, stored, 24*time.Hour))
+						stale := affinityManagementRef(stored.Binding)
+						_, _, found = affinityManagementRequest(f, "stored-conflict", other.userID, other.tokenID, "lifetime-model", "default", "/v1/chat/completions")
+						require.True(t, found)
+						conflicted := affinityManagementBinding(t, c)
+						assert.True(t, conflicted.Shared)
+						assert.NotEqual(t, stale.Version, conflicted.Version)
+						result, err := MutateChannelAffinityBindings("reset", []ChannelAffinityBindingRef{stale}, 0)
+						require.NoError(t, err)
+						assert.Equal(t, 1, result.Conflicted)
+						_, _, found = affinityManagementRequest(f, "stored-conflict", 1, 11, "lifetime-model", "default", "/v1/chat/completions")
+						require.True(t, found)
+						shared := affinityManagementBinding(t, c)
+						result, err = MutateChannelAffinityBindings("migrate", []ChannelAffinityBindingRef{affinityManagementRef(shared)}, 40)
+						require.NoError(t, err)
+						assert.Equal(t, 1, result.Succeeded)
+						shared = affinityManagementBinding(t, c)
+						assert.True(t, shared.Shared)
+						assert.Zero(t, shared.UserID)
+						assert.Zero(t, shared.TokenID)
+						assert.Empty(t, shared.UserName)
+						assert.Empty(t, shared.TokenName)
+						for _, filter := range []ChannelAffinityBindingFilter{{UserID: 1}, {UserID: other.userID}, {TokenID: 11}, {TokenID: other.tokenID}} {
+							result, err := ListChannelAffinityBindings(filter)
+							require.NoError(t, err)
+							assert.Zero(t, result.Total)
+						}
+					})
 				}
 			})
 
@@ -198,6 +350,11 @@ func TestChannelAffinityManagement(t *testing.T) {
 							assert.Equal(t, 19, id)
 							assert.Equal(t, "strict", RequestPolicy(fresh).SessionMode)
 							migrated := affinityManagementBinding(t, fresh)
+							assert.True(t, migrated.OwnershipKnown)
+							assert.Equal(t, 1, migrated.UserID)
+							assert.Equal(t, 11, migrated.TokenID)
+							assert.Equal(t, "user-1", migrated.UserName)
+							assert.Equal(t, "token-11", migrated.TokenName)
 							assert.NotEqual(t, b.Version, migrated.Version)
 							assert.Equal(t, f.now.Add(480*time.Second).Unix(), migrated.ExpiresAt)
 							state, found := f.state(fresh)
@@ -417,7 +574,7 @@ func TestChannelAffinityManagement(t *testing.T) {
 				legacy, _, found := affinityManagementRequest(f, "expired-legacy", 1, 11, "old-model", "old-group", "/v1/responses")
 				require.True(t, found)
 				unknown := affinityManagementBinding(t, legacy)
-				assert.False(t, unknown.OwnershipKnown)
+				assert.True(t, unknown.OwnershipKnown)
 				f.advance(time.Hour)
 				fresh, _, found := affinityManagementRequest(f, "expired-legacy", 2, 22, "lifetime-model", "default", "/v1/chat/completions")
 				require.False(t, found)
