@@ -320,6 +320,7 @@ routeAttempt:
 			return apiErr
 		}
 		info = relaycommon.GenRelayInfoResponses(c, &create.Request)
+		service.MarkMediaGenerationRequest(c, info)
 		info.IsStream = true
 		common.SetContextKey(c, appconstant.ContextKeyIsStream, true)
 		if apiErr = PrepareRequestBilling(c, info); apiErr != nil {
@@ -354,6 +355,7 @@ routeAttempt:
 			service.AppendUsedChannel(c, channel.Id)
 			if info == nil {
 				info = relaycommon.GenRelayInfoResponses(c, &create.Request)
+				service.MarkMediaGenerationRequest(c, info)
 				info.IsStream = true
 				common.SetContextKey(c, appconstant.ContextKeyIsStream, true)
 				if apiErr = PrepareRequestBilling(c, info); apiErr != nil {
@@ -723,6 +725,7 @@ func buildResponsesWSCreatePayload(c *gin.Context, info *relaycommon.RelayInfo, 
 	if err != nil {
 		return nil, types.NewError(err, types.ErrorCodeReadRequestBodyFailed, types.ErrOptionWithSkipRetry())
 	}
+	service.MarkMediaGenerationRequestBody(c, info, jsonData)
 	jsonData, tier, err := info.ApplyOutboundServiceTierPolicy(c, jsonData)
 	if err != nil {
 		var apiErr *types.NewAPIError

@@ -49,6 +49,8 @@ export function policyLabel(t: TFunction, value: string): string {
       return t('Unrecognized status code')
     case 'task_accepted':
       return t('The task was accepted; submission cannot be replayed')
+    case 'media_generation_no_retry':
+      return t('Image and video generation is not retried')
     case 'pinned_channel':
       return t('Fixed channel constraint')
     case 'local_rejection':
@@ -78,6 +80,8 @@ export function policyLabel(t: TFunction, value: string): string {
       return t('Session rule')
     case 'system':
       return t('System constraint')
+    case 'request_type':
+      return t('Request type')
     case 'routing':
       return t('Channel selection')
     case 'upstream':

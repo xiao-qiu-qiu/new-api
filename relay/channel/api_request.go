@@ -456,6 +456,7 @@ func keepUpstreamRedirectResponse(_ *http.Request, _ []*http.Request) error {
 }
 
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
+	service.MarkMediaGenerationRequest(c, info)
 	// Inspect the replayable final JSON body after conversion, field filtering
 	// and parameter overrides. Never use the incoming tier for this reservation.
 	finalFormat := info.GetFinalRequestRelayFormat()
@@ -511,6 +512,10 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 			if apiErr := service.PrepareServiceTierBilling(c, info, tier); apiErr != nil {
 				return nil, apiErr
 			}
+			data = updated
+		}
+		if !service.IsMediaGenerationRequest(c) {
+			service.MarkMediaGenerationRequestBody(c, info, data)
 		}
 	} else if info.DeferServiceTierReservation {
 		if apiErr := service.PrepareServiceTierBilling(c, info, ""); apiErr != nil {
@@ -546,8 +551,7 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	}
 	// Clients are cached and shared across channels, so override redirect
 	// behavior on a shallow copy instead of mutating the cached client. This
-	// still reuses its transport and connection pools, including HTTP/2's
-	// transparent stream retries.
+	// still reuses its transport and connection pools.
 	relayClient := *client
 	relayClient.CheckRedirect = keepUpstreamRedirectResponse
 	var lifecycle *common.StreamLifecycle
@@ -581,6 +585,10 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 	}
 
 	common2.SetContextKey(c, appconstant.ContextKeyUpstreamRequestOrigin, req.URL.Scheme+"://"+req.URL.Host)
+	if service.IsMediaGenerationRequest(c) {
+		// Keep the original body for this attempt, but prevent transport replay.
+		req.GetBody = nil
+	}
 	resp, err := relayClient.Do(req)
 	if err != nil {
 		options := []types.NewAPIErrorOptions{types.ErrOptionWithHideErrMsg("upstream error: do request failed")}

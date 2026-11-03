@@ -15,6 +15,8 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -349,7 +351,8 @@ func awaitH2ServerResult(t *testing.T, resultCh <-chan h2ServerResult) h2ServerR
 // been fully written, and then resets the stream with REFUSED_STREAM (the
 // retry-safe reset some proxy/CDN-fronted upstreams send under load or during
 // graceful shutdown, see RFC 9113 section 8.7). When expectRetry is true it
-// serves the retried stream a 200 response; otherwise it stops after the reset.
+// serves the retried stream a 200 response. Otherwise it waits for the client
+// to close idle connections, recording any unexpected replay before closing.
 func runResetOnFirstStreamServer(ln net.Listener, expectRetry bool) <-chan h2ServerResult {
 	resCh := make(chan h2ServerResult, 1)
 	go func() {
@@ -363,11 +366,12 @@ func runResetOnFirstStreamServer(ln net.Listener, expectRetry bool) <-chan h2Ser
 		}
 		defer conn.Close()
 
-	attempts:
 		for attempt := 0; ; attempt++ {
 			streamID, body, err := readH2TestRequest(framer)
 			if err != nil {
-				res.err = err
+				if expectRetry || attempt == 0 {
+					res.err = err
+				}
 				return
 			}
 			res.streamCount++
@@ -377,9 +381,6 @@ func runResetOnFirstStreamServer(ln net.Listener, expectRetry bool) <-chan h2Ser
 				if err := framer.WriteRSTStream(streamID, http2.ErrCodeRefusedStream); err != nil {
 					res.err = err
 					return
-				}
-				if !expectRetry {
-					break attempts
 				}
 				continue
 			}
@@ -493,6 +494,70 @@ func TestUpstreamGetBody_HTTP2RetryAfterUpstreamStreamReset(t *testing.T) {
 	assert.Equal(t, payload, srv.attemptBodies[1], "the retried request must carry the complete body")
 }
 
+func TestDoRequestMediaGenerationHTTP2SingleAttempt(t *testing.T) {
+	service.InitHttpClient()
+	sharedClient := service.GetHttpClient()
+	previousTransport, previousTimeout := sharedClient.Transport, sharedClient.Timeout
+	t.Cleanup(func() {
+		sharedClient.Transport, sharedClient.Timeout = previousTransport, previousTimeout
+	})
+	for _, tc := range []struct {
+		name, payload string
+		mode          int
+		format        types.RelayFormat
+		media         bool
+	}{
+		{"text retains retry", `{"model":"test-model","input":"hello"}`, relayconstant.RelayModeResponses, types.RelayFormatOpenAIResponses, false},
+		{"final image tool", `{"model":"test-model","input":"draw","tools":[{"type":"image_generation"}]}`, relayconstant.RelayModeResponses, types.RelayFormatOpenAIResponses, true},
+		{"image endpoint", `{"model":"test-model","prompt":"draw"}`, relayconstant.RelayModeImagesGenerations, types.RelayFormatOpenAIImage, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ln, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			defer ln.Close()
+			result := runResetOnFirstStreamServer(ln, !tc.media)
+			client, transport := newH2PriorKnowledgeClient(ln)
+			defer transport.CloseIdleConnections()
+			sharedClient.Transport, sharedClient.Timeout = client.Transport, client.Timeout
+			payload := []byte(tc.payload)
+			body, closer, err := relaycommon.NewOutboundJSONBody(payload)
+			require.NoError(t, err)
+			defer closer.Close()
+			req, err := http.NewRequest(http.MethodPost, "http://upstream.test/v1/responses", body)
+			require.NoError(t, err)
+			req.Header.Set("Content-Type", "application/json")
+			ApplyUpstreamBodyMetadata(req, body)
+			require.NotNil(t, req.GetBody)
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			info := &relaycommon.RelayInfo{RelayMode: tc.mode, RelayFormat: tc.format, ChannelMeta: &relaycommon.ChannelMeta{}}
+			resp, err := doRequest(ctx, req, info)
+			if tc.media {
+				require.Error(t, err)
+				assert.Nil(t, resp)
+				assert.Nil(t, req.GetBody)
+				transport.CloseIdleConnections()
+			} else {
+				require.NoError(t, err)
+				defer resp.Body.Close()
+				assert.Equal(t, http.StatusOK, resp.StatusCode)
+				assert.NotNil(t, req.GetBody)
+			}
+			observed := awaitH2ServerResult(t, result)
+			require.NoError(t, observed.err)
+			wantAttempts := 2
+			if tc.media {
+				wantAttempts = 1
+			}
+			assert.Equal(t, wantAttempts, observed.streamCount)
+			require.Len(t, observed.attemptBodies, wantAttempts)
+			for _, sent := range observed.attemptBodies {
+				assert.Equal(t, payload, sent)
+			}
+		})
+	}
+}
+
 func TestUpstreamGetBody_HTTP2RetryAfterUpstreamStreamReset_PassThrough(t *testing.T) {
 	payload := []byte(`{"model":"test-model","messages":[{"role":"user","content":"pass through"}]}`)
 
@@ -584,6 +649,7 @@ func TestUpstreamGetBody_HTTP2CannotRetryWithoutGetBody(t *testing.T) {
 	assert.Nil(t, resp)
 	require.ErrorContains(t, err, "cannot retry err")
 	require.ErrorContains(t, err, "Request.Body was written")
+	transport.CloseIdleConnections()
 
 	srv := awaitH2ServerResult(t, resCh)
 	require.NoError(t, srv.err)

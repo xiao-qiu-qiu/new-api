@@ -13,6 +13,9 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/jsplugin"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/system_setting"
@@ -219,6 +222,19 @@ func TestDecideRelayRetryReasons(t *testing.T) {
 			RequestPolicy(c).SessionModeSource = "global"
 		}, want: PolicyDecision{Action: "stop", Reason: "strict_session", Source: "global"}},
 		{name: "nil error", retries: 1, want: PolicyDecision{Action: "stop", Reason: "request_completed", Source: "system"}},
+		{name: "media failure ignores eight retry budget", err: upstream(http.StatusBadGateway), retries: 8, setup: func(c *gin.Context) {
+			MarkMediaGenerationRequest(c, &relaycommon.RelayInfo{OriginModelName: "gpt-image-2.5-sunburst"})
+		}, want: PolicyDecision{Action: "stop", Reason: "media_generation_no_retry", Source: "request_type"}},
+		{name: "media channel error cannot bypass gate", err: types.NewError(errors.New("no key"), types.ErrorCodeChannelNoAvailableKey), retries: 8, setup: func(c *gin.Context) {
+			MarkMediaGenerationRequest(c, &relaycommon.RelayInfo{RelayFormat: types.RelayFormatOpenAIImage})
+		}, want: PolicyDecision{Action: "stop", Reason: "media_generation_no_retry", Source: "request_type"}},
+		{name: "media gate precedes failover", err: upstream(http.StatusServiceUnavailable), retries: 8, setup: func(c *gin.Context) {
+			c.Set(channelFailoverContextKey, &channelFailoverRequest{order: []int{1, 2}, visited: map[int]bool{1: true}, current: 1})
+			MarkMediaGenerationRequest(c, &relaycommon.RelayInfo{OriginModelName: "sora-2"})
+		}, want: PolicyDecision{Action: "stop", Reason: "media_generation_no_retry", Source: "request_type"}},
+		{name: "media success keeps completion reason", retries: 8, setup: func(c *gin.Context) {
+			MarkMediaGenerationRequest(c, &relaycommon.RelayInfo{RelayFormat: types.RelayFormatOpenAIImage})
+		}, want: PolicyDecision{Action: "stop", Reason: "request_completed", Source: "system"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, _ := gin.CreateTestContext(httptest.NewRecorder())
@@ -228,6 +244,148 @@ func TestDecideRelayRetryReasons(t *testing.T) {
 			decision := DecideRelayRetry(c, tc.err, tc.retries)
 			assert.Equal(t, tc.want, decision)
 			assert.Equal(t, tc.want.Action == "retry", ShouldRetryRelayError(c, tc.err, tc.retries))
+		})
+	}
+}
+
+func TestMarkMediaGenerationRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		info    relaycommon.RelayInfo
+		request kitdto.Request
+		raw     string
+		want    bool
+	}{
+		{name: "image protocol", info: relaycommon.RelayInfo{RelayFormat: types.RelayFormatOpenAIImage}, want: true},
+		{name: "image edits mode", info: relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeImagesEdits}, want: true},
+		{name: "video submission mode", info: relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeVideoSubmit}, want: true},
+		{name: "midjourney generation", info: relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeMidjourneyImagine}, want: true},
+		{name: "midjourney describe is understanding", info: relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeMidjourneyDescribe}},
+		{name: "task video action", info: relaycommon.RelayInfo{RelayFormat: types.RelayFormatTask, TaskRelayInfo: &relaycommon.TaskRelayInfo{Action: constant.TaskActionTextToVideo}}, want: true},
+		{name: "music shares video submit enum", info: relaycommon.RelayInfo{RelayFormat: types.RelayFormatTask, RelayMode: relayconstant.RelayModeVideoSubmit, OriginModelName: "suno_music"}},
+		{name: "legacy task constructor leaves format empty", info: relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeVideoSubmit, TaskRelayInfo: &relaycommon.TaskRelayInfo{Action: "generate"}, OriginModelName: "suno_music"}},
+		{name: "lyrics task", info: relaycommon.RelayInfo{RelayFormat: types.RelayFormatTask, OriginModelName: "suno_lyrics"}},
+		{name: "speech stays retryable", info: relaycommon.RelayInfo{RelayFormat: types.RelayFormatOpenAIAudio, RelayMode: relayconstant.RelayModeAudioSpeech, OriginModelName: "gpt-4o-mini-tts"}},
+		{name: "responses image tool", request: &kitdto.OpenAIResponsesRequest{}, raw: `{"tools":[{"type":"image_generation"}]}`, want: true},
+		{name: "responses video tool", request: &kitdto.OpenAIResponsesRequest{}, raw: `{"tools":[{"type":"video_generation"}]}`, want: true},
+		{name: "responses function name is not builtin", request: &kitdto.OpenAIResponsesRequest{}, raw: `{"tools":[{"type":"function","name":"image_generation"}]}`},
+		{name: "responses input image and prompt ignored", request: &kitdto.OpenAIResponsesRequest{}, raw: `{"model":"gpt-4o","input":[{"type":"message","content":[{"type":"input_image","image_url":"data:image/png;base64,AA"},{"type":"input_text","text":"image_generation video_generation"}]}]}`},
+		{name: "chat output image", request: &kitdto.GeneralOpenAIRequest{}, raw: `{"modalities":["text","image"]}`, want: true},
+		{name: "chat output video", request: &kitdto.GeneralOpenAIRequest{}, raw: `{"modalities":["VIDEO"]}`, want: true},
+		{name: "chat output audio", request: &kitdto.GeneralOpenAIRequest{}, raw: `{"modalities":["text","audio"]}`},
+		{name: "chat image tool", request: &kitdto.GeneralOpenAIRequest{}, raw: `{"tools":[{"type":"image_generation"}]}`, want: true},
+		{name: "chat function name ignored", request: &kitdto.GeneralOpenAIRequest{}, raw: `{"tools":[{"type":"function","function":{"name":"image_generation"}}]}`},
+		{name: "chat image config", request: &kitdto.GeneralOpenAIRequest{}, raw: `{"imageConfig":{}}`, want: true},
+		{name: "chat input video", request: &kitdto.GeneralOpenAIRequest{}, raw: `{"model":"video-understanding","messages":[{"role":"user","content":[{"type":"video_url","video_url":{"url":"https://example.invalid/input.mp4"}}]}]}`},
+		{name: "gemini image output", request: &kitdto.GeminiChatRequest{}, raw: `{"generationConfig":{"responseModalities":["TEXT","IMAGE"]}}`, want: true},
+		{name: "gemini snake image config", request: &kitdto.GeminiChatRequest{}, raw: `{"generationConfig":{"image_config":{}}}`, want: true},
+		{name: "gemini null image config", request: &kitdto.GeminiChatRequest{}, raw: `{"generationConfig":{"responseModalities":["TEXT"],"imageConfig":null}}`},
+		{name: "gemini input media", request: &kitdto.GeminiChatRequest{}, raw: `{"contents":[{"parts":[{"inlineData":{"mimeType":"image/png","data":"AA"}},{"fileData":{"mimeType":"video/mp4","fileUri":"https://example.invalid/input.mp4"}}]}]}`},
+		{name: "typed nil request", request: (*kitdto.OpenAIResponsesRequest)(nil)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.raw != "" {
+				require.NoError(t, common.UnmarshalJsonStr(tc.raw, tc.request))
+			}
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			tc.info.Request = tc.request
+			MarkMediaGenerationRequest(c, &tc.info)
+			assert.Equal(t, tc.want, IsMediaGenerationRequest(c))
+			MarkMediaGenerationRequest(c, &relaycommon.RelayInfo{OriginModelName: "gpt-4o"})
+			MarkMediaGenerationRequest(c, nil)
+			assert.Equal(t, tc.want, IsMediaGenerationRequest(c), "later conversions cannot clear generation intent")
+		})
+	}
+	assert.False(t, IsMediaGenerationRequest(nil))
+	MarkMediaGenerationRequest(nil, nil)
+}
+
+func TestMediaGenerationModelClassification(t *testing.T) {
+	previousDB := model.DB
+	model.DB = nil
+	t.Cleanup(func() { model.DB = previousDB })
+	for _, tc := range []struct {
+		model string
+		want  bool
+	}{
+		{"gpt-image-2", true}, {"gpt-image-2.5-flare", true}, {"gpt-image-2.5-sunburst", true},
+		{"dall-e-3", true}, {"black-forest-labs/FLUX.1-dev", true}, {"qwen-image-edit", true},
+		{"google/gemini-3.1-flash-image-preview", true}, {"gemini-2.0-flash-exp", true},
+		{"doubao-seedream-4-0-250828", true}, {"seedance-1-0-pro", true}, {"imagen-4.0-generate-001", true},
+		{"grok-imagine-image", true}, {"grok-imagine-video-1.5", true}, {"sora-2-pro", true},
+		{"veo-3.1-generate-preview", true}, {"kling-v3", true}, {"wan2.7-i2v", true},
+		{"gpt-4o", false}, {"gemini-2.5-pro", false}, {"qwen2.5-vl", false},
+		{"image-understanding", false}, {"video-understanding", false}, {"suno_music", false},
+		{"gpt-4o-mini-tts", false}, {"unknown-model-with-empty-catalog", false},
+	} {
+		t.Run(tc.model, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			info := &relaycommon.RelayInfo{OriginModelName: "custom-alias", ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: tc.model}}
+			MarkMediaGenerationRequest(c, info)
+			assert.Equal(t, tc.want, IsMediaGenerationRequest(c), "mapped generation identity works without a database")
+		})
+	}
+}
+
+func TestMarkMediaGenerationRequestBody(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		want       bool
+	}{
+		{"override adds image tool", `{"model":"gpt-4o","tools":[{"type":"image_generation"}]}`, true},
+		{"override adds video tool", `{"tools":[{"type":"video_generation"}]}`, true},
+		{"override maps model", `{"model":"gpt-image-2.5-sunburst"}`, true},
+		{"chat modalities", `{"modalities":["text","image"]}`, true},
+		{"gemini output modalities", `{"generationConfig":{"responseModalities":["IMAGE"]}}`, true},
+		{"gemini output video", `{"generationConfig":{"responseModalities":["VIDEO"]}}`, true},
+		{"gemini image config", `{"generationConfig":{"imageConfig":{}}}`, true},
+		{"gemini snake modalities", `{"generation_config":{"response_modalities":["IMAGE"]}}`, true},
+		{"gemini snake config", `{"generation_config":{"image_config":{}}}`, true},
+		{"chat image config", `{"imageConfig":{}}`, true},
+		{"chat google image config", `{"extra_body":{"google":{"image_config":{"aspect_ratio":"1:1"}}}}`, true},
+		{"function name does not generate", `{"tools":[{"type":"function","name":"image_generation","function":{"name":"video_generation"}}]}`, false},
+		{"input media and prompt ignored", `{"model":"gpt-4o","prompt":"image_generation","messages":[{"content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AA"}},{"type":"video_url","video_url":{"url":"https://example.invalid/input.mp4"}}]}]}`, false},
+		{"audio output unchanged", `{"model":"gpt-4o-audio-preview","modalities":["text","audio"]}`, false},
+		{"generation model remains single attempt for text output", `{"model":"gemini-3-pro-image","modalities":["text"]}`, true},
+		{"null image config", `{"generationConfig":{"responseModalities":["TEXT"],"imageConfig":null}}`, false},
+		{"empty body", ``, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			info := &relaycommon.RelayInfo{OriginModelName: "gpt-4o"}
+			MarkMediaGenerationRequestBody(c, info, []byte(tc.body))
+			assert.Equal(t, tc.want, IsMediaGenerationRequest(c))
+			MarkMediaGenerationRequestBody(c, info, []byte(`{"modalities":["text"]}`))
+			assert.Equal(t, tc.want, IsMediaGenerationRequest(c), "an override cannot undo an earlier generation match")
+		})
+	}
+}
+
+func TestMediaGenerationPluginModelScopes(t *testing.T) {
+	registry := jsplugin.NewRegistry()
+	plugin := &jsplugin.LoadedPlugin{Meta: jsplugin.Meta{
+		Key: "mixed-media", Models: []string{"custom-picture", "custom-movie", "custom-music"},
+		Protocols: []jsplugin.ProtocolClaim{
+			{Name: jsplugin.ProtocolOpenAIImage, Models: []string{"custom-picture"}},
+			{Name: "openai_video", Models: []string{"custom-movie"}},
+		},
+	}}
+	require.NoError(t, registry.ReplaceOverrides([]*jsplugin.LoadedPlugin{plugin}))
+	for _, tc := range []struct {
+		model string
+		want  bool
+	}{{"custom-picture", true}, {"CUSTOM-MOVIE", true}, {"custom-music", false}} {
+		t.Run(tc.model, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Set(jsplugin.ContextKeyPinnedPlugin, jsplugin.PinnedPlugin{Plugin: plugin, Generation: registry.Generation()})
+			MarkMediaGenerationRequest(c, &relaycommon.RelayInfo{RelayFormat: types.RelayFormatTask, RelayMode: relayconstant.RelayModeVideoSubmit, OriginModelName: tc.model})
+			assert.Equal(t, tc.want, IsMediaGenerationRequest(c))
+			bodyContext, _ := gin.CreateTestContext(httptest.NewRecorder())
+			bodyContext.Set(jsplugin.ContextKeyPinnedPlugin, jsplugin.PinnedPlugin{Plugin: plugin, Generation: registry.Generation()})
+			body, err := common.Marshal(map[string]string{"model": tc.model})
+			require.NoError(t, err)
+			MarkMediaGenerationRequestBody(bodyContext, nil, body)
+			assert.Equal(t, tc.want, IsMediaGenerationRequest(bodyContext), "final model uses the request's pinned plugin generation")
 		})
 	}
 }

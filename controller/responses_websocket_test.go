@@ -838,14 +838,20 @@ func TestResponsesWebSocketCancelErrorDoesNotFinishActiveRequest(t *testing.T) {
 }
 
 func TestResponsesPrimaryBackupFailover(t *testing.T) {
-	for _, scenario := range []string{"websocket recovery", "websocket after output", "http zero retries"} {
+	for _, scenario := range []string{"websocket recovery", "websocket after output", "http zero retries", "websocket image tool", "websocket image tool reused", "websocket image tool override", "websocket image passthrough extension", "websocket text after image"} {
 		t.Run(scenario, func(t *testing.T) {
 			const input = `[{"type":"reasoning","encrypted_content":"original-reasoning"},{"type":"compaction","encrypted_content":"original-compaction"}]`
+			mediaScenario := strings.HasPrefix(scenario, "websocket image")
+			textAfterMedia := scenario == "websocket text after image"
 			var primaryReady atomic.Bool
 			var primaryCalls, backupCalls, readyChecks atomic.Int32
 			primaryBodies, backupBodies := make(chan []byte, 4), make(chan []byte, 4)
 			recoveryBarrier := make(chan struct{})
-			fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.000002))`, func(ws *websocket.Conn, _ *http.Request) {
+			expression := `tier("request", fixed(0.000002))`
+			if mediaScenario || textAfterMedia {
+				expression = `tier("request", fixed(0))`
+			}
+			fixture := newResponsesWSBillingTest(t, expression, func(ws *websocket.Conn, _ *http.Request) {
 				for {
 					_, body, err := ws.ReadMessage()
 					if err != nil {
@@ -934,6 +940,48 @@ func TestResponsesPrimaryBackupFailover(t *testing.T) {
 				"channel_failover_setting.model_regex": `["^ws-billing$"]`, "channel_failover_setting.poll_interval_seconds": "1", "channel_failover_setting.recovery_successes": "2", "RetryTimes": "0",
 				"channel_affinity_setting.enabled": "false",
 			}))
+			if mediaScenario || textAfterMedia {
+				var primingCalls int32
+				if scenario == "websocket image tool reused" || textAfterMedia {
+					primaryReady.Store(true)
+					tools := ""
+					if textAfterMedia {
+						tools = `,"tools":[{"type":"image_generation"}]`
+					}
+					require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":`+input+tools+`}`)))
+					require.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
+					assert.EqualValues(t, 1, fixture.connections.Load())
+					primingCalls = 1
+					primaryReady.Store(false)
+				}
+				tools := ""
+				if mediaScenario {
+					tools = `,"tools":[{"type":"image_generation"}]`
+				}
+				if scenario == "websocket image tool override" {
+					require.NoError(t, model.DB.Model(fixture.channel).Update("param_override", `{"tools":[{"type":"image_generation"}]}`).Error)
+					tools = ""
+				}
+				if scenario == "websocket image passthrough extension" {
+					fixture.channel.SetSetting(dto.ChannelSettings{ResponsesWebSocketEnabled: true, PassThroughBodyEnabled: true})
+					require.NoError(t, model.DB.Model(fixture.channel).Update("setting", fixture.channel.Setting).Error)
+					tools = `,"image_config":{}`
+				}
+				require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":`+input+tools+`}`)))
+				terminal := readResponsesWSTestEvent(t, fixture.client)
+				if mediaScenario {
+					assert.Equal(t, "error", terminal["type"], "%v", terminal)
+					assert.EqualValues(t, http.StatusServiceUnavailable, terminal["status"])
+					assert.Zero(t, backupCalls.Load(), "media generation must not reach the backup")
+				} else {
+					require.Equal(t, "response.completed", terminal["type"], "%v", terminal)
+					assert.Equal(t, "backup-1", terminal["response"].(map[string]any)["id"])
+					assert.EqualValues(t, 1, backupCalls.Load(), "a previous media turn must not suppress text failover")
+				}
+				assert.Equal(t, primingCalls+1, primaryCalls.Load())
+				fixture.closeAndWait(t)
+				return
+			}
 			if scenario == "http zero retries" {
 				request, err := http.NewRequest(http.MethodPost, fixture.gatewayURL+"/v1/responses", strings.NewReader(`{"model":"ws-billing","input":`+input+`}`))
 				require.NoError(t, err)

@@ -16,6 +16,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/QuantumNous/new-api/dto"
@@ -28,6 +29,140 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestMediaGenerationRelaySingleAttempt(t *testing.T) {
+	db := modelManagementDB(t, "sqlite", "")
+	require.NoError(t, db.AutoMigrate(&model.UserSubscription{}, &model.SubscriptionPlan{}))
+	previousRetries, previousCount := common.RetryTimes, constant.CountToken
+	previousErrorLog, previousAutoDisable := constant.ErrorLogEnabled, common.AutomaticDisableChannelEnabled
+	common.RetryTimes, constant.CountToken = 2, false
+	constant.ErrorLogEnabled, common.AutomaticDisableChannelEnabled = false, false
+	t.Cleanup(func() {
+		common.RetryTimes, constant.CountToken = previousRetries, previousCount
+		constant.ErrorLogEnabled, common.AutomaticDisableChannelEnabled = previousErrorLog, previousAutoDisable
+	})
+	require.NoError(t, i18n.Init())
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1}`))
+	user := &model.User{Username: "media-retry-test", Group: "default", Status: common.UserStatusEnabled, Quota: 100000}
+	require.NoError(t, db.Create(user).Error)
+	service.InitHttpClient()
+
+	for _, tc := range []struct {
+		name, path, model, body, mapped string
+		override                        string
+		format                          types.RelayFormat
+		status, attempts                int
+	}{
+		{name: "image generation 502", path: "/v1/images/generations", model: "custom-image", body: `{"model":"custom-image","prompt":"draw a tree","n":1}`, format: types.RelayFormatOpenAIImage, status: 502, attempts: 1},
+		{name: "image edit 429", path: "/v1/images/edits", model: "gpt-image-2", body: `{"model":"gpt-image-2","prompt":"edit","image":"https://example.invalid/image.png"}`, format: types.RelayFormatOpenAIImage, status: 429, attempts: 1},
+		{name: "responses image tool", path: "/v1/responses", model: "gpt-4o", body: `{"model":"gpt-4o","input":"draw a tree","tools":[{"type":"image_generation"}]}`, format: types.RelayFormatOpenAIResponses, status: 502, attempts: 1},
+		{name: "channel injects image tool", path: "/v1/responses", model: "gpt-4o", body: `{"model":"gpt-4o","input":"draw a tree"}`, override: `{"tools":[{"type":"image_generation"}]}`, format: types.RelayFormatOpenAIResponses, status: 503, attempts: 1},
+		{name: "mapped image model over chat", path: "/v1/chat/completions", model: "drawing-alias", mapped: "gpt-image-2.5-sunburst", body: `{"model":"drawing-alias","messages":[{"role":"user","content":"draw a tree"}]}`, format: types.RelayFormatOpenAI, status: 502, attempts: 1},
+		{name: "text keeps retries", path: "/v1/chat/completions", model: "gpt-4o", body: `{"model":"gpt-4o","messages":[{"role":"user","content":"hello"}]}`, format: types.RelayFormatOpenAI, status: 502, attempts: 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var attempts atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				attempts.Add(1)
+				if tc.override != "" {
+					var body map[string]any
+					if !assert.NoError(t, common.DecodeJson(r.Body, &body)) {
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					assert.Equal(t, []any{map[string]any{"type": "image_generation"}}, body["tools"])
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(`{"error":{"message":"generation unavailable","type":"upstream_error","code":"upstream_unavailable"}}`))
+			}))
+			t.Cleanup(upstream.Close)
+			ch := &model.Channel{Type: constant.ChannelTypeOpenAI, Name: tc.name, Key: "test-key", Status: common.ChannelStatusEnabled, Group: "default", Models: tc.model, BaseURL: &upstream.URL}
+			if tc.override != "" {
+				ch.ParamOverride = &tc.override
+			}
+			if tc.mapped != "" {
+				mapping, err := common.Marshal(map[string]string{tc.model: tc.mapped})
+				require.NoError(t, err)
+				ch.ModelMapping = common.GetPointer(string(mapping))
+			}
+			require.NoError(t, db.Create(ch).Error)
+			require.NoError(t, ch.AddAbilities(db))
+			t.Cleanup(func() {
+				require.NoError(t, db.Where("channel_id = ?", ch.Id).Delete(&model.Ability{}).Error)
+				require.NoError(t, db.Delete(ch).Error)
+			})
+			prices, err := common.Marshal(map[string]float64{tc.model: 0})
+			require.NoError(t, err)
+			require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(string(prices)))
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			c.Request.Header.Set("Content-Type", "application/json")
+			common.SetContextKey(c, constant.ContextKeyOriginalModel, tc.model)
+			common.SetContextKey(c, constant.ContextKeyUserId, user.Id)
+			common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+			common.SetContextKey(c, constant.ContextKeyUserGroup, "default")
+			common.SetContextKey(c, constant.ContextKeyTokenGroup, "default")
+			require.Nil(t, middleware.SetupContextForSelectedChannel(c, ch, tc.model))
+			t.Cleanup(func() { service.ReleaseChannelConcurrency(c) })
+
+			Relay(c, tc.format)
+
+			assert.Equal(t, tc.status, recorder.Code, recorder.Body.String())
+			assert.Contains(t, recorder.Body.String(), "generation unavailable")
+			assert.EqualValues(t, tc.attempts, attempts.Load(), "failed generation must not be submitted again")
+			assert.Len(t, c.GetStringSlice("use_channel"), tc.attempts)
+			if tc.attempts == 1 {
+				events := service.RequestPolicy(c).Events()
+				require.NotEmpty(t, events)
+				assert.Equal(t, "media_generation_no_retry", events[len(events)-1].Decision.Reason)
+			}
+		})
+	}
+}
+
+func TestMediaGenerationTaskSubmissionSingleAttempt(t *testing.T) {
+	previousRetries, previousErrorLog := common.RetryTimes, constant.ErrorLogEnabled
+	common.RetryTimes, constant.ErrorLogEnabled = 2, false
+	t.Cleanup(func() { common.RetryTimes, constant.ErrorLogEnabled = previousRetries, previousErrorLog })
+	for _, tc := range []struct {
+		name, path, model string
+		locked            bool
+		attempts          int
+	}{
+		{name: "video create", path: "/v1/videos", model: "custom-model", attempts: 1},
+		{name: "video remix on origin channel", path: "/v1/videos/task_original/remix", model: "sora-2", locked: true, attempts: 1},
+		{name: "native image task", path: "/vendor/jobs", model: "gpt-image-2", locked: true, attempts: 1},
+		{name: "music keeps retries", path: "/vendor/jobs", model: "suno-v4", attempts: 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := taskSubmissionTestContext()
+			c.Request = httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(`{}`))
+			events := []string{}
+			billing := &taskSubmissionTestBilling{events: &events}
+			info := taskSubmissionRelayInfo(billing)
+			info.RelayFormat, info.OriginModelName = types.RelayFormatTask, tc.model
+			if !tc.locked {
+				info.ChannelMeta, info.LockedChannel = nil, nil
+			}
+			t.Cleanup(func() { service.ReleaseChannelConcurrency(c) })
+			upstreamErr := &dto.TaskError{StatusCode: 502, Code: "upstream_unavailable", Message: "generation unavailable"}
+			attempts := 0
+
+			outcome, taskErr := executeTaskSubmissionWith(c, info, func(*gin.Context, *relaycommon.RelayInfo) (*relay.TaskSubmitResult, *dto.TaskError) {
+				attempts++
+				return nil, upstreamErr
+			})
+
+			assert.Nil(t, outcome)
+			assert.Same(t, upstreamErr, taskErr)
+			assert.Equal(t, tc.attempts, attempts)
+			assert.Equal(t, 1, billing.refunds, "failed submission refunds its reservation exactly once")
+			assert.Equal(t, []string{"refund"}, events)
+		})
+	}
+}
 
 func TestShouldRetryHonorsPinRetryMode(t *testing.T) {
 	openaiErr := types.NewOpenAIError(errors.New("upstream"), types.ErrorCodeBadResponseStatusCode, http.StatusInternalServerError)

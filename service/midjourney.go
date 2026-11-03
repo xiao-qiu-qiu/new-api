@@ -345,6 +345,19 @@ func DoMidjourneyHttpRequest(c *gin.Context, timeout time.Duration, fullRequestU
 		req.Header.Set("mj-api-secret", auth)
 	}
 	defer cancel()
+	if c.Request.Method == http.MethodPost {
+		relayMode := relayconstant.Path2RelayModeMidjourney(c.Request.URL.Path)
+		switch relayMode {
+		case relayconstant.RelayModeUnknown, relayconstant.RelayModeMidjourneyTaskFetch,
+			relayconstant.RelayModeMidjourneyTaskFetchByCondition, relayconstant.RelayModeMidjourneyTaskImageSeed,
+			relayconstant.RelayModeMidjourneyNotify:
+		default:
+			MarkMediaGenerationRequest(c, &relaycommon.RelayInfo{RelayMode: relayMode})
+			if IsMediaGenerationRequest(c) {
+				req.GetBody = nil
+			}
+		}
+	}
 	resp, err := GetHttpClient().Do(req)
 	if err != nil {
 		common.SysLog(common.LogText("do request failed: %s", err.Error()))

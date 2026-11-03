@@ -115,6 +115,7 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 			}
 		}
 
+		service.MarkMediaGenerationRequestBody(c, info, jsonData)
 		logger.LogDebug(c, "Gemini request body: %s", jsonData)
 
 		body, closer, err := relaycommon.NewOutboundJSONBody(jsonData)
