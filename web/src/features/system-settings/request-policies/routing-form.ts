@@ -12,6 +12,45 @@ export function createRoutingPolicySchema(t: TFunction) {
         (value) => parseHttpStatusCodeRules(value).ok,
         t('Invalid status code rules')
       ),
+    channel_failover_setting: z
+      .object({
+        enabled: z.boolean(),
+        primary_channel_id: z.number().int().min(0),
+        fallback_channel_id: z.number().int().min(0),
+        model_regex: z.string(),
+        poll_interval_seconds: z.number().int().min(1).max(60),
+        recovery_successes: z.number().int().min(1).max(10),
+      })
+      .superRefine((value, context) => {
+        if (
+          value.enabled &&
+          (value.primary_channel_id <= 0 ||
+            value.fallback_channel_id <= 0 ||
+            value.primary_channel_id === value.fallback_channel_id)
+        ) {
+          context.addIssue({
+            code: 'custom',
+            path: ['fallback_channel_id'],
+            message: t('Choose two different channels'),
+          })
+        }
+        const patterns = value.model_regex
+          .split('\n')
+          .map((pattern) => pattern.trim())
+          .filter(Boolean)
+        if (
+          patterns.length > 32 ||
+          patterns.some(
+            (pattern) => new TextEncoder().encode(pattern).length > 256
+          )
+        ) {
+          context.addIssue({
+            code: 'custom',
+            path: ['model_regex'],
+            message: t('Use up to 32 model patterns, each at most 256 bytes'),
+          })
+        }
+      }),
     channel_affinity_setting: z.object({
       enabled: z.boolean(),
       session_mode: z.enum(['', 'off', 'prefer', 'strict']),
@@ -49,6 +88,25 @@ export function routingPolicyFormValues(
   return {
     RetryTimes: Number(options.RetryTimes),
     AutomaticRetryStatusCodes: options.AutomaticRetryStatusCodes,
+    channel_failover_setting: {
+      enabled: options['channel_failover_setting.enabled'] === 'true',
+      primary_channel_id: Number(
+        options['channel_failover_setting.primary_channel_id'] || 0
+      ),
+      fallback_channel_id: Number(
+        options['channel_failover_setting.fallback_channel_id'] || 0
+      ),
+      model_regex: (
+        (JSON.parse(options['channel_failover_setting.model_regex'] || '[]') ??
+          []) as string[]
+      ).join('\n'),
+      poll_interval_seconds: Number(
+        options['channel_failover_setting.poll_interval_seconds'] || 3
+      ),
+      recovery_successes: Number(
+        options['channel_failover_setting.recovery_successes'] || 2
+      ),
+    },
     channel_affinity_setting: {
       enabled: options['channel_affinity_setting.enabled'] === 'true',
       session_mode: (options['channel_affinity_setting.session_mode'] ||
@@ -72,6 +130,19 @@ export function routingPolicyOptions(
   return {
     RetryTimes: String(values.RetryTimes),
     AutomaticRetryStatusCodes: values.AutomaticRetryStatusCodes,
+    ...Object.fromEntries(
+      Object.entries(values.channel_failover_setting).map(([key, value]) => [
+        `channel_failover_setting.${key}`,
+        key === 'model_regex'
+          ? JSON.stringify(
+              String(value)
+                .split('\n')
+                .map((pattern) => pattern.trim())
+                .filter(Boolean)
+            )
+          : String(value),
+      ])
+    ),
     ...Object.fromEntries(
       Object.entries(values.channel_affinity_setting).map(([key, value]) => [
         `channel_affinity_setting.${key}`,

@@ -103,6 +103,8 @@ type responsesWSSession struct {
 	targetWriteMu sync.Mutex
 	connectionMu  sync.Mutex
 	target        *websocket.Conn
+	targetCancel  context.CancelFunc
+	targetDone    <-chan struct{}
 	unregister    func()
 	stateMu       sync.Mutex
 	current       *responsesWSCallState
@@ -290,11 +292,27 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 	common.SetContextKey(c, appconstant.ContextKeyRequestStartTime, time.Now())
 	service.GetChannelConstraints(c).AddFilter(appdto.ChannelFilter{Kind: appdto.FilterRequestPath, RequestPath: c.Request.URL.Path})
 	service.SetRequestServiceTierFilter(c, modelName, create.Request.ServiceTier)
+	service.GetChannelConstraints(c).AddFilter(appdto.ChannelFilter{Kind: appdto.FilterResponsesWebSocket})
+	retry := &service.RetryParam{Ctx: c, TokenGroup: common.GetContextKeyString(c, appconstant.ContextKeyUsingGroup), ModelName: modelName, RequestPath: c.Request.URL.Path, Retry: common.GetPointer(0)}
+	var firstChannel *appmodel.Channel
+	if s.lockedChannelID != 0 && service.ChannelFailoverMayReroute(c, modelName, retry.TokenGroup, s.lockedChannelID) {
+		firstChannel, apiErr = selectResponsesWSChannel(c, modelName, retry)
+		if apiErr != nil {
+			groupSelectionFailed = true
+			return apiErr
+		}
+		if firstChannel.Id == s.lockedChannelID {
+			firstChannel = nil
+		} else {
+			s.detachTarget()
+		}
+	}
 
 	groupProbes = service.PassiveGroupProbes("", modelName)
 	if len(groupProbes) > 0 {
 		groupProbeObserver = service.NewChannelProbeObserverAt(nil, started)
 	}
+routeAttempt:
 	if s.lockedChannelID != 0 {
 		if apiErr = s.restoreConnectionContext(c, modelName); apiErr != nil {
 			groupSelectionFailed = true
@@ -321,10 +339,13 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			return types.NewError(err, types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
 		}
 	} else {
-		retry := &service.RetryParam{Ctx: c, TokenGroup: common.GetContextKeyString(c, appconstant.ContextKeyUsingGroup), ModelName: modelName, RequestPath: c.Request.URL.Path, Retry: common.GetPointer(0)}
-		for ; retry.GetRetry() <= common.RetryTimes; retry.IncreaseRetry() {
+		for ; retry.GetRetry() <= service.ChannelFailoverRetryBudget(c); retry.IncreaseRetry() {
 			var channel *appmodel.Channel
-			channel, apiErr = selectResponsesWSChannel(c, modelName, retry)
+			if firstChannel != nil {
+				channel, firstChannel = firstChannel, nil
+			} else {
+				channel, apiErr = selectResponsesWSChannel(c, modelName, retry)
+			}
 			if apiErr != nil {
 				groupSelectionFailed = true
 				return apiErr
@@ -366,7 +387,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				}
 				service.ResetStatusCode(apiErr, c.GetString("status_code_mapping"))
 				info.LastError = apiErr
-				decision := service.DecideRelayRetry(c, apiErr, common.RetryTimes-retry.GetRetry())
+				decision := service.DecideRelayRetry(c, apiErr, service.ChannelFailoverRetryBudget(c)-retry.GetRetry())
 				service.RecordPolicyFailure(c, channel.Id, apiErr, decision)
 				service.ProcessChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, info.ApiKey, channel.GetAutoBan()), apiErr, info)
 				if decision.Action == "retry" {
@@ -418,6 +439,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 	idle := time.NewTimer(timeout)
 	defer idle.Stop()
 	accepted := false
+	forwarded := false
 	var pendingControl []byte
 	var sentControl []byte
 	var responseID string
@@ -440,6 +462,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				info.StreamStatus.RecordError("invalid upstream websocket event")
 			} else {
 				if event.Type != "error" && event.StreamID != "" && event.StreamID != create.StreamID {
+					forwarded = true
 					if err := s.writeClient(incoming.kind, incoming.body); err != nil {
 						s.shutdown(websocket.CloseInternalServerErr, "")
 					}
@@ -458,6 +481,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 					}
 					terminal, ambiguous, controlError := responsesWSErrorEndsRequest(rejection, create.StreamID, responseID, sentControl)
 					if !terminal {
+						forwarded = true
 						if err := s.writeClient(incoming.kind, incoming.body); err != nil {
 							s.shutdown(websocket.CloseInternalServerErr, "")
 						}
@@ -496,6 +520,23 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 					if rejected.StatusCode < 400 || rejected.StatusCode > 599 {
 						rejected.StatusCode = http.StatusBadRequest
 					}
+					if !service.HasChannelFailover(c) {
+						return rejected
+					}
+					decision := service.DecideRelayRetry(c, rejected, service.ChannelFailoverRetryBudget(c)-retry.GetRetry())
+					if forwarded {
+						decision = service.PolicyDecision{Action: "stop", Reason: "response_started", Source: "channel_failover"}
+					}
+					service.RecordPolicyFailure(c, s.lockedChannelID, rejected, decision)
+					if decision.Action == "retry" {
+						if probeObserver != nil {
+							service.RecordPassiveChannelProbeResult(probes, probeObserver.Result(c.Request.Context(), info, rejected))
+							probeObserver = nil
+						}
+						s.detachTarget()
+						retry.IncreaseRetry()
+						goto routeAttempt
+					}
 					return rejected
 				}
 				probeObserver.ObserveEvent(incoming.body)
@@ -522,6 +563,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 				ConsumeResponsesQuota(c, info, accumulator.Finish())
 				return nil
 			}
+			forwarded = true
 			if err := s.writeClient(incoming.kind, incoming.body); err != nil {
 				s.shutdown(websocket.CloseInternalServerErr, "")
 			}
@@ -704,9 +746,19 @@ func (s *responsesWSSession) startTargetReader(target *websocket.Conn) {
 		limit = int64(appconstant.StreamScannerMaxBufferMB) << 20
 	}
 	target.SetReadLimit(limit)
+	readerContext, cancelReader := context.WithCancel(s.ctx)
+	done := make(chan struct{})
+	s.connectionMu.Lock()
+	s.targetCancel, s.targetDone = cancelReader, done
+	s.connectionMu.Unlock()
 	s.workers.Go(func() {
+		defer close(done)
+		defer cancelReader()
 		for {
 			kind, body, err := target.ReadMessage()
+			if readerContext.Err() != nil || s.getTarget() != target {
+				return
+			}
 			incoming := responsesWSMessage{kind: kind, body: body, err: err}
 			if state := s.getCurrent(); state != nil {
 				select {
@@ -716,7 +768,7 @@ func (s *responsesWSSession) startTargetReader(target *websocket.Conn) {
 					}
 					continue
 				case <-state.done:
-				case <-s.ctx.Done():
+				case <-readerContext.Done():
 					return
 				}
 			}
@@ -736,6 +788,34 @@ func (s *responsesWSSession) startTargetReader(target *websocket.Conn) {
 			}
 		}
 	})
+}
+
+// Detach only between creates or after an explicit rejection before output.
+// The old reader exits before the new connection can deliver frames, so a
+// close/error from the retired socket cannot end the replacement request.
+func (s *responsesWSSession) detachTarget() {
+	s.connectionMu.Lock()
+	target, unregister, cancelReader, done := s.target, s.unregister, s.targetCancel, s.targetDone
+	s.target, s.unregister, s.targetCancel, s.targetDone = nil, nil, nil, nil
+	s.connectionMu.Unlock()
+	if unregister != nil {
+		unregister()
+	}
+	if cancelReader != nil {
+		cancelReader()
+	}
+	if target != nil {
+		_ = target.Close()
+	}
+	if done != nil {
+		<-done
+	}
+	if state := s.getCurrent(); state != nil {
+		for len(state.inbox) > 0 {
+			<-state.inbox
+		}
+	}
+	s.lockedChannelID = 0
 }
 
 func (s *responsesWSSession) getCurrent() *responsesWSCallState {

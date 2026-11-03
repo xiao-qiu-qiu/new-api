@@ -27,6 +27,8 @@ import (
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	"github.com/QuantumNous/new-api/pkg/wsmanager"
 	"github.com/QuantumNous/new-api/relay"
+	relaychannel "github.com/QuantumNous/new-api/relay/channel"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	kitutil "github.com/QuantumNous/new-api/relaykit/relayconvert/kitutil"
 	"github.com/QuantumNous/new-api/router"
 	"github.com/QuantumNous/new-api/service"
@@ -106,6 +108,12 @@ func main() {
 		go model.SyncChannelCache(common.SyncFrequency)
 	}
 	wsmanager.StartSubscriber(context.Background())
+	service.ApplyChannelFailoverProbeHeaders = func(info *relaycommon.RelayInfo, request *http.Request) error {
+		return relaychannel.ApplyHeaderOverride(info, nil, request)
+	}
+	failoverContext, stopFailover := context.WithCancel(context.Background())
+	defer stopFailover()
+	go service.RunChannelFailoverRuntime(failoverContext)
 
 	// Warm pricing after channel cache initialization so Advanced Custom
 	// endpoint inference can read cached route settings on first request.
@@ -230,6 +238,7 @@ func main() {
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-quit
+	stopFailover()
 	common.SysLog(common.LogText("received signal: %v, shutting down...", sig))
 
 	// SSE streams may run for minutes; give them time to finish before forced exit

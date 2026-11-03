@@ -25,6 +25,12 @@ import { SettingsPageProvider } from '../../components/settings-page-context'
 import { RoutingPolicySection } from '../routing-section'
 
 const options = {
+  'channel_failover_setting.enabled': 'false',
+  'channel_failover_setting.primary_channel_id': '0',
+  'channel_failover_setting.fallback_channel_id': '0',
+  'channel_failover_setting.model_regex': '[]',
+  'channel_failover_setting.poll_interval_seconds': '3',
+  'channel_failover_setting.recovery_successes': '2',
   RetryTimes: '2',
   'channel_affinity_setting.enabled': 'true',
   'channel_affinity_setting.session_mode': '',
@@ -57,24 +63,38 @@ beforeEach(() => {
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   })
   currentOptions = { ...options }
-  vi.spyOn(api, 'get').mockImplementation(async (url) => ({
-    data: {
-      success: true,
-      data:
-        url === '/api/option/request_policy'
-          ? {
-              options: currentOptions,
-            }
-          : {
-              enabled: true,
-              total: 2,
-              unknown: 0,
-              by_rule_name: { 'Session rule': 2 },
-              cache_capacity: 100000,
-              cache_algo: 'lru',
-            },
-    },
-  }))
+  vi.spyOn(api, 'get').mockImplementation(async (url) => {
+    if (url === '/api/option/request_policy') {
+      return { data: { success: true, data: { options: currentOptions } } }
+    }
+    if (url === '/api/channel') {
+      return {
+        data: {
+          success: true,
+          data: {
+            items: [
+              { id: 101, name: 'Primary pool', models: 'model-a' },
+              { id: 102, name: 'Backup pool', models: 'model-a' },
+            ],
+            total: 2,
+          },
+        },
+      }
+    }
+    return {
+      data: {
+        success: true,
+        data: {
+          enabled: true,
+          total: 2,
+          unknown: 0,
+          by_rule_name: { 'Session rule': 2 },
+          cache_capacity: 100000,
+          cache_algo: 'lru',
+        },
+      },
+    }
+  })
   vi.spyOn(api, 'patch').mockImplementation(async (_url, request) => {
     currentOptions = {
       ...currentOptions,
@@ -118,6 +138,106 @@ function show() {
     </QueryClientProvider>
   )
 }
+
+it('enabling failover selects primary and backup channels and saves with the routing draft', async () => {
+  show()
+  const toggle = await screen.findByRole('switch', {
+    name: 'Automatic failover and recovery',
+  })
+  const primary = screen.getByRole('combobox', {
+    name: 'Primary channel (Sub2API)',
+  })
+  const backup = screen.getByRole('combobox', { name: 'Backup channel' })
+  expect(primary).toBeDisabled()
+  expect(backup).toBeDisabled()
+  await userEvent.click(toggle)
+  await waitFor(() => expect(primary).toBeEnabled())
+  await userEvent.click(primary)
+  await userEvent.click(
+    await screen.findByRole('option', { name: 'Primary pool (#101)' })
+  )
+  await userEvent.click(backup)
+  await userEvent.click(
+    await screen.findByRole('option', { name: 'Backup pool (#102)' })
+  )
+  fireEvent.change(
+    screen.getByRole('textbox', { name: 'Model patterns (one per line)' }),
+    {
+      target: { value: '^gpt-\n^model-' },
+    }
+  )
+  await userEvent.click(
+    screen.getByRole('button', { name: 'Availability checks' })
+  )
+  fireEvent.change(
+    screen.getByRole('spinbutton', { name: 'Check interval (seconds)' }),
+    {
+      target: { value: '5' },
+    }
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1))
+  expect(currentOptions).toMatchObject({
+    'channel_failover_setting.enabled': 'true',
+    'channel_failover_setting.primary_channel_id': '101',
+    'channel_failover_setting.fallback_channel_id': '102',
+    'channel_failover_setting.model_regex': '["^gpt-","^model-"]',
+    'channel_failover_setting.poll_interval_seconds': '5',
+    'channel_failover_setting.recovery_successes': '2',
+    'channel_affinity_setting.rules': options['channel_affinity_setting.rules'],
+  })
+})
+
+it('using the same primary and backup blocks saving until automatic failover is disabled', async () => {
+  currentOptions = {
+    ...currentOptions,
+    'channel_failover_setting.enabled': 'true',
+    'channel_failover_setting.primary_channel_id': '101',
+    'channel_failover_setting.fallback_channel_id': '101',
+  }
+  show()
+  await screen.findByRole('switch', { name: 'Automatic failover and recovery' })
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  expect(await screen.findByText('Choose two different channels')).toBeVisible()
+  expect(api.patch).not.toHaveBeenCalled()
+  await userEvent.click(
+    screen.getByRole('switch', { name: 'Automatic failover and recovery' })
+  )
+  await userEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+  await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1))
+  expect(currentOptions['channel_failover_setting.enabled']).toBe('false')
+})
+
+it('a failed channel lookup preserves the saved channel and allows retrying', async () => {
+  currentOptions = {
+    ...currentOptions,
+    'channel_failover_setting.enabled': 'true',
+    'channel_failover_setting.primary_channel_id': '101',
+    'channel_failover_setting.fallback_channel_id': '102',
+  }
+  const original = vi.mocked(api.get).getMockImplementation()
+  expect(original).toBeDefined()
+  let unavailable = true
+  vi.mocked(api.get).mockImplementation(async (...args) => {
+    if (args[0] === '/api/channel' && unavailable) {
+      throw new Error('lookup unavailable')
+    }
+    return original?.(...args)
+  })
+  show()
+  expect(await screen.findByText('Failed to load channels')).toBeVisible()
+  const primary = screen.getByRole('combobox', {
+    name: 'Primary channel (Sub2API)',
+  })
+  expect(primary).toHaveValue('Channel #101')
+  expect(primary).toBeDisabled()
+  unavailable = false
+  await userEvent.click(screen.getByRole('button', { name: 'Retry' }))
+  await waitFor(() => expect(primary).toHaveValue('Primary pool (#101)'))
+  expect(primary).toBeEnabled()
+  expect(api.patch).not.toHaveBeenCalled()
+})
+
 it('opens global affinity settings and the complete rules table without switching views', async () => {
   show()
   expect(await screen.findByRole('table')).toBeVisible()

@@ -88,11 +88,39 @@ func TestRequestPolicyDatabaseMatrix(t *testing.T) {
 			loadOptionsFromDatabase()
 			assert.Equal(t, rules, CurrentRequestPolicy().Options["channel_affinity_setting.rules"], "legacy rule JSON survives reloads without dropping extension fields")
 			require.NoError(t, UpdateRequestPolicyOptions(map[string]string{"channel_affinity_setting.session_mode": "strict"}))
+			failover := map[string]string{
+				"channel_failover_setting.enabled":               "true",
+				"channel_failover_setting.primary_channel_id":    "101",
+				"channel_failover_setting.fallback_channel_id":   "102",
+				"channel_failover_setting.model_regex":           `["^gpt-"]`,
+				"channel_failover_setting.poll_interval_seconds": "3",
+				"channel_failover_setting.recovery_successes":    "2",
+			}
+			require.NoError(t, UpdateRequestPolicyOptions(failover))
 			loadOptionsFromDatabase()
 			loadOptionsFromDatabase()
+			assert.Equal(t, operation_setting.ChannelFailoverSetting{
+				Enabled: true, PrimaryChannelID: 101, FallbackChannelID: 102,
+				ModelRegex: []string{"^gpt-"}, PollIntervalSeconds: 3, RecoverySuccesses: 2,
+			}, CurrentRequestPolicy().Failover)
+			assert.Equal(t, CurrentRequestPolicy().Failover, *operation_setting.GetChannelFailoverSetting())
 			assert.Equal(t, "strict", CurrentRequestPolicy().Affinity.SessionMode)
 			assert.Equal(t, rules, CurrentRequestPolicy().Options["channel_affinity_setting.rules"], "a global mode never rewrites rule fields")
 			snapshot := CurrentRequestPolicy()
+			for _, invalid := range []map[string]string{
+				{"channel_failover_setting.primary_channel_id": "102"},
+				{"channel_failover_setting.fallback_channel_id": "0"},
+				{"channel_failover_setting.model_regex": `["["]`},
+				{"channel_failover_setting.poll_interval_seconds": "0"},
+				{"channel_failover_setting.poll_interval_seconds": "61"},
+				{"channel_failover_setting.recovery_successes": "0"},
+				{"channel_failover_setting.recovery_successes": "11"},
+				{"channel_failover_setting.enabled": "yes"},
+				{"channel_failover_setting.unknown": "true"},
+			} {
+				assert.Error(t, UpdateRequestPolicyOptions(invalid))
+				assert.Same(t, snapshot, CurrentRequestPolicy())
+			}
 			assert.Error(t, UpdateRequestPolicyOptions(map[string]string{"channel_affinity_setting.session_mode": "unknown"}))
 			assert.Same(t, snapshot, CurrentRequestPolicy())
 			for _, value := range []string{"-1", "1.5", "bad", strconv.Itoa(math.MaxInt)} {

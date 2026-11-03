@@ -24,6 +24,7 @@ import (
 // the runtime globals updated by the same write never disagree with it.
 type RequestPolicySnapshot struct {
 	Affinity        operation_setting.ChannelAffinitySetting
+	Failover        operation_setting.ChannelFailoverSetting
 	RetryTimes      int
 	RetryCodes      []operation_setting.StatusCodeRange
 	DisableCodes    []operation_setting.StatusCodeRange
@@ -42,6 +43,7 @@ func requestPolicyDefaultOptions() map[string]string {
 	defaults := make(map[string]string)
 	for prefix, value := range map[string]any{
 		"channel_affinity_setting.": operation_setting.GetChannelAffinitySetting(),
+		"channel_failover_setting.": operation_setting.GetChannelFailoverSetting(),
 		"monitor_setting.":          operation_setting.GetMonitorSetting(),
 	} {
 		fields, err := config.ConfigToMap(value)
@@ -66,7 +68,7 @@ func requestPolicyDefaultOptions() map[string]string {
 }
 
 func IsRequestPolicyOption(key string) bool {
-	if strings.HasPrefix(key, "channel_affinity_setting.") {
+	if strings.HasPrefix(key, "channel_affinity_setting.") || strings.HasPrefix(key, "channel_failover_setting.") {
 		return true
 	}
 	switch key {
@@ -125,6 +127,27 @@ func BuildRequestPolicy(options map[string]string) (*RequestPolicySnapshot, erro
 		return nil, err
 	}
 	if err := common.Unmarshal(encoded, &snapshot.Affinity); err != nil {
+		return nil, err
+	}
+	failoverJSON := map[string]json.RawMessage{}
+	for key, value := range raw {
+		if field, ok := strings.CutPrefix(key, "channel_failover_setting."); ok {
+			switch field {
+			case "enabled", "primary_channel_id", "fallback_channel_id", "model_regex", "poll_interval_seconds", "recovery_successes":
+				failoverJSON[field] = json.RawMessage(value)
+			default:
+				return nil, common.NewMessage("Unknown failover setting: {{key}}", map[string]any{"key": key})
+			}
+		}
+	}
+	encoded, err = common.Marshal(failoverJSON)
+	if err != nil {
+		return nil, err
+	}
+	if err := common.Unmarshal(encoded, &snapshot.Failover); err != nil {
+		return nil, common.NewMessage("Invalid primary and backup settings")
+	}
+	if err := snapshot.Failover.Validate(); err != nil {
 		return nil, err
 	}
 	snapshot.RetryTimes, err = strconv.Atoi(raw["RetryTimes"])

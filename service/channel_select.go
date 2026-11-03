@@ -134,6 +134,9 @@ func (p *RetryParam) ResetRetryNextTry() {
 //	         分组B, 优先级1
 func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, error) {
 	ReleaseChannelConcurrency(param.Ctx)
+	if state := requestChannelFailover(param.Ctx); state != nil {
+		return selectChannelFailover(param.Ctx, state)
+	}
 	var channel *model.Channel
 	var err error
 	capacityLimited := false
@@ -407,11 +410,29 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 	}
 
 	usingGroup := retry.TokenGroup
+	preferredChannelID, preferredFound := 0, false
+	if retry.GetRetry() == 0 && requestChannelFailover(c) == nil {
+		preferredChannelID, preferredFound = GetPreferredChannelByAffinity(c, modelName, usingGroup)
+	}
+	failover := requestChannelFailover(c)
+	if failover == nil && retry.GetRetry() == 0 {
+		failover = prepareChannelFailover(c, modelName, usingGroup, preferredChannelID)
+	}
+	if state := failover; state != nil {
+		channel, group, err := selectChannelFailover(c, state)
+		if err != nil {
+			if capacityErr := channelConcurrencySelectionError(err); capacityErr != nil {
+				return nil, group, capacityErr
+			}
+			return nil, group, &ChannelSelectError{StatusCode: http.StatusServiceUnavailable, Code: types.ErrorCodeModelNotFound, Message: err.Error(), NoAvailableChannel: true}
+		}
+		return channel, group, nil
+	}
 	var channel *model.Channel
 	var selectGroup string
 	affinityBusy := false
 	if retry.GetRetry() == 0 {
-		if preferredChannelID, found := GetPreferredChannelByAffinity(c, modelName, usingGroup); found {
+		if preferredFound {
 			affinityUsable := false
 			preferred, err := model.CacheGetChannel(preferredChannelID)
 			affinitySatisfied := false

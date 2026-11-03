@@ -5,6 +5,34 @@ import type { TFunction } from 'i18next'
 // sources reported by the channel operations summary.
 export function policyLabel(t: TFunction, value: string): string {
   switch (value) {
+    case 'channel_failover':
+      return t('Primary and backup routing')
+    case 'primary_ready':
+      return t('Primary capacity is available')
+    case 'primary_unknown':
+      return t('Primary capacity is unknown; try the primary')
+    case 'primary_busy':
+    case 'primary_empty':
+    case 'primary_recovering':
+      return t('No eligible backup; try the primary')
+    case 'backup_empty':
+    case 'primary_capacity_exhausted':
+      return t('Primary has no available accounts')
+    case 'backup_busy':
+      return t('Primary is busy; use the backup')
+    case 'backup_recovering':
+      return t('Waiting for primary recovery confirmation')
+    case 'backup_ready':
+    case 'backup_unknown':
+    case 'backup_after_primary_failure':
+    case 'primary_retryable_error':
+      return t('Primary attempt failed; try the backup')
+    case 'primary_backup_exhausted':
+      return t('Primary and backup attempts exhausted')
+    case 'response_started':
+      return t('Response already started; switching stopped')
+    case 'request_cancelled':
+      return t('Request cancelled')
     case 'upstream_failure':
       return t('Upstream request failed')
     case 'request_failed':

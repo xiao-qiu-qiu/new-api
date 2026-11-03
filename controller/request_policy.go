@@ -3,6 +3,7 @@ package controller
 import (
 	"net/http"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
 )
@@ -16,11 +17,11 @@ func UpdateRequestPolicy(c *gin.Context) {
 		Options map[string]string `json:"options"`
 	}
 	if err := c.ShouldBindJSON(&request); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		common.ApiErrorStatus(c, http.StatusBadRequest, err)
 		return
 	}
 	if err := model.UpdateRequestPolicyOptions(request.Options); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": err.Error()})
+		common.ApiErrorStatus(c, http.StatusBadRequest, err)
 		return
 	}
 	GetRequestPolicy(c)

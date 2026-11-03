@@ -33,6 +33,7 @@ import { SettingsPageFormActions } from '../components/settings-page-context'
 import { ChannelAffinitySection } from '../general/channel-affinity'
 import { safeNumberFieldProps } from '../utils/numeric-field'
 import { getPolicyConfig, type PolicyConfig } from './api'
+import { FailoverSection } from './failover-section'
 import { policyLabel } from './policy-label'
 import { RetrySection } from './retry-section'
 import {
@@ -127,6 +128,7 @@ function RoutingPolicyEditor(props: { config: PolicyConfig }) {
           isSaving={mutation.isPending}
         />
         <div className='min-w-0 space-y-4'>
+          <FailoverSection />
           <AffinitySettings />
           <FormField
             control={form.control}

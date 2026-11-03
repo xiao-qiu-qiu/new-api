@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -822,6 +823,171 @@ func TestResponsesWebSocketCancelErrorDoesNotFinishActiveRequest(t *testing.T) {
 	assert.Equal(t, "response.completed", readResponsesWSTestEvent(t, fixture.client)["type"])
 	fixture.closeAndWait(t)
 	assertResponsesWSAccounting(t, fixture, []int{1000})
+}
+
+func TestResponsesPrimaryBackupFailover(t *testing.T) {
+	for _, scenario := range []string{"websocket recovery", "websocket after output", "http zero retries"} {
+		t.Run(scenario, func(t *testing.T) {
+			const input = `[{"type":"reasoning","encrypted_content":"original-reasoning"},{"type":"compaction","encrypted_content":"original-compaction"}]`
+			var primaryReady atomic.Bool
+			var primaryCalls, backupCalls, readyChecks atomic.Int32
+			primaryBodies, backupBodies := make(chan []byte, 4), make(chan []byte, 4)
+			recoveryBarrier := make(chan struct{})
+			fixture := newResponsesWSBillingTest(t, `tier("request", fixed(0.000002))`, func(ws *websocket.Conn, _ *http.Request) {
+				for {
+					_, body, err := ws.ReadMessage()
+					if err != nil {
+						return
+					}
+					primaryBodies <- body
+					index := primaryCalls.Add(1)
+					if !primaryReady.Load() {
+						if scenario == "websocket after output" {
+							_ = ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.created","response":{"id":"already-accepted","status":"in_progress"}}`))
+						}
+						_ = ws.WriteMessage(websocket.TextMessage, []byte(`{"type":"error","status":503,"error":{"code":"model_capacity_exhausted","type":"api_error","message":"no schedulable account"}}`))
+						continue
+					}
+					_ = ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"primary-%d","status":"completed","model":"gpt-4o","output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}`, index)))
+				}
+			})
+			oldOptions := maps.Clone(model.CurrentRequestPolicy().Options)
+			common.OptionMapRWMutex.Lock()
+			oldOptionMap := common.OptionMap
+			common.OptionMap = maps.Clone(oldOptions)
+			common.OptionMapRWMutex.Unlock()
+			require.NoError(t, model.DB.AutoMigrate(&model.Option{}))
+			t.Cleanup(func() {
+				require.NoError(t, model.UpdateRequestPolicyOptions(oldOptions))
+				common.OptionMapRWMutex.Lock()
+				common.OptionMap = oldOptionMap
+				common.OptionMapRWMutex.Unlock()
+			})
+			require.NoError(t, model.DB.Model(fixture.channel).Updates(map[string]any{"key": "primary-" + t.Name(), "channel_info": model.ChannelInfo{}, "auto_ban": 0}).Error)
+			fixture.httpUpstream = func(w http.ResponseWriter, req *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if req.URL.Path == "/v1/routing/availability" {
+					state := "empty"
+					if primaryReady.Load() {
+						state = "ready"
+						// Entering the third ready probe proves that two previous
+						// probes finished and released the per-key singleflight.
+						if readyChecks.Add(1) == 3 {
+							close(recoveryBarrier)
+						}
+					}
+					_, _ = fmt.Fprintf(w, `{"object":"routing.availability","model":%q,"state":%q,"checked_at":%d}`, req.URL.Query().Get("model"), state, time.Now().Unix())
+					return
+				}
+				body, _ := io.ReadAll(req.Body)
+				primaryBodies <- body
+				primaryCalls.Add(1)
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = io.WriteString(w, `{"error":{"code":"model_capacity_exhausted","type":"api_error","message":"no schedulable account"}}`)
+			}
+			backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if websocket.IsWebSocketUpgrade(req) {
+					ws, err := (&websocket.Upgrader{}).Upgrade(w, req, nil)
+					if err != nil {
+						return
+					}
+					defer ws.Close()
+					for {
+						_, body, err := ws.ReadMessage()
+						if err != nil {
+							return
+						}
+						backupBodies <- body
+						index := backupCalls.Add(1)
+						_ = ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"backup-%d","status":"completed","model":"gpt-4o","output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}`, index)))
+					}
+				}
+				body, _ := io.ReadAll(req.Body)
+				backupBodies <- body
+				backupCalls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"id":"backup-http","object":"response","status":"completed","model":"gpt-4o","output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}`)
+			}))
+			t.Cleanup(backup.Close)
+			fallback := &model.Channel{Id: 15, Type: constant.ChannelTypeOpenAI, Name: "failover-backup", Key: "backup-key", BaseURL: &backup.URL, Group: "default", Models: "ws-billing", Status: common.ChannelStatusEnabled, AutoBan: common.GetPointer(0)}
+			fallback.SetSetting(dto.ChannelSettings{ResponsesWebSocketEnabled: true, MaxConcurrency: 1})
+			require.NoError(t, model.DB.Create(fallback).Error)
+			require.NoError(t, model.DB.Create(&model.Ability{ChannelId: fallback.Id, Model: "ws-billing", Group: "default", Enabled: true}).Error)
+			t.Cleanup(func() {
+				require.NoError(t, model.DB.Where("channel_id = ?", fallback.Id).Delete(&model.Ability{}).Error)
+				require.NoError(t, model.DB.Delete(fallback).Error)
+			})
+			require.NoError(t, model.UpdateRequestPolicyOptions(map[string]string{
+				"channel_failover_setting.enabled": "true", "channel_failover_setting.primary_channel_id": fmt.Sprint(fixture.channel.Id), "channel_failover_setting.fallback_channel_id": "15",
+				"channel_failover_setting.model_regex": `["^ws-billing$"]`, "channel_failover_setting.poll_interval_seconds": "1", "channel_failover_setting.recovery_successes": "2", "RetryTimes": "0",
+				"channel_affinity_setting.enabled": "false",
+			}))
+			if scenario == "http zero retries" {
+				request, err := http.NewRequest(http.MethodPost, fixture.gatewayURL+"/v1/responses", strings.NewReader(`{"model":"ws-billing","input":`+input+`}`))
+				require.NoError(t, err)
+				request.Header.Set("Authorization", "Bearer sk-"+fixture.token.Key)
+				request.Header.Set("Content-Type", "application/json")
+				response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
+				require.NoError(t, err)
+				body, err := io.ReadAll(response.Body)
+				require.NoError(t, err)
+				require.NoError(t, response.Body.Close())
+				assert.Equal(t, http.StatusOK, response.StatusCode, "%s", body)
+				assert.Equal(t, int32(1), primaryCalls.Load())
+				assert.Equal(t, int32(1), backupCalls.Load())
+			} else {
+				var stopRuntime context.CancelFunc
+				if scenario == "websocket recovery" {
+					ctx, cancel := context.WithCancel(context.Background())
+					stopRuntime = cancel
+					done := make(chan struct{})
+					go func() { defer close(done); service.RunChannelFailoverRuntime(ctx) }()
+					t.Cleanup(func() {
+						cancel()
+						select {
+						case <-done:
+						case <-time.After(5 * time.Second):
+							t.Error("availability runtime did not stop")
+						}
+					})
+				}
+				require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","input":`+input+`}`)))
+				if scenario == "websocket after output" {
+					assert.Equal(t, "response.created", readResponsesWSTestEvent(t, fixture.client)["type"])
+					assert.Equal(t, "error", readResponsesWSTestEvent(t, fixture.client)["type"])
+					assert.Zero(t, backupCalls.Load(), "an accepted response cannot be replayed")
+					fixture.closeAndWait(t)
+					return
+				}
+				first := readResponsesWSTestEvent(t, fixture.client)
+				require.Equal(t, "response.completed", first["type"], "%v", first)
+				assert.Equal(t, "backup-1", first["response"].(map[string]any)["id"])
+				primaryReady.Store(true)
+				select {
+				case <-recoveryBarrier:
+				case <-time.After(6 * time.Second):
+					t.Fatal("primary recovery confirmations did not finish")
+				}
+				require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","model":"ws-billing","previous_response_id":"backup-1","input":`+input+`}`)))
+				second := readResponsesWSTestEvent(t, fixture.client)
+				require.Equal(t, "response.completed", second["type"], "%v", second)
+				assert.Equal(t, "primary-2", second["response"].(map[string]any)["id"])
+				assert.Equal(t, int32(2), primaryCalls.Load())
+				assert.Equal(t, int32(1), backupCalls.Load())
+				stopRuntime()
+			}
+			fixture.closeAndWait(t)
+			for _, bodies := range []chan []byte{primaryBodies, backupBodies} {
+				for len(bodies) > 0 {
+					var forwarded struct {
+						Input common.RawMessage `json:"input"`
+					}
+					require.NoError(t, common.Unmarshal(<-bodies, &forwarded))
+					assert.JSONEq(t, input, string(forwarded.Input), "reasoning and compaction ciphertext must cross channels unchanged")
+				}
+			}
+		})
+	}
 }
 
 func TestResponsesWebSocketInitialUpstreamRejectionRefundsReservation(t *testing.T) {

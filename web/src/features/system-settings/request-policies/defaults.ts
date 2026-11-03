@@ -23,6 +23,14 @@ export type RetrySettings = {
   RetryTimes: number
   AutomaticRetryStatusCodes: string
 }
+export type FailoverSettings = {
+  'channel_failover_setting.enabled': boolean
+  'channel_failover_setting.primary_channel_id': number
+  'channel_failover_setting.fallback_channel_id': number
+  'channel_failover_setting.model_regex': string
+  'channel_failover_setting.poll_interval_seconds': number
+  'channel_failover_setting.recovery_successes': number
+}
 export type HealthSettings = {
   ChannelDisableThreshold: string
   AutomaticDisableChannelEnabled: boolean
@@ -42,11 +50,18 @@ export type FilteringSettings = Pick<
   'CheckSensitiveEnabled' | 'CheckSensitiveOnPromptEnabled' | 'SensitiveWords'
 >
 export type RequestPolicySettings = RetrySettings &
+  FailoverSettings &
   HealthSettings &
   FilteringSettings &
   Pick<ChannelAffinitySettings, keyof ChannelAffinitySettings>
 
 export const defaultRequestPolicySettings: RequestPolicySettings = {
+  'channel_failover_setting.enabled': false,
+  'channel_failover_setting.primary_channel_id': 0,
+  'channel_failover_setting.fallback_channel_id': 0,
+  'channel_failover_setting.model_regex': '[]',
+  'channel_failover_setting.poll_interval_seconds': 3,
+  'channel_failover_setting.recovery_successes': 2,
   RetryTimes: 0,
   AutomaticRetryStatusCodes:
     '100-199,300-399,401-407,409-499,500-503,505-523,525-599',
