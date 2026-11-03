@@ -150,6 +150,10 @@ export function SidebarModulesSection({
         title: t('Channels'),
         description: t('Configure upstream providers and routing.'),
       },
+      channelAffinity: {
+        title: t('Affinity sessions'),
+        description: t('Manage affinity'),
+      },
       channelProbes: {
         title: t('Channel Probes'),
         description: t('Manage channel health probes and public visibility.'),

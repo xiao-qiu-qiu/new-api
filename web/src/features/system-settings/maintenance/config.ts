@@ -83,6 +83,7 @@ export const SIDEBAR_MODULES_DEFAULT: SidebarModulesAdminConfig = {
   admin: {
     enabled: true,
     channel: true,
+    channelAffinity: true,
     channelProbes: true,
     models: true,
     redemption: true,

@@ -40,7 +40,7 @@ export async function getAffinityBindings(
 ): Promise<AffinityBindingList> {
   const response = await api.get<Response<AffinityBindingList>>(
     '/api/channel/affinity/bindings',
-    { params: filters, signal }
+    { params: filters, signal, disableDuplicate: true }
   )
   return requireServerSuccess(response.data).data
 }

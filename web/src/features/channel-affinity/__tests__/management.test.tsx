@@ -19,14 +19,21 @@ For commercial licensing, please contact support@quantumnous.com
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { CanceledError, type AxiosAdapter } from 'axios'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 import { api } from '@/lib/api'
 import { ROLE } from '@/lib/roles'
 import { useAuthStore } from '@/stores/auth-store'
 
+import { ChannelAffinitySessions } from '..'
+import { getAffinityBindings } from '../api'
 import { ChannelAffinityManagerDialog } from '../manager-dialog'
-import type { AffinityBinding } from '../types'
+import type {
+  AffinityBinding,
+  AffinityBindingFilters,
+  AffinityBindingList,
+} from '../types'
 
 const binding: AffinityBinding = {
   id: 'a'.repeat(64),
@@ -55,6 +62,11 @@ const second: AffinityBinding = {
   version: 'epoch-2',
   token_id: 78,
 }
+const otherChannel: AffinityBinding = {
+  ...second,
+  channel_id: 39,
+  channel_name: 'Other upstream',
+}
 const target = {
   binding_id: binding.id,
   rule_name: 'codex',
@@ -68,22 +80,35 @@ const clients: QueryClient[] = []
 function renderManager(
   props: Partial<React.ComponentProps<typeof ChannelAffinityManagerDialog>> = {}
 ) {
+  return renderWithQueryClient(
+    <ChannelAffinityManagerDialog open onOpenChange={vi.fn()} {...props} />
+  )
+}
+
+function renderWithQueryClient(element: React.ReactElement) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   })
   clients.push(client)
   return render(
-    <QueryClientProvider client={client}>
-      <ChannelAffinityManagerDialog open onOpenChange={vi.fn()} {...props} />
-    </QueryClientProvider>
+    <QueryClientProvider client={client}>{element}</QueryClientProvider>
   )
 }
 
-function listResponse(items: AffinityBinding[]) {
+function listResponse(
+  items: AffinityBinding[],
+  pagination: Partial<Omit<AffinityBindingList, 'items'>> = {}
+) {
   return {
     data: {
       success: true,
-      data: { items, total: items.length, page: 1, page_size: 20 },
+      data: {
+        items,
+        total: items.length,
+        page: 1,
+        page_size: 20,
+        ...pagination,
+      },
     },
   }
 }
@@ -444,5 +469,467 @@ describe('channel affinity management', () => {
     renderManager({ target })
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(get).not.toHaveBeenCalled()
+  })
+})
+
+describe('affinity sessions page', () => {
+  test('canceling a list request and immediately querying the same filters starts a fresh request that succeeds', async () => {
+    const originalAdapter = api.defaults.adapter
+    const controller = new AbortController()
+    const filters = { page: 1, page_size: 20 }
+    let notifyStarted!: () => void
+    const started = new Promise<void>((resolve) => {
+      notifyStarted = resolve
+    })
+    const adapter = vi.fn<AxiosAdapter>((config) => {
+      if (adapter.mock.calls.length === 1) {
+        return new Promise((_, reject) => {
+          config.signal?.addEventListener?.(
+            'abort',
+            () => reject(new CanceledError('canceled', config)),
+            { once: true }
+          )
+          notifyStarted()
+        })
+      }
+      return Promise.resolve({
+        ...listResponse([binding]),
+        status: 200,
+        statusText: 'OK',
+        headers: {},
+        config,
+      })
+    })
+    api.defaults.adapter = adapter
+
+    try {
+      const first = getAffinityBindings(filters, controller.signal)
+      await started
+      controller.abort()
+      const next = getAffinityBindings(filters, new AbortController().signal)
+      const [canceled, reloaded] = await Promise.allSettled([first, next])
+
+      expect(canceled).toMatchObject({
+        status: 'rejected',
+        reason: { code: 'ERR_CANCELED' },
+      })
+      expect(reloaded).toEqual({
+        status: 'fulfilled',
+        value: listResponse([binding]).data.data,
+      })
+      expect(adapter).toHaveBeenCalledTimes(2)
+    } finally {
+      controller.abort()
+      api.defaults.adapter = originalAdapter
+    }
+  })
+
+  test('opening the full page lists all bindings without a channel or session scope and without a modal', async () => {
+    const get = vi
+      .spyOn(api, 'get')
+      .mockResolvedValue(listResponse([binding, otherChannel]))
+    renderWithQueryClient(<ChannelAffinitySessions />)
+
+    expect(await screen.findByText('Other upstream #39')).toBeVisible()
+    expect(screen.getByText('Upstream #38')).toBeVisible()
+    expect(
+      screen.getByRole('heading', { name: 'Affinity sessions' })
+    ).toBeVisible()
+    expect(screen.getByRole('main')).toBeVisible()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('combobox', { name: 'Operation scope' })
+    ).not.toBeInTheDocument()
+    expect(get).toHaveBeenCalledExactlyOnceWith(
+      '/api/channel/affinity/bindings',
+      expect.objectContaining({ params: { page: 1, page_size: 20 } })
+    )
+    expect(
+      within(screen.getByRole('combobox', { name: 'Rows per page' }))
+        .getAllByRole('option')
+        .map((option) => option.getAttribute('value'))
+    ).toEqual(['20', '50', '100', '200'])
+    expect(
+      screen.getByRole('button', { name: 'Reset affinity' })
+    ).toBeDisabled()
+  })
+
+  test('an invalid channel ID keeps the query and selection, while valid combined filters and reset filters clear the selection', async () => {
+    const get = vi.spyOn(api, 'get').mockResolvedValue(listResponse([binding]))
+    const user = userEvent.setup()
+    renderWithQueryClient(<ChannelAffinitySessions />)
+    const checkbox = await screen.findByRole('checkbox', {
+      name: 'Select session session-a',
+    })
+    await user.click(checkbox)
+    await user.type(screen.getByLabelText('Channel ID'), '-38')
+    await user.click(screen.getByRole('button', { name: 'Filter' }))
+
+    expect(await screen.findByText('Enter a positive ID')).toBeVisible()
+    expect(screen.getByLabelText('Channel ID')).toHaveAttribute(
+      'aria-invalid',
+      'true'
+    )
+    expect(get).toHaveBeenCalledTimes(1)
+    expect(checkbox).toBeChecked()
+
+    await user.clear(screen.getByLabelText('Channel ID'))
+    await user.type(screen.getByLabelText('Channel ID'), '38')
+    await user.type(screen.getByLabelText('User ID'), '7')
+    await user.type(screen.getByLabelText('Token ID'), '77')
+    await user.type(screen.getByLabelText('Model'), ' gpt-test ')
+    await user.click(screen.getByRole('button', { name: 'Filter' }))
+    await waitFor(() =>
+      expect(get).toHaveBeenLastCalledWith(
+        '/api/channel/affinity/bindings',
+        expect.objectContaining({
+          params: {
+            channel_id: 38,
+            user_id: 7,
+            token_id: 77,
+            model: 'gpt-test',
+            page: 1,
+            page_size: 20,
+          },
+        })
+      )
+    )
+    const filtered = await screen.findByRole('checkbox', {
+      name: 'Select session session-a',
+    })
+    expect(filtered).not.toBeChecked()
+    expect(screen.getByLabelText('Channel ID')).toHaveAttribute(
+      'aria-invalid',
+      'false'
+    )
+
+    await user.click(filtered)
+    await user.click(screen.getByRole('button', { name: 'Reset filters' }))
+    await waitFor(() =>
+      expect(get).toHaveBeenLastCalledWith(
+        '/api/channel/affinity/bindings',
+        expect.objectContaining({ params: { page: 1, page_size: 20 } })
+      )
+    )
+    for (const label of ['Channel ID', 'User ID', 'Token ID', 'Model']) {
+      expect(screen.getByLabelText(label)).toHaveValue('')
+    }
+    expect(
+      await screen.findByRole('checkbox', { name: 'Select session session-a' })
+    ).not.toBeChecked()
+    expect(
+      screen.getByRole('button', { name: 'Migrate affinity' })
+    ).toBeDisabled()
+  })
+
+  test('pagination and page-size changes retain every applied filter and clear the previous selection', async () => {
+    const get = vi
+      .spyOn(api, 'get')
+      .mockImplementation(async (_url, config) => {
+        const params = config?.params as AffinityBindingFilters
+        return listResponse(params.page === 1 ? [binding] : [second], {
+          total: 75,
+          page: params.page,
+          page_size: params.page_size,
+        })
+      })
+    const user = userEvent.setup()
+    renderWithQueryClient(<ChannelAffinitySessions />)
+    await screen.findByText('Upstream #38')
+    await user.type(screen.getByLabelText('Channel ID'), '38')
+    await user.type(screen.getByLabelText('User ID'), '7')
+    await user.type(screen.getByLabelText('Token ID'), '77')
+    await user.type(screen.getByLabelText('Model'), 'gpt-test')
+    await user.click(screen.getByRole('button', { name: 'Filter' }))
+    await user.click(
+      await screen.findByRole('checkbox', { name: 'Select session session-a' })
+    )
+    expect(screen.getByRole('button', { name: 'Reset affinity' })).toBeEnabled()
+
+    await user.click(screen.getByRole('button', { name: 'Next' }))
+    const nextPage = await screen.findByRole('checkbox', {
+      name: 'Select session session-b',
+    })
+    const filters = {
+      channel_id: 38,
+      user_id: 7,
+      token_id: 77,
+      model: 'gpt-test',
+    }
+    expect(get).toHaveBeenLastCalledWith(
+      '/api/channel/affinity/bindings',
+      expect.objectContaining({
+        params: { ...filters, page: 2, page_size: 20 },
+      })
+    )
+    expect(nextPage).not.toBeChecked()
+    expect(screen.getByText('Selected sessions: 0')).toBeVisible()
+    expect(
+      screen.getByRole('button', { name: 'Reset affinity' })
+    ).toBeDisabled()
+
+    await user.click(nextPage)
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Rows per page' }),
+      '50'
+    )
+    const resizedPage = await screen.findByRole('checkbox', {
+      name: 'Select session session-a',
+    })
+    expect(get).toHaveBeenLastCalledWith(
+      '/api/channel/affinity/bindings',
+      expect.objectContaining({
+        params: { ...filters, page: 1, page_size: 50 },
+      })
+    )
+    expect(resizedPage).not.toBeChecked()
+    expect(screen.getByText('1 / 2')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled()
+    expect(
+      screen.getByRole('button', { name: 'Migrate affinity' })
+    ).toBeDisabled()
+
+    await user.click(screen.getByRole('button', { name: 'Next' }))
+    await user.click(
+      await screen.findByRole('checkbox', { name: 'Select session session-b' })
+    )
+    await user.click(screen.getByRole('button', { name: 'Previous' }))
+    expect(
+      await screen.findByRole('checkbox', { name: 'Select session session-a' })
+    ).not.toBeChecked()
+    expect(get).toHaveBeenLastCalledWith(
+      '/api/channel/affinity/bindings',
+      expect.objectContaining({
+        params: { ...filters, page: 1, page_size: 50 },
+      })
+    )
+    expect(screen.getByText('Selected sessions: 0')).toBeVisible()
+  })
+
+  test('cross-channel migration submits only explicitly checked refs and the eligible target after confirmation', async () => {
+    const unchecked = {
+      ...binding,
+      id: 'c'.repeat(64),
+      key_fp: 'session-c',
+      version: 'epoch-3',
+    }
+    vi.spyOn(api, 'get').mockResolvedValue(
+      listResponse([binding, otherChannel, unchecked])
+    )
+    const post = vi.spyOn(api, 'post').mockImplementation(async (url) => {
+      if (url.endsWith('/targets')) {
+        return {
+          data: {
+            success: true,
+            data: { items: [{ id: 3, name: 'Sub2API' }] },
+          },
+        }
+      }
+      return {
+        data: {
+          success: true,
+          data: {
+            succeeded: 2,
+            expired: 0,
+            conflicted: 0,
+            failed: 0,
+            items: [],
+          },
+        },
+      }
+    })
+    const refs = [
+      { id: binding.id, version: binding.version, channel_id: 38 },
+      { id: otherChannel.id, version: otherChannel.version, channel_id: 39 },
+    ]
+    const user = userEvent.setup()
+    renderWithQueryClient(<ChannelAffinitySessions />)
+    await user.click(
+      await screen.findByRole('checkbox', { name: 'Select session session-a' })
+    )
+    await user.click(
+      screen.getByRole('checkbox', { name: 'Select session session-b' })
+    )
+    expect(
+      screen.getByRole('checkbox', { name: 'Select session session-c' })
+    ).not.toBeChecked()
+    await user.click(screen.getByRole('button', { name: 'Migrate affinity' }))
+    const dialog = screen.getByRole('alertdialog')
+    expect(
+      within(dialog).getByText('Upstream #38, Other upstream #39')
+    ).toBeVisible()
+    expect(
+      screen.getByRole('button', { name: 'Confirm migration' })
+    ).toBeDisabled()
+    await user.click(
+      await screen.findByRole('combobox', { name: 'Target channel' })
+    )
+    await user.click(await screen.findByRole('option', { name: 'Sub2API #3' }))
+    expect(post).toHaveBeenCalledWith(
+      '/api/channel/affinity/targets',
+      { bindings: refs },
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    )
+    expect(post.mock.calls.some(([url]) => url.endsWith('/actions'))).toBe(
+      false
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(post.mock.calls.some(([url]) => url.endsWith('/actions'))).toBe(
+      false
+    )
+    expect(
+      screen.getByRole('checkbox', { name: 'Select session session-a' })
+    ).toBeChecked()
+    await user.click(screen.getByRole('button', { name: 'Migrate affinity' }))
+    await user.click(
+      await screen.findByRole('combobox', { name: 'Target channel' })
+    )
+    await user.click(await screen.findByRole('option', { name: 'Sub2API #3' }))
+    await user.click(screen.getByRole('button', { name: 'Confirm migration' }))
+    await waitFor(() =>
+      expect(post).toHaveBeenLastCalledWith('/api/channel/affinity/actions', {
+        action: 'migrate',
+        target_channel_id: 3,
+        bindings: refs,
+      })
+    )
+    expect(
+      post.mock.calls.filter(([url]) => url.endsWith('/actions'))
+    ).toHaveLength(1)
+    expect(
+      await screen.findByText(
+        'Updated: 2 · Expired: 0 · Conflicts: 0 · Failed: 0'
+      )
+    ).toBeVisible()
+    expect(
+      screen.getByRole('checkbox', { name: 'Select session session-a' })
+    ).not.toBeChecked()
+    expect(
+      screen.getByRole('checkbox', { name: 'Select session session-b' })
+    ).not.toBeChecked()
+  })
+
+  test('selecting the current global page can reset bindings from multiple source channels after confirmation', async () => {
+    vi.spyOn(api, 'get').mockResolvedValue(
+      listResponse([binding, otherChannel])
+    )
+    const post = vi.spyOn(api, 'post').mockResolvedValue({
+      data: {
+        success: true,
+        data: { succeeded: 2, expired: 0, conflicted: 0, failed: 0, items: [] },
+      },
+    })
+    const user = userEvent.setup()
+    renderWithQueryClient(<ChannelAffinitySessions />)
+    await user.click(
+      await screen.findByRole('checkbox', { name: 'Select current page' })
+    )
+    await user.click(screen.getByRole('button', { name: 'Reset affinity' }))
+    expect(post).not.toHaveBeenCalled()
+    expect(
+      within(screen.getByRole('alertdialog')).getByText(
+        'Upstream #38, Other upstream #39'
+      )
+    ).toBeVisible()
+    await user.click(screen.getByRole('button', { name: 'Confirm reset' }))
+    await waitFor(() =>
+      expect(post).toHaveBeenCalledExactlyOnceWith(
+        '/api/channel/affinity/actions',
+        {
+          action: 'reset',
+          bindings: [
+            { id: binding.id, version: binding.version, channel_id: 38 },
+            {
+              id: otherChannel.id,
+              version: otherChannel.version,
+              channel_id: 39,
+            },
+          ],
+        }
+      )
+    )
+  })
+
+  test.each([
+    ['an ordinary user with a channel-read grant', ROLE.USER, true],
+    ['an administrator without channel-read', ROLE.ADMIN, false],
+  ] as const)(
+    '%s sees forbidden and makes no API calls',
+    (_name, role, read) => {
+      useAuthStore.getState().auth.setUser({
+        id: 2,
+        username: 'restricted',
+        role,
+        permissions: {
+          admin_permissions: { channel: { read, operate: true } },
+        },
+      })
+      const get = vi.spyOn(api, 'get')
+      const post = vi.spyOn(api, 'post')
+      renderWithQueryClient(<ChannelAffinitySessions />)
+
+      expect(screen.getByText('Access Forbidden')).toBeVisible()
+      expect(
+        screen.queryByRole('heading', { name: 'Affinity sessions' })
+      ).not.toBeInTheDocument()
+      expect(get).not.toHaveBeenCalled()
+      expect(post).not.toHaveBeenCalled()
+    }
+  )
+
+  test('a read-only administrator can inspect bindings but cannot select or submit any change', async () => {
+    useAuthStore.getState().auth.setUser({
+      id: 2,
+      username: 'viewer',
+      role: ROLE.ADMIN,
+      permissions: {
+        admin_permissions: { channel: { read: true, operate: false } },
+      },
+    })
+    vi.spyOn(api, 'get').mockResolvedValue(
+      listResponse([binding, otherChannel])
+    )
+    const post = vi.spyOn(api, 'post')
+    const user = userEvent.setup()
+    renderWithQueryClient(<ChannelAffinitySessions />)
+    expect(await screen.findByText('Other upstream #39')).toBeVisible()
+    for (const checkbox of screen.getAllByRole('checkbox')) {
+      expect(checkbox).toHaveAttribute('aria-disabled', 'true')
+      await user.click(checkbox)
+      expect(checkbox).not.toBeChecked()
+    }
+    for (const name of ['Reset affinity', 'Migrate affinity']) {
+      const button = screen.getByRole('button', { name })
+      expect(button).toBeDisabled()
+      await user.click(button)
+    }
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+    expect(post).not.toHaveBeenCalled()
+  })
+
+  test('a failed global list can be retried without adding a channel or session scope', async () => {
+    const get = vi
+      .spyOn(api, 'get')
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValue(listResponse([binding]))
+    const user = userEvent.setup()
+    renderWithQueryClient(<ChannelAffinitySessions />)
+    expect(
+      await screen.findByText('Could not load session bindings')
+    ).toBeVisible()
+    expect(
+      screen.getByRole('button', { name: 'Migrate affinity' })
+    ).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(await screen.findByText('Upstream #38')).toBeVisible()
+    expect(
+      screen.queryByText('Could not load session bindings')
+    ).not.toBeInTheDocument()
+    expect(get).toHaveBeenLastCalledWith(
+      '/api/channel/affinity/bindings',
+      expect.objectContaining({ params: { page: 1, page_size: 20 } })
+    )
   })
 })

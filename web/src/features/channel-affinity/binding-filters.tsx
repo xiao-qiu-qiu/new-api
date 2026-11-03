@@ -26,6 +26,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 
 export interface BindingFilterValues {
+  channel_id: string
   user_id: string
   token_id: string
   model: string
@@ -33,6 +34,7 @@ export interface BindingFilterValues {
 
 interface Props {
   disabled: boolean
+  showChannel?: boolean
   onApply: (values: BindingFilterValues) => void
 }
 
@@ -49,16 +51,47 @@ export function BindingFilters(props: Props) {
     )
   const form = useForm<BindingFilterValues>({
     resolver: zodResolver(
-      z.object({ user_id: id, token_id: id, model: z.string().trim() })
+      z.object({
+        channel_id: id,
+        user_id: id,
+        token_id: id,
+        model: z.string().trim(),
+      })
     ),
-    defaultValues: { user_id: '', token_id: '', model: '' },
+    defaultValues: { channel_id: '', user_id: '', token_id: '', model: '' },
   })
 
   return (
     <form
-      className='grid gap-3 sm:grid-cols-[1fr_1fr_1.5fr_auto]'
+      className={
+        props.showChannel
+          ? 'grid gap-3 sm:grid-cols-2 xl:grid-cols-[1fr_1fr_1fr_1.5fr_auto]'
+          : 'grid gap-3 sm:grid-cols-[1fr_1fr_1.5fr_auto]'
+      }
       onSubmit={form.handleSubmit(props.onApply)}
     >
+      {props.showChannel && (
+        <div className='grid content-start gap-1.5'>
+          <Label htmlFor='affinity-channel'>{t('Channel ID')}</Label>
+          <Input
+            id='affinity-channel'
+            inputMode='numeric'
+            {...form.register('channel_id')}
+            disabled={props.disabled}
+            aria-invalid={!!form.formState.errors.channel_id}
+            aria-describedby={
+              form.formState.errors.channel_id
+                ? 'affinity-channel-error'
+                : undefined
+            }
+          />
+          {form.formState.errors.channel_id && (
+            <p id='affinity-channel-error' className='text-destructive text-xs'>
+              {form.formState.errors.channel_id.message}
+            </p>
+          )}
+        </div>
+      )}
       <div className='grid content-start gap-1.5'>
         <Label htmlFor='affinity-user'>{t('User ID')}</Label>
         <Input
@@ -103,14 +136,30 @@ export function BindingFilters(props: Props) {
           disabled={props.disabled}
         />
       </div>
-      <Button
-        type='submit'
-        variant='outline'
-        className='mt-auto'
-        disabled={props.disabled}
-      >
-        {t('Filter')}
-      </Button>
+      <div className='mt-auto flex flex-wrap gap-2'>
+        <Button type='submit' variant='outline' disabled={props.disabled}>
+          {t('Filter')}
+        </Button>
+        {props.showChannel && (
+          <Button
+            type='button'
+            variant='ghost'
+            disabled={props.disabled}
+            onClick={() => {
+              const values = {
+                channel_id: '',
+                user_id: '',
+                token_id: '',
+                model: '',
+              }
+              form.reset(values)
+              props.onApply(values)
+            }}
+          >
+            {t('Reset filters')}
+          </Button>
+        )}
+      </div>
     </form>
   )
 }

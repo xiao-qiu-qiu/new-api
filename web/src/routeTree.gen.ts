@@ -37,6 +37,7 @@ import { Route as RankingsIndexRouteImport } from './routes/rankings/index'
 import { Route as SetupIndexRouteImport } from './routes/setup/index'
 import { Route as authUserResetRouteImport } from './routes/(auth)/user/reset'
 import { Route as AuthenticatedCanvasIndexRouteImport } from './routes/_authenticated/canvas/index'
+import { Route as AuthenticatedChannelAffinityIndexRouteImport } from './routes/_authenticated/channel-affinity/index'
 import { Route as AuthenticatedChannelProbesIndexRouteImport } from './routes/_authenticated/channel-probes/index'
 import { Route as AuthenticatedChannelsIndexRouteImport } from './routes/_authenticated/channels/index'
 import { Route as AuthenticatedChatChatIdRouteImport } from './routes/_authenticated/chat/$chatId'
@@ -216,6 +217,12 @@ const AuthenticatedCanvasIndexRoute =
   AuthenticatedCanvasIndexRouteImport.update({
     id: '/canvas/',
     path: '/canvas/',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedChannelAffinityIndexRoute =
+  AuthenticatedChannelAffinityIndexRouteImport.update({
+    id: '/channel-affinity/',
+    path: '/channel-affinity/',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
 const AuthenticatedChannelProbesIndexRoute =
@@ -488,6 +495,7 @@ export interface FileRoutesByFullPath {
   '/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
   '/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
   '/canvas/': typeof AuthenticatedCanvasIndexRoute
+  '/channel-affinity/': typeof AuthenticatedChannelAffinityIndexRoute
   '/channel-probes/': typeof AuthenticatedChannelProbesIndexRoute
   '/channels/': typeof AuthenticatedChannelsIndexRoute
   '/dashboard/': typeof AuthenticatedDashboardIndexRoute
@@ -555,6 +563,7 @@ export interface FileRoutesByTo {
   '/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
   '/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
   '/canvas': typeof AuthenticatedCanvasIndexRoute
+  '/channel-affinity': typeof AuthenticatedChannelAffinityIndexRoute
   '/channel-probes': typeof AuthenticatedChannelProbesIndexRoute
   '/channels': typeof AuthenticatedChannelsIndexRoute
   '/dashboard': typeof AuthenticatedDashboardIndexRoute
@@ -626,6 +635,7 @@ export interface FileRoutesById {
   '/_authenticated/usage-logs/$section': typeof AuthenticatedUsageLogsSectionRoute
   '/_authenticated/usage-logs/audit': typeof AuthenticatedUsageLogsAuditRoute
   '/_authenticated/canvas/': typeof AuthenticatedCanvasIndexRoute
+  '/_authenticated/channel-affinity/': typeof AuthenticatedChannelAffinityIndexRoute
   '/_authenticated/channel-probes/': typeof AuthenticatedChannelProbesIndexRoute
   '/_authenticated/channels/': typeof AuthenticatedChannelsIndexRoute
   '/_authenticated/dashboard/': typeof AuthenticatedDashboardIndexRoute
@@ -696,6 +706,7 @@ export interface FileRouteTypes {
     | '/usage-logs/$section'
     | '/usage-logs/audit'
     | '/canvas/'
+    | '/channel-affinity/'
     | '/channel-probes/'
     | '/channels/'
     | '/dashboard/'
@@ -763,6 +774,7 @@ export interface FileRouteTypes {
     | '/usage-logs/$section'
     | '/usage-logs/audit'
     | '/canvas'
+    | '/channel-affinity'
     | '/channel-probes'
     | '/channels'
     | '/dashboard'
@@ -833,6 +845,7 @@ export interface FileRouteTypes {
     | '/_authenticated/usage-logs/$section'
     | '/_authenticated/usage-logs/audit'
     | '/_authenticated/canvas/'
+    | '/_authenticated/channel-affinity/'
     | '/_authenticated/channel-probes/'
     | '/_authenticated/channels/'
     | '/_authenticated/dashboard/'
@@ -1086,6 +1099,13 @@ declare module '@tanstack/react-router' {
       path: '/canvas'
       fullPath: '/canvas/'
       preLoaderRoute: typeof AuthenticatedCanvasIndexRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/channel-affinity/': {
+      id: '/_authenticated/channel-affinity/'
+      path: '/channel-affinity'
+      fullPath: '/channel-affinity/'
+      preLoaderRoute: typeof AuthenticatedChannelAffinityIndexRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/channel-probes/': {
@@ -1470,6 +1490,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedUsageLogsSectionRoute: typeof AuthenticatedUsageLogsSectionRoute
   AuthenticatedUsageLogsAuditRoute: typeof AuthenticatedUsageLogsAuditRoute
   AuthenticatedCanvasIndexRoute: typeof AuthenticatedCanvasIndexRoute
+  AuthenticatedChannelAffinityIndexRoute: typeof AuthenticatedChannelAffinityIndexRoute
   AuthenticatedChannelProbesIndexRoute: typeof AuthenticatedChannelProbesIndexRoute
   AuthenticatedChannelsIndexRoute: typeof AuthenticatedChannelsIndexRoute
   AuthenticatedDashboardIndexRoute: typeof AuthenticatedDashboardIndexRoute
@@ -1499,6 +1520,8 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedUsageLogsSectionRoute: AuthenticatedUsageLogsSectionRoute,
   AuthenticatedUsageLogsAuditRoute: AuthenticatedUsageLogsAuditRoute,
   AuthenticatedCanvasIndexRoute: AuthenticatedCanvasIndexRoute,
+  AuthenticatedChannelAffinityIndexRoute:
+    AuthenticatedChannelAffinityIndexRoute,
   AuthenticatedChannelProbesIndexRoute: AuthenticatedChannelProbesIndexRoute,
   AuthenticatedChannelsIndexRoute: AuthenticatedChannelsIndexRoute,
   AuthenticatedDashboardIndexRoute: AuthenticatedDashboardIndexRoute,
