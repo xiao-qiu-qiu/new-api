@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -209,7 +210,8 @@ func handleTTSWebSocketResponse(c *gin.Context, requestURL string, volcRequest V
 	header := http.Header{}
 	header.Set("Authorization", fmt.Sprintf("Bearer;%s", token))
 
-	conn, resp, dialErr := websocket.DefaultDialer.DialContext(context.Background(), requestURL, header)
+	requestCtx := c.Request.Context()
+	conn, resp, dialErr := websocket.DefaultDialer.DialContext(requestCtx, requestURL, header)
 	if dialErr != nil {
 		if resp != nil {
 			return nil, types.NewErrorWithStatusCode(
@@ -225,8 +227,10 @@ func handleTTSWebSocketResponse(c *gin.Context, requestURL string, volcRequest V
 		)
 	}
 	defer conn.Close()
+	stop := context.AfterFunc(requestCtx, func() { _ = conn.Close() })
+	defer stop()
 
-	payload, marshalErr := json.Marshal(volcRequest)
+	payload, marshalErr := common.Marshal(volcRequest)
 	if marshalErr != nil {
 		return nil, types.NewErrorWithStatusCode(
 			fmt.Errorf("failed to marshal request: %w", marshalErr),

@@ -218,7 +218,9 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 		s.stateMu.Unlock()
 		s.clientWriteMu.Unlock()
 	}()
-	request := s.request.Clone(s.ctx)
+	requestCtx, cancelRequest := context.WithCancel(s.ctx)
+	defer cancelRequest()
+	request := s.request.Clone(requestCtx)
 	request.Body = io.NopCloser(bytes.NewReader(message))
 	request.ContentLength = int64(len(message))
 	request.Header.Set("Content-Type", "application/json")
@@ -238,6 +240,7 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 }
 
 func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState, create responsesWSCreateRequest) (apiErr *types.NewAPIError) {
+	defer service.ReleaseChannelConcurrency(c)
 	policy := service.RequestPolicy(c)
 	modelName := create.Request.Model
 	started := time.Now()
@@ -547,8 +550,14 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			state.closeCode, state.closeReason = websocket.CloseInternalServerErr, "upstream response timed out"
 			ConsumeResponsesQuota(c, info, accumulator.Finish())
 			return nil
-		case <-s.ctx.Done():
-			info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, s.ctx.Err())
+		case <-c.Request.Context().Done():
+			if s.ctx.Err() == nil {
+				state.closeCode, state.closeReason = websocket.CloseInternalServerErr, "channel concurrency lease lost"
+				s.shutdown(state.closeCode, state.closeReason)
+				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonScannerErr, context.Cause(c.Request.Context()))
+			} else {
+				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, s.ctx.Err())
+			}
 			ConsumeResponsesQuota(c, info, accumulator.Finish())
 			return nil
 		}
@@ -639,6 +648,9 @@ func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model stri
 		if !appmodel.IsChannelEnabledForGroupModel(group, model, s.lockedChannelID) {
 			return types.NewErrorWithStatusCode(errors.New("the connection channel is no longer allowed for this group and model"), types.ErrorCodeAccessDenied, http.StatusForbidden, types.ErrOptionWithSkipRetry())
 		}
+	}
+	if capacityErr := service.AcquireChannelConcurrency(c, channel); capacityErr != nil {
+		return capacityErr
 	}
 	for key, value := range s.lockedContext {
 		c.Set(string(key), value)

@@ -62,6 +62,7 @@ func appendRequestServiceTierFilter(c *gin.Context, modelName string) error {
 
 func Distribute() func(c *gin.Context) {
 	return func(c *gin.Context) {
+		defer service.ReleaseChannelConcurrency(c)
 		var channel *model.Channel
 		defer func() {
 			if c.Writer.Status() >= 400 {
@@ -166,7 +167,10 @@ func Distribute() func(c *gin.Context) {
 			}
 		}
 		common.SetContextKey(c, constant.ContextKeyRequestStartTime, time.Now())
-		SetupContextForSelectedChannel(c, channel, modelRequest.Model)
+		if setupErr := SetupContextForSelectedChannel(c, channel, modelRequest.Model); setupErr != nil {
+			abortWithOpenAiMessage(c, setupErr.StatusCode, setupErr.Error(), setupErr.GetErrorCode())
+			return
+		}
 		c.Next()
 		// A heartbeat may have committed HTTP 200 before the relay failed.
 		// Keep legacy routes without a recorded outcome, but never refresh or

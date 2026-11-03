@@ -226,6 +226,13 @@ export const channelFormSchema = z
       ),
     priority: z.number().optional(),
     weight: z.number().optional(),
+    max_concurrency: z
+      .number()
+      .refine(
+        (value) => Number.isInteger(value) && value >= 0 && value <= 1000000,
+        'Channel concurrency limit must be an integer between 0 and 1000000'
+      )
+      .optional(),
     test_model: z.string().optional(),
     auto_ban: z.number().optional(),
     status: z.number(),
@@ -447,6 +454,7 @@ export const CHANNEL_FORM_DEFAULT_VALUES: ChannelFormValues = {
   model_mapping: '',
   priority: 0,
   weight: 0,
+  max_concurrency: 0,
   test_model: '',
   auto_ban: 1,
   status: CHANNEL_STATUS.ENABLED,
@@ -509,6 +517,7 @@ export function transformChannelToFormDefaults(
 ): ChannelFormValues {
   // Parse channel extra settings from setting field
   let extraSettings = {
+    max_concurrency: 0,
     task_plugin_key: '',
     task_extend_plugin_keys: [] as string[],
     force_format: false,
@@ -531,6 +540,7 @@ export function transformChannelToFormDefaults(
         parsed.http2_connection_shards
       )
       extraSettings = {
+        max_concurrency: parsed.max_concurrency ?? 0,
         task_plugin_key: parsed.task_plugin_key || '',
         task_extend_plugin_keys: readTaskExtendPluginKeys(channel.type, parsed),
         force_format: parsed.force_format || false,
@@ -670,6 +680,7 @@ export function transformChannelToFormDefaults(
  */
 export function buildSettingJSON(formData: ChannelFormValues): string {
   const settingObj: Record<string, unknown> = {
+    max_concurrency: formData.max_concurrency || undefined,
     task_plugin_key:
       formData.type === CHANNEL_TYPE_TASK_PLUGIN
         ? formData.task_plugin_key?.trim() || ''

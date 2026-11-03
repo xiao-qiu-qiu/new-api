@@ -344,6 +344,7 @@ func PrepareTaskPluginRoute() gin.HandlerFunc {
 func RouteTaskPluginEndpoint() gin.HandlerFunc {
 	pinEndpoint := PinTaskPluginEndpoint()
 	return func(c *gin.Context) {
+		defer service.ReleaseChannelConcurrency(c)
 		generation := pluginruntime.DefaultRegistry.Generation()
 		request, err := getModelFromRequest(c)
 		if err != nil || generation == nil {

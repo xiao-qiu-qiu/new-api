@@ -2,23 +2,143 @@ package middleware
 
 import (
 	"bytes"
+	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	appdto "github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestDistributeChannelConcurrencyRequestLifecycle(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	setupOriginTaskDB(t)
+	previousCache, previousRedis := common.MemoryCacheEnabled, common.RedisEnabled
+	common.MemoryCacheEnabled, common.RedisEnabled = false, false
+	t.Cleanup(func() { common.MemoryCacheEnabled, common.RedisEnabled = previousCache, previousRedis })
+	channel := &model.Channel{Name: "concurrency-lifecycle", Key: "sk-test", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeOpenAI}
+	channel.SetSetting(dto.ChannelSettings{MaxConcurrency: 1})
+	require.NoError(t, model.DB.Create(channel).Error)
+
+	for _, outcome := range []string{"completed", "failed", "cancelled", "stream-ended"} {
+		t.Run(outcome, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			entered := make(chan int, 1)
+			cancelled := make(chan struct{}, 1)
+			finish := make(chan struct{})
+			finishRequest := sync.OnceFunc(func() { close(finish) })
+			done := make(chan struct{})
+			router := gin.New()
+			router.POST("/v1/chat/completions", BodyStorageCleanup(), func(c *gin.Context) {
+				common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+				service.GetChannelConstraints(c).AddPin(appdto.ChannelPin{ChannelId: channel.Id, Source: appdto.PinSourceToken})
+			}, Distribute(), func(c *gin.Context) {
+				if c.Request.Header.Get("X-Lifecycle-Probe") == "true" {
+					c.Status(http.StatusNoContent)
+					return
+				}
+				if outcome == "stream-ended" {
+					c.Header("Content-Type", "text/event-stream")
+					c.SSEvent("message", "first chunk")
+					c.Writer.Flush()
+				}
+				entered <- common.GetContextKeyInt(c, constant.ContextKeyChannelId)
+				select {
+				case <-finish:
+				case <-c.Request.Context().Done():
+					cancelled <- struct{}{}
+					<-finish
+					c.Status(http.StatusRequestTimeout)
+					return
+				}
+				switch outcome {
+				case "failed":
+					c.AbortWithStatus(http.StatusBadGateway)
+				case "stream-ended":
+					c.SSEvent("message", "[DONE]")
+				default:
+					c.Status(http.StatusNoContent)
+				}
+			})
+			request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"lifecycle-model"}`)).WithContext(ctx)
+			request.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			go func() {
+				defer close(done)
+				router.ServeHTTP(recorder, request)
+			}()
+			t.Cleanup(func() {
+				cancel()
+				finishRequest()
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Error("request handler did not stop")
+				}
+			})
+			select {
+			case selectedID := <-entered:
+				require.Equal(t, channel.Id, selectedID)
+			case <-done:
+				t.Fatalf("request stopped before reaching the handler: %d %s", recorder.Code, recorder.Body.String())
+			case <-time.After(5 * time.Second):
+				t.Fatal("request did not reach the handler")
+			}
+			probe := request.Clone(t.Context())
+			probe.Header.Set("X-Lifecycle-Probe", "true")
+			probe.Body = io.NopCloser(strings.NewReader(`{"model":"lifecycle-model"}`))
+			busy := httptest.NewRecorder()
+			router.ServeHTTP(busy, probe)
+			require.Equal(t, http.StatusTooManyRequests, busy.Code, busy.Body.String())
+			assert.Contains(t, busy.Body.String(), "channel_concurrency_limit")
+
+			if outcome == "cancelled" {
+				cancel()
+				select {
+				case <-cancelled:
+				case <-time.After(5 * time.Second):
+					t.Fatal("handler did not observe cancellation")
+				}
+				probe.Body = io.NopCloser(strings.NewReader(`{"model":"lifecycle-model"}`))
+				draining := httptest.NewRecorder()
+				router.ServeHTTP(draining, probe)
+				assert.Equal(t, http.StatusTooManyRequests, draining.Code, "cancelled requests retain capacity until their handler returns: %s", draining.Body.String())
+			}
+			finishRequest()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("request did not release the handler")
+			}
+			wantStatus := map[string]int{"completed": http.StatusNoContent, "failed": http.StatusBadGateway, "cancelled": http.StatusRequestTimeout, "stream-ended": http.StatusOK}
+			assert.Equal(t, wantStatus[outcome], recorder.Code)
+			if outcome == "stream-ended" {
+				assert.Contains(t, recorder.Body.String(), "[DONE]")
+			}
+			probe.Body = io.NopCloser(strings.NewReader(`{"model":"lifecycle-model"}`))
+			available := httptest.NewRecorder()
+			router.ServeHTTP(available, probe)
+			assert.Equal(t, http.StatusNoContent, available.Code, "finished requests must return capacity: %s", available.Body.String())
+		})
+	}
+}
 
 func TestChannelMatchesExpectedTaskPluginUsesGenericChannelSetting(t *testing.T) {
 	channel := &model.Channel{Type: constant.ChannelTypeTaskPlugin}

@@ -19,6 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 // Static translation keys that don't get picked up by the t('...') regex.
 // These cover dynamic labels (e.g. constants, configs) that are passed into t at runtime.
 export const STATIC_I18N_KEYS = [
+  'Channel concurrency limit must be an integer between 0 and 1000000',
   // Portable homepage package copy.
   'Homepage packages',
   'Official homepage',

@@ -19,6 +19,9 @@ import (
 	"testing"
 
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/relay"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
@@ -97,6 +100,81 @@ func TestSameChannelPinsMergeToStricterRetryMode(t *testing.T) {
 	assert.Equal(t, dto.PinRetrySingleAttempt, pin.RetryMode)
 	assert.Empty(t, overridden)
 	assert.False(t, service.ShouldRetryRelayError(c, types.NewOpenAIError(errors.New("upstream"), types.ErrorCodeBadResponseStatusCode, http.StatusInternalServerError), 1))
+}
+
+func TestLockedTaskFirstAttemptHonorsOriginChannelConcurrency(t *testing.T) {
+	t.Setenv("TEST_TASK_DB_DIALECT", "sqlite")
+	db, _ := openTaskDialectDatabase(t, &model.Channel{})
+	previousDB, previousCache, previousRedis, previousRetries := model.DB, common.MemoryCacheEnabled, common.RedisEnabled, common.RetryTimes
+	model.DB, common.MemoryCacheEnabled, common.RedisEnabled, common.RetryTimes = db, false, false, 0
+	t.Cleanup(func() {
+		model.DB, common.MemoryCacheEnabled, common.RedisEnabled, common.RetryTimes = previousDB, previousCache, previousRedis, previousRetries
+	})
+	require.NoError(t, i18n.Init())
+	for _, tc := range []struct {
+		name       string
+		full, same bool
+	}{
+		{name: "full origin rejects the first submit", full: true},
+		{name: "switch reserves the origin and releases the initial channel"},
+		{name: "same channel reuses its existing slot", same: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			initial := &model.Channel{Type: constant.ChannelTypeOpenAI, Key: "test", Name: "initial", Status: common.ChannelStatusEnabled}
+			initial.SetSetting(kitdto.ChannelSettings{MaxConcurrency: 1})
+			require.NoError(t, db.Create(initial).Error)
+			origin := initial
+			if !tc.same {
+				origin = &model.Channel{Type: constant.ChannelTypeOpenAI, Key: "test", Name: "origin", Status: common.ChannelStatusEnabled}
+				origin.SetSetting(kitdto.ChannelSettings{MaxConcurrency: 1})
+				require.NoError(t, db.Create(origin).Error)
+			}
+			c, other, initialProbe := taskSubmissionTestContext(), taskSubmissionTestContext(), taskSubmissionTestContext()
+			t.Cleanup(func() {
+				service.ReleaseChannelConcurrency(c)
+				service.ReleaseChannelConcurrency(other)
+				service.ReleaseChannelConcurrency(initialProbe)
+			})
+			require.Nil(t, service.AcquireChannelConcurrency(c, initial))
+			require.Nil(t, middleware.SetupContextForSelectedChannel(c, initial, "plugin-model"))
+			if tc.full {
+				require.Nil(t, service.AcquireChannelConcurrency(other, origin))
+			}
+			service.GetChannelConstraints(c).AddPin(dto.ChannelPin{ChannelId: origin.Id, Source: dto.PinSourceOriginTask, Rank: dto.PinRankOriginTask, RetryMode: dto.PinRetrySameChannel})
+			info := taskSubmissionRelayInfo(nil)
+			require.Nil(t, relay.ApplyOriginTaskAffinity(c, info))
+			submitCalls := 0
+			stop := &dto.TaskError{Message: "stop after admission", StatusCode: http.StatusBadRequest, LocalError: true, NoRetry: true}
+			outcome, taskErr := executeTaskSubmissionWith(c, info, func(*gin.Context, *relaycommon.RelayInfo) (*relay.TaskSubmitResult, *dto.TaskError) {
+				submitCalls++
+				if !tc.full {
+					acquired, err := service.TryAcquireChannelConcurrency(other, origin)
+					require.NoError(t, err)
+					assert.False(t, acquired, "the origin slot must be held before invoking submit")
+				}
+				return nil, stop
+			})
+			assert.Nil(t, outcome)
+			require.NotNil(t, taskErr)
+			if tc.full {
+				assert.Zero(t, submitCalls)
+				assert.Equal(t, http.StatusTooManyRequests, taskErr.StatusCode)
+				assert.Equal(t, "channel_concurrency_limit", taskErr.Code)
+			} else {
+				assert.Equal(t, 1, submitCalls)
+				assert.Same(t, stop, taskErr)
+				service.ReleaseChannelConcurrency(c)
+				acquired, err := service.TryAcquireChannelConcurrency(other, origin)
+				require.NoError(t, err)
+				assert.True(t, acquired, "releasing one attempt must return its only slot")
+			}
+			if !tc.same {
+				acquired, err := service.TryAcquireChannelConcurrency(initialProbe, initial)
+				require.NoError(t, err)
+				assert.True(t, acquired, "switching to the origin must release the initial channel")
+			}
+		})
+	}
 }
 
 func newPinRetryContext() *gin.Context {

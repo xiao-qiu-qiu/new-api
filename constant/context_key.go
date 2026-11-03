@@ -24,6 +24,8 @@ const (
 	ContextKeyTokenOpenAITierPolicy  ContextKey = "token_openai_tier_policy"
 
 	/* channel related keys */
+	// Stored on request.Context so detached upstream work can observe lease loss.
+	ContextKeyChannelConcurrencyGuard  ContextKey = "channel_concurrency_guard"
 	ContextKeyChannelId                ContextKey = "channel_id"
 	ContextKeyChannelName              ContextKey = "channel_name"
 	ContextKeyChannelCreateTime        ContextKey = "channel_create_time"

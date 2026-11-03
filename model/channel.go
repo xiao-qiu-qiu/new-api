@@ -996,6 +996,19 @@ func SearchTags(keyword string, group string, model string, idSort bool) ([]*str
 func (channel *Channel) ValidateSettings() error {
 	channelParams := &dto.ChannelSettings{}
 	if channel.Setting != nil && *channel.Setting != "" {
+		var fields map[string]common.RawMessage
+		if err := common.UnmarshalJsonStr(*channel.Setting, &fields); err != nil {
+			return err
+		}
+		for name, raw := range fields {
+			if !strings.EqualFold(name, "max_concurrency") {
+				continue
+			}
+			var limit *int
+			if err := common.Unmarshal(raw, &limit); err != nil || limit == nil || *limit < 0 || *limit > 1000000 {
+				return common.NewMessage("Channel concurrency limit must be an integer between 0 and 1000000")
+			}
+		}
 		err := common.Unmarshal([]byte(*channel.Setting), channelParams)
 		if err != nil {
 			return err

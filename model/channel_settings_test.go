@@ -287,3 +287,167 @@ func TestChannelValidateSupportedServiceTiers(t *testing.T) {
 		assert.Equal(t, raw, ch.OtherSettings)
 	}
 }
+
+func TestChannelValidateMaxConcurrency(t *testing.T) {
+	for _, raw := range []string{"-1", "1000001", "1.5", "1.0", "1e0", `"5"`, "true", "false", "null", "[]", "{}", "9223372036854775808"} {
+		t.Run(raw, func(t *testing.T) {
+			setting := `{"max_concurrency":` + raw + `,"force_format":true}`
+			channel := &Channel{Setting: &setting}
+			err := channel.ValidateSettings()
+			require.EqualError(t, err, "Channel concurrency limit must be an integer between 0 and 1000000")
+			assert.Equal(t, setting, *channel.Setting, "rejection must preserve the saved settings")
+		})
+	}
+	for _, raw := range []string{`{"MAX_CONCURRENCY":1000001}`, `{"MAX_CONCURRENCY":1.5}`} {
+		channel := &Channel{Setting: &raw}
+		require.EqualError(t, channel.ValidateSettings(), "Channel concurrency limit must be an integer between 0 and 1000000")
+	}
+	for _, limit := range []int{0, 1, 1000000} {
+		t.Run(fmt.Sprint(limit), func(t *testing.T) {
+			channel := &Channel{}
+			channel.SetSetting(dto.ChannelSettings{MaxConcurrency: limit, ForceFormat: true})
+			require.NoError(t, channel.ValidateSettings())
+			assert.Equal(t, limit, channel.GetSetting().MaxConcurrency)
+			assert.True(t, channel.GetSetting().ForceFormat)
+			if limit == 0 {
+				assert.NotContains(t, *channel.Setting, "max_concurrency")
+			} else {
+				assert.Contains(t, *channel.Setting, fmt.Sprintf(`"max_concurrency":%d`, limit))
+			}
+		})
+	}
+	for _, raw := range []string{"", `{}`, `{"proxy":"","force_format":true}`} {
+		channel := &Channel{Setting: &raw}
+		require.NoError(t, channel.ValidateSettings())
+		assert.Zero(t, channel.GetSetting().MaxConcurrency)
+		assert.Equal(t, raw, *channel.Setting)
+	}
+	require.NoError(t, (&Channel{}).ValidateSettings())
+}
+
+func TestChannelConcurrencySettingsAndSelectionDatabaseMatrix(t *testing.T) {
+	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(dialect, func(t *testing.T) {
+			db := openChannelSettingsTestDatabase(t, dialect, "concurrency_test_")
+			require.NoError(t, db.AutoMigrate(&Channel{}, &Ability{}))
+			previousDB, previousType, previousCacheEnabled := DB, common.MainDatabaseType(), common.MemoryCacheEnabled
+			channelSyncLock.Lock()
+			previousChannels, previousGroups := channelsIDM, group2model2channels
+			channelSyncLock.Unlock()
+			DB = db
+			common.SetMainDatabaseType(common.DatabaseType(dialect))
+			initCol()
+			t.Cleanup(func() {
+				assert.NoError(t, db.Migrator().DropTable(&Ability{}, &Channel{}))
+				DB = previousDB
+				common.SetMainDatabaseType(previousType)
+				common.MemoryCacheEnabled = previousCacheEnabled
+				initCol()
+				channelSyncLock.Lock()
+				channelsIDM, group2model2channels = previousChannels, previousGroups
+				channelSyncLock.Unlock()
+			})
+
+			var channels []*Channel
+			for index, priority := range []int64{300, 300, 200, 100, 400} {
+				limit := []int{0, 1, 1000000, 2, 10}[index]
+				setting := fmt.Sprintf(`{"max_concurrency":%d,"force_format":true,"future_settings":{"count":9007199254740993}}`, limit)
+				channel := &Channel{
+					Type: constant.ChannelTypeOpenAI, Key: "test", Name: fmt.Sprintf("concurrency-%d", index),
+					Models: "gpt-6", Group: "default", Status: common.ChannelStatusEnabled,
+					Priority: &priority, Weight: common.GetPointer(uint(index % 2)), Setting: &setting,
+				}
+				if index == 4 {
+					channel.SetOtherSettings(dto.ChannelOtherSettings{SupportedServiceTiers: []string{"priority"}})
+				}
+				require.NoError(t, channel.ValidateSettings())
+				require.NoError(t, db.Create(channel).Error)
+				var loaded Channel
+				require.NoError(t, db.First(&loaded, channel.Id).Error)
+				assert.Equal(t, setting, *loaded.Setting)
+				assert.Equal(t, limit, loaded.GetSetting().MaxConcurrency)
+				assert.True(t, loaded.GetSetting().ForceFormat)
+				channels = append(channels, channel)
+				require.NoError(t, db.Create(&Ability{Group: "default", Model: "gpt-6", ChannelId: channel.Id, Enabled: true, Priority: channel.Priority, Weight: *channel.Weight}).Error)
+			}
+			// Existing settings without a limit stay unlimited and preserve unknown fields on update.
+			legacy := `{"force_format":true,"future_settings":{"count":9007199254740993}}`
+			for _, limit := range []int{0, 7, 1000000, 0} {
+				setting := legacy
+				if limit != 0 {
+					setting = fmt.Sprintf(`{"max_concurrency":%d,"force_format":true,"future_settings":{"count":9007199254740993}}`, limit)
+				}
+				require.NoError(t, db.Model(channels[0]).Update("setting", setting).Error)
+				var loaded Channel
+				require.NoError(t, db.First(&loaded, channels[0].Id).Error)
+				require.NoError(t, loaded.ValidateSettings())
+				assert.Equal(t, setting, *loaded.Setting)
+				assert.Equal(t, limit, loaded.GetSetting().MaxConcurrency)
+			}
+			require.NoError(t, db.Create(&Ability{Group: "single", Model: "gpt-6", ChannelId: channels[0].Id, Enabled: true, Priority: channels[0].Priority, Weight: *channels[0].Weight}).Error)
+			channelSyncLock.Lock()
+			channelsIDM = make(map[int]*Channel, len(channels))
+			ids := make([]int, 0, len(channels))
+			for _, channel := range channels {
+				channelsIDM[channel.Id] = channel
+				ids = append(ids, channel.Id)
+			}
+			group2model2channels = map[string]map[string][]int{"default": {"gpt-6": ids}, "single": {"gpt-6": {channels[0].Id}}}
+			channelSyncLock.Unlock()
+			filters := []filterdto.ChannelFilter{{Kind: filterdto.FilterServiceTier, ServiceTier: "default"}}
+			for _, memoryCache := range []bool{false, true} {
+				common.MemoryCacheEnabled = memoryCache
+				for _, tc := range []struct {
+					name, group, model string
+					retry              int
+					excluded, want     []int
+				}{
+					{name: "original top tier", want: []int{0, 1}},
+					{name: "remaining peer", excluded: []int{0}, want: []int{1}},
+					{name: "full top falls back", excluded: []int{0, 1}, want: []int{2}},
+					{name: "retry tier stays stable after excluding top", retry: 1, excluded: []int{0, 1}, want: []int{2}},
+					{name: "retry selects original middle", retry: 1, want: []int{2}},
+					{name: "full middle falls back", retry: 1, excluded: []int{2}, want: []int{3}},
+					{name: "multiple full tiers fall back", excluded: []int{0, 1, 2}, want: []int{3}},
+					{name: "lower exclusion keeps retry tier", retry: 1, excluded: []int{3}, want: []int{2}},
+					{name: "second retry", retry: 2, excluded: []int{0, 1}, want: []int{3}},
+					{name: "exhausted retry uses last tier", retry: 99, want: []int{3}},
+					{name: "full last tier has no higher fallback", retry: 99, excluded: []int{3}},
+					{name: "retry never returns to higher tier", retry: 1, excluded: []int{2, 3}},
+					{name: "all matching channels full", excluded: []int{0, 1, 2, 3}},
+					{name: "single candidate excluded", group: "single", excluded: []int{0}},
+					{name: "single candidate unchanged", group: "single", want: []int{0}},
+					{name: "normalized model fallback", model: "gpt-6@effort:max", excluded: []int{0, 1}, want: []int{2}},
+					{name: "missing model", model: "missing"},
+					{name: "exclusions leave original candidates intact", want: []int{0, 1}},
+				} {
+					t.Run(fmt.Sprintf("cache=%v/%s", memoryCache, tc.name), func(t *testing.T) {
+						group, model := tc.group, tc.model
+						if group == "" {
+							group = "default"
+						}
+						if model == "" {
+							model = "gpt-6"
+						}
+						excludedIDs := make([]int, 0, len(tc.excluded))
+						for _, index := range tc.excluded {
+							excludedIDs = append(excludedIDs, channels[index].Id)
+						}
+						selected, err := GetRandomSatisfiedChannel(group, model, tc.retry, filters, excludedIDs...)
+						require.NoError(t, err)
+						if len(tc.want) == 0 {
+							assert.Nil(t, selected)
+							return
+						}
+						require.NotNil(t, selected)
+						wantIDs := make([]int, 0, len(tc.want))
+						for _, index := range tc.want {
+							wantIDs = append(wantIDs, channels[index].Id)
+						}
+						assert.Contains(t, wantIDs, selected.Id)
+					})
+				}
+			}
+		})
+	}
+}

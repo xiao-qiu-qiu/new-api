@@ -596,6 +596,47 @@ test('a hidden creation drawer does not request plugin options', async () => {
   expect(await screen.findByRole('option', { name: /Video A/ })).toBeVisible()
 })
 
+test.each([4, 0])(
+  'editing the concurrency limit to %i persists the channel setting',
+  async (limit) => {
+    editingChannel.setting = JSON.stringify({ max_concurrency: 8 })
+    const put = vi
+      .spyOn(api, 'put')
+      .mockResolvedValue({ data: { success: true } })
+    const user = userEvent.setup()
+    render(<ConfigurationHarness currentRow={editingChannel} />)
+    await screen.findByDisplayValue('Existing channel')
+    await user.click(screen.getByRole('tab', { name: /Routing & Mapping/ }))
+    const input = screen.getByRole('spinbutton', {
+      name: 'Channel concurrency limit',
+    })
+    expect(input).toHaveValue(8)
+    fireEvent.change(input, { target: { value: String(limit) } })
+    await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+    await waitFor(() => expect(put).toHaveBeenCalled())
+    const payload = put.mock.calls[0][1] as { setting: string }
+    expect(JSON.parse(payload.setting).max_concurrency ?? 0).toBe(limit)
+  }
+)
+
+test.each(['-1', '1.5', '1000001'])(
+  'an invalid concurrency limit %s stays in the form and prevents saving',
+  async (value) => {
+    const put = vi.spyOn(api, 'put')
+    const user = userEvent.setup()
+    render(<ConfigurationHarness currentRow={editingChannel} />)
+    await screen.findByDisplayValue('Existing channel')
+    await user.click(screen.getByRole('tab', { name: /Routing & Mapping/ }))
+    const input = screen.getByRole('spinbutton', {
+      name: 'Channel concurrency limit',
+    })
+    fireEvent.change(input, { target: { value } })
+    await user.click(screen.getByRole('button', { name: 'Update Channel' }))
+    await waitFor(() => expect(input).toHaveAttribute('aria-invalid', 'true'))
+    expect(put).not.toHaveBeenCalled()
+  }
+)
+
 test('configuration navigation retains its height when the form content overflows', async () => {
   render(<ConfigurationHarness />)
   await userEvent.click(await screen.findByRole('option', { name: /Video A/ }))

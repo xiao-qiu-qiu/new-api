@@ -2,7 +2,7 @@ package model
 
 import (
 	"errors"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 
@@ -110,6 +110,7 @@ func GetChannel(
 	model string,
 	retry int,
 	filters []dto.ChannelFilter,
+	excludedChannelIDs ...int,
 ) (*Channel, error) {
 	var abilities []Ability
 	err := DB.Where(commonGroupCol+" = ? and model = ? and enabled = ?", group, model, true).Order("priority DESC, weight DESC").Find(&abilities).Error
@@ -139,14 +140,28 @@ func GetChannel(
 				priorities = append(priorities, priority)
 			}
 		}
-		sort.Slice(priorities, func(i, j int) bool { return priorities[i] > priorities[j] })
+		slices.Sort(priorities)
+		slices.Reverse(priorities)
 		if retry >= len(priorities) {
 			retry = len(priorities) - 1
 		}
-		targetPriority := priorities[retry]
-		abilities = lo.Filter(abilities, func(ability Ability, _ int) bool {
-			return ability.Priority == nil && targetPriority == 0 || ability.Priority != nil && *ability.Priority == targetPriority
-		})
+		// Keep retry tied to the original tiers even when an entire tier is full.
+		var available []Ability
+		for _, targetPriority := range priorities[retry:] {
+			for _, ability := range abilities {
+				priority := int64(0)
+				if ability.Priority != nil {
+					priority = *ability.Priority
+				}
+				if priority == targetPriority && !slices.Contains(excludedChannelIDs, ability.ChannelId) {
+					available = append(available, ability)
+				}
+			}
+			if len(available) > 0 {
+				break
+			}
+		}
+		abilities = available
 	}
 	channel := Channel{}
 	if len(abilities) > 0 {

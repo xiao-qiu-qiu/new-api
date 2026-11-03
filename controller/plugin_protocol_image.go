@@ -51,6 +51,13 @@ func serveTaskPluginImageProtocol(c *gin.Context, pinned pluginruntime.PinnedEnd
 			context.WithoutCancel(clientRequest.Context()),
 			deps.submissionTimeout,
 		)
+		if guard, ok := clientRequest.Context().Value(constant.ContextKeyChannelConcurrencyGuard).(context.Context); ok {
+			stopGuard := context.AfterFunc(guard, cancelSubmission)
+			defer stopGuard()
+			if guard.Err() != nil {
+				cancelSubmission()
+			}
+		}
 		c.Request = clientRequest.Clone(submissionContext)
 		defer func() {
 			c.Request = clientRequest

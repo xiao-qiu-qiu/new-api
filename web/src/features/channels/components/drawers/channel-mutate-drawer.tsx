@@ -2252,6 +2252,37 @@ export function ChannelMutateDrawer({
 
       <FormField
         control={form.control}
+        name='max_concurrency'
+        render={({ field }) => (
+          <FormItem>
+            <FormLabel>{t('Channel concurrency limit')}</FormLabel>
+            <FormControl>
+              <Input
+                type='number'
+                min={0}
+                max={1000000}
+                step={1}
+                disabled={sensitiveLocked || isSubmitting}
+                {...field}
+                value={field.value ?? 0}
+                onChange={(event) => {
+                  field.onChange(Number(event.target.value))
+                  void form.trigger('max_concurrency')
+                }}
+              />
+            </FormControl>
+            <FormDescription>
+              {t(
+                '0 means unlimited. Full channels are skipped; streams hold a slot until they end.'
+              )}
+            </FormDescription>
+            <FormMessage />
+          </FormItem>
+        )}
+      />
+
+      <FormField
+        control={form.control}
         name='test_model'
         render={({ field }) => (
           <FormItem>

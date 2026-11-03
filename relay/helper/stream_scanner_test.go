@@ -15,8 +15,12 @@ import (
 	"testing/iotest"
 	"time"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/model"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -379,6 +383,103 @@ func TestStreamScannerHandler_ClientCancelAbortsUpstreamAndReturns(t *testing.T)
 	body := recorder.Body.String()
 	assert.Contains(t, body, "first")
 	assert.NotContains(t, body, "second")
+}
+
+func TestStreamScannerHandler_ConcurrencyGuardAbortsClientDrain(t *testing.T) {
+	previousRedis := common.RedisEnabled
+	common.RedisEnabled = false
+	t.Cleanup(func() { common.RedisEnabled = previousRedis })
+	clientCtx, cancelClient := context.WithCancel(t.Context())
+	guardCtx, cancelGuard := context.WithCancelCause(t.Context())
+	ctx := context.WithValue(clientCtx, constant.ContextKeyChannelConcurrencyGuard, guardCtx)
+	pr, pw := io.Pipe()
+	c, resp, info := setupStreamTest(t, pr)
+	c.Request = c.Request.WithContext(ctx)
+	resp.Body = pr
+	info.DisablePing = true
+	info.StreamDisconnectMode = "drain"
+	info.StreamDrainTimeoutSeconds = 3600
+	channel := &model.Channel{Id: 1900046}
+	channel.SetSetting(dto.ChannelSettings{MaxConcurrency: 1})
+	acquired, err := service.TryAcquireChannelConcurrency(c, channel)
+	require.NoError(t, err)
+	require.True(t, acquired)
+	probe, _ := gin.CreateTestContext(httptest.NewRecorder())
+	probe.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	t.Cleanup(func() { service.ReleaseChannelConcurrency(probe) })
+	handled := make(chan string, 2)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer service.ReleaseChannelConcurrency(c)
+		StreamScannerHandler(c, resp, info, func(data string, _ *StreamResult) {
+			_ = StringData(c, data)
+			handled <- data
+		})
+	}()
+	t.Cleanup(func() {
+		cancelClient()
+		cancelGuard(context.Canceled)
+		_ = pr.Close()
+		_ = pw.Close()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("stream scanner did not stop")
+		}
+	})
+	_, err = fmt.Fprint(pw, "data: before\n")
+	require.NoError(t, err)
+	select {
+	case data := <-handled:
+		require.Equal(t, "before", data)
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream did not process the initial chunk")
+	}
+	// Client loss detaches downstream writes while upstream work keeps running.
+	cancelClient()
+	select {
+	case <-info.StreamLifecycle.Gone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream did not enter drain mode")
+	}
+	require.NoError(t, info.StreamLifecycle.Context.Err())
+	_, err = fmt.Fprint(pw, "data: draining\n")
+	require.NoError(t, err)
+	select {
+	case data := <-handled:
+		assert.Equal(t, "draining", data)
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream stopped processing before the guard was cancelled")
+	}
+	acquired, err = service.TryAcquireChannelConcurrency(probe, channel)
+	require.NoError(t, err)
+	require.False(t, acquired, "client disconnect must not release capacity while upstream is draining")
+
+	leaseLost := errors.New("channel concurrency lease lost")
+	cancelGuard(leaseLost)
+	select {
+	case <-info.StreamLifecycle.Context.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("guard cancellation did not cancel the upstream context")
+	}
+	require.ErrorIs(t, context.Cause(info.StreamLifecycle.Context), leaseLost)
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("guard cancellation did not abort the upstream during drain")
+	}
+	assert.ErrorIs(t, context.Cause(info.StreamLifecycle.Context), leaseLost)
+	assert.True(t, info.StreamStatus.ClientGone)
+	// StreamStatus preserves the downstream failure; the upstream cause above
+	// must still describe lease loss after the scanner closes its lifecycle.
+	assert.ErrorIs(t, info.StreamStatus.EndError, context.Canceled)
+	_, err = fmt.Fprint(pw, "data: after-guard\n")
+	assert.ErrorIs(t, err, io.ErrClosedPipe, "guard cancellation must close the upstream body before the drain deadline")
+	assert.Equal(t, 2, info.ReceivedResponseCount)
+	acquired, err = service.TryAcquireChannelConcurrency(probe, channel)
+	require.NoError(t, err)
+	assert.True(t, acquired, "the scanner owner must release capacity after the upstream stops")
 }
 
 // ---------- Ping tests ----------

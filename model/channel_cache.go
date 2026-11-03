@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -119,10 +120,11 @@ func GetRandomSatisfiedChannel(
 	model string,
 	retry int,
 	filters []dto.ChannelFilter,
+	excludedChannelIDs ...int,
 ) (*Channel, error) {
 	// if memory cache is disabled, get channel directly from database
 	if !common.MemoryCacheEnabled {
-		return GetChannel(group, model, retry, filters)
+		return GetChannel(group, model, retry, filters, excludedChannelIDs...)
 	}
 
 	channelSyncLock.RLock()
@@ -143,46 +145,50 @@ func GetRandomSatisfiedChannel(
 
 	if len(channels) == 1 {
 		if channel, ok := channelsIDM[channels[0]]; ok {
+			if slices.Contains(excludedChannelIDs, channel.Id) {
+				return nil, nil
+			}
 			return channel, nil
 		}
 		return nil, fmt.Errorf("database consistency error: channel #%d does not exist, please contact the administrator", channels[0])
 	}
 
-	uniquePriorities := make(map[int]bool)
+	uniquePriorities := make(map[int64]bool)
 	for _, channelId := range channels {
 		if channel, ok := channelsIDM[channelId]; ok {
-			uniquePriorities[int(channel.GetPriority())] = true
+			uniquePriorities[channel.GetPriority()] = true
 		} else {
 			return nil, fmt.Errorf("database consistency error: channel #%d does not exist, please contact the administrator", channelId)
 		}
 	}
-	var sortedUniquePriorities []int
+	var sortedUniquePriorities []int64
 	for priority := range uniquePriorities {
 		sortedUniquePriorities = append(sortedUniquePriorities, priority)
 	}
-	sort.Sort(sort.Reverse(sort.IntSlice(sortedUniquePriorities)))
+	slices.Sort(sortedUniquePriorities)
+	slices.Reverse(sortedUniquePriorities)
 
 	if retry >= len(uniquePriorities) {
 		retry = len(uniquePriorities) - 1
 	}
-	targetPriority := int64(sortedUniquePriorities[retry])
-
-	// get the priority for the given retry number
+	// Resolve retry against all matching priorities before excluding full channels.
 	var sumWeight = 0
 	var targetChannels []*Channel
-	for _, channelId := range channels {
-		if channel, ok := channelsIDM[channelId]; ok {
-			if channel.GetPriority() == targetPriority {
+	for _, targetPriority := range sortedUniquePriorities[retry:] {
+		for _, channelId := range channels {
+			channel := channelsIDM[channelId]
+			if channel.GetPriority() == targetPriority && !slices.Contains(excludedChannelIDs, channelId) {
 				sumWeight += channel.GetWeight()
 				targetChannels = append(targetChannels, channel)
 			}
-		} else {
-			return nil, fmt.Errorf("database consistency error: channel #%d does not exist, please contact the administrator", channelId)
+		}
+		if len(targetChannels) > 0 {
+			break
 		}
 	}
 
 	if len(targetChannels) == 0 {
-		return nil, errors.New(fmt.Sprintf("no channel found, group: %s, model: %s, priority: %d", group, model, targetPriority))
+		return nil, nil
 	}
 
 	// smoothing factor and adjustment

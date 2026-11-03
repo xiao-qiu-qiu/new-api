@@ -51,6 +51,7 @@ const CONFIGURATION_BLOCKS = {
     fields: [
       'priority',
       'weight',
+      'max_concurrency',
       'test_model',
       'auto_ban',
       'supported_service_tiers',
@@ -149,6 +150,7 @@ export function getChannelConfigurationState(
     routingStrategy: Boolean(
       values.priority ||
       values.weight ||
+      values.max_concurrency ||
       values.supported_service_tiers?.length ||
       values.test_model?.trim() ||
       (values.auto_ban ?? 1) !== 1

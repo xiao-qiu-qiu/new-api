@@ -6,6 +6,7 @@ import (
 	"time"
 
 	hostcommon "github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 )
 
@@ -36,6 +37,7 @@ type StreamLifecycle struct {
 	client     context.Context
 	cancel     context.CancelCauseFunc
 	stopClient func() bool
+	stopGuard  func() bool
 	timeout    time.Duration
 	mu         sync.Mutex
 	err        error
@@ -51,6 +53,14 @@ func NewStreamLifecycle(client context.Context, drain bool, timeout time.Duratio
 	ctx, cancel := context.WithCancelCause(parent)
 	l := &StreamLifecycle{Context: ctx, Gone: make(chan struct{}), Drain: drain, client: client, cancel: cancel, timeout: timeout}
 	l.stopClient = context.AfterFunc(client, func() { l.Disconnect(client.Err()) })
+	if guard, ok := client.Value(constant.ContextKeyChannelConcurrencyGuard).(context.Context); ok {
+		// Lease loss must stop upstream work even after the client disconnected
+		// in drain mode; otherwise another instance can reuse the expired slot.
+		l.stopGuard = context.AfterFunc(guard, func() { cancel(context.Cause(guard)) })
+		if err := context.Cause(guard); err != nil {
+			cancel(err)
+		}
+	}
 	l.ObserveClient()
 	return l
 }
@@ -95,6 +105,9 @@ func (l *StreamLifecycle) ClientError() error {
 
 func (l *StreamLifecycle) Close() {
 	l.stopClient()
+	if l.stopGuard != nil {
+		l.stopGuard()
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.closed = true

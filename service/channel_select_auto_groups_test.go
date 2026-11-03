@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -22,6 +23,137 @@ import (
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
+
+func concurrencySelectionContext(t *testing.T) *gin.Context {
+	t.Helper()
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	common.SetContextKey(c, constant.ContextKeyUserGroup, "default")
+	t.Cleanup(func() { ReleaseChannelConcurrency(c) })
+	return c
+}
+
+func TestChannelConcurrencyRouting(t *testing.T) {
+	for _, memoryCache := range []bool{true, false} {
+		t.Run(fmt.Sprintf("memory_cache_%t", memoryCache), func(t *testing.T) {
+			db := setupChannelSelectAutoGroupsTest(t)
+			previousRedis := common.RedisEnabled
+			common.RedisEnabled = false
+			t.Cleanup(func() { common.RedisEnabled = previousRedis })
+			const modelName = "concurrency-model"
+			for _, id := range []int{4101, 4102, 4103} {
+				createChannelSelectAutoGroupsChannel(t, db, id, "default", modelName)
+				priority := 100
+				if id == 4103 {
+					priority = 0
+				}
+				require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", id).Updates(map[string]any{"setting": `{"max_concurrency":1}`, "priority": priority}).Error)
+				require.NoError(t, db.Model(&model.Ability{}).Where("channel_id = ?", id).Update("priority", priority).Error)
+			}
+			model.InitChannelCache()
+			common.MemoryCacheEnabled = memoryCache
+			first, err := model.CacheGetChannel(4101)
+			require.NoError(t, err)
+			held := concurrencySelectionContext(t)
+			require.NoError(t, acquireChannelConcurrency(held, first))
+
+			second := concurrencySelectionContext(t)
+			selected, _, selectErr := SelectChannelForRequest(second, modelName, &RetryParam{Ctx: second, ModelName: modelName, TokenGroup: "default"})
+			require.Nil(t, selectErr)
+			require.NotNil(t, selected)
+			assert.Equal(t, 4102, selected.Id, "a free peer wins before a lower priority")
+
+			lower := concurrencySelectionContext(t)
+			selected, _, selectErr = SelectChannelForRequest(lower, modelName, &RetryParam{Ctx: lower, ModelName: modelName, TokenGroup: "default"})
+			require.Nil(t, selectErr)
+			require.NotNil(t, selected)
+			assert.Equal(t, 4103, selected.Id, "full tiers fall through even with zero retry budget")
+
+			blocked := concurrencySelectionContext(t)
+			selected, _, selectErr = SelectChannelForRequest(blocked, modelName, &RetryParam{Ctx: blocked, ModelName: modelName, TokenGroup: "default"})
+			assert.Nil(t, selected)
+			require.NotNil(t, selectErr)
+			assert.Equal(t, http.StatusTooManyRequests, selectErr.StatusCode)
+			assert.Equal(t, types.ErrorCode("channel_concurrency_limit"), selectErr.Code)
+
+			ReleaseChannelConcurrency(lower)
+			pinned := concurrencySelectionContext(t)
+			GetChannelConstraints(pinned).AddPin(appdto.ChannelPin{ChannelId: 4101, Source: appdto.PinSourceToken})
+			selected, _, selectErr = SelectChannelForRequest(pinned, modelName, &RetryParam{Ctx: pinned, ModelName: modelName, TokenGroup: "default"})
+			assert.Nil(t, selected)
+			require.NotNil(t, selectErr)
+			assert.Equal(t, http.StatusTooManyRequests, selectErr.StatusCode, "a pin cannot escape to an available channel")
+
+			selected, _, err = CacheGetRandomSatisfiedChannel(&RetryParam{Ctx: second, ModelName: modelName, TokenGroup: "default", Retry: common.GetPointer(1)})
+			require.NoError(t, err)
+			require.NotNil(t, selected)
+			assert.Equal(t, 4103, selected.Id)
+			peer, err := model.CacheGetChannel(4102)
+			require.NoError(t, err)
+			require.NoError(t, acquireChannelConcurrency(blocked, peer), "retry releases the previous channel")
+		})
+	}
+}
+
+func TestChannelConcurrencyAffinityAndAutoGroups(t *testing.T) {
+	for _, mode := range []string{"prefer", "strict", "auto"} {
+		t.Run(mode, func(t *testing.T) {
+			db := setupChannelSelectAutoGroupsTest(t)
+			affinity := operation_setting.GetChannelAffinitySetting()
+			previousAffinity, previousRedis := *affinity, common.RedisEnabled
+			common.RedisEnabled = false
+			t.Cleanup(func() { *affinity, common.RedisEnabled = previousAffinity, previousRedis })
+			const modelName = "concurrency-affinity-model"
+			for _, id := range []int{4201, 4202, 4203} {
+				group := "default"
+				if mode == "auto" && id != 4203 {
+					group = "vip"
+				}
+				createChannelSelectAutoGroupsChannel(t, db, id, group, modelName)
+				require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", id).Update("setting", `{"max_concurrency":1}`).Error)
+			}
+			model.InitChannelCache()
+			group := "default"
+			request := concurrencySelectionContext(t)
+			if mode == "auto" {
+				group = "auto"
+				*affinity = operation_setting.ChannelAffinitySetting{}
+				common.SetContextKey(request, constant.ContextKeyTokenAutoGroups, []string{"vip", "default"})
+			} else {
+				rule := operation_setting.ChannelAffinityRule{
+					Name: "concurrency-affinity", ModelRegex: []string{"^concurrency-affinity-model$"}, SessionMode: mode,
+					KeySources:         []operation_setting.ChannelAffinityKeySource{{Type: "request_header", Key: "X-Session"}},
+					FallbackChannelIDs: []int{4201, 4202, 4203}, IncludeRuleName: true, IncludeModelName: true, IncludeUsingGroup: true,
+				}
+				*affinity = operation_setting.ChannelAffinitySetting{Enabled: true, Rules: []operation_setting.ChannelAffinityRule{rule}, DefaultTTLSeconds: 3600}
+				request.Request.Header.Set("X-Session", t.Name())
+				key := buildChannelAffinityCacheKeySuffix(rule, modelName, group, t.Name())
+				cache := getChannelAffinityCache()
+				require.NoError(t, cache.SetWithTTL(key, 4202, time.Minute))
+				t.Cleanup(func() { _, err := cache.DeleteMany([]string{key}); assert.NoError(t, err) })
+			}
+			for _, id := range []int{4201, 4202} {
+				if mode != "auto" && id == 4201 {
+					continue // An earlier fallback stays free but must not be revisited.
+				}
+				channel, err := model.CacheGetChannel(id)
+				require.NoError(t, err)
+				require.NoError(t, acquireChannelConcurrency(concurrencySelectionContext(t), channel))
+			}
+			selected, selectedGroup, selectErr := SelectChannelForRequest(request, modelName, &RetryParam{Ctx: request, ModelName: modelName, TokenGroup: group})
+			if mode == "strict" {
+				assert.Nil(t, selected)
+				require.NotNil(t, selectErr)
+				assert.Equal(t, http.StatusTooManyRequests, selectErr.StatusCode)
+				return
+			}
+			require.Nil(t, selectErr)
+			require.NotNil(t, selected)
+			assert.Equal(t, 4203, selected.Id)
+			assert.Equal(t, "default", selectedGroup)
+		})
+	}
+}
 
 func setupChannelSelectAutoGroupsTest(t *testing.T) *gorm.DB {
 	t.Helper()

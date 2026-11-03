@@ -189,11 +189,12 @@ func RunActiveChannelProbe(ctx context.Context, probe model.ChannelProbe) model.
 	}
 	started := time.Now()
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	defer service.ReleaseChannelConcurrency(c)
 	c.Request = httptest.NewRequestWithContext(ctx, http.MethodPost, "/v1/chat/completions", nil)
 	retry := &service.RetryParam{Ctx: c, TokenGroup: probe.GroupName, ModelName: probe.Model, RequestPath: c.Request.URL.Path, Retry: common.GetPointer(0)}
 	observation := model.ChannelProbeResult{ErrorCode: "channel_missing"}
 	for ; retry.GetRetry() <= common.RetryTimes; retry.IncreaseRetry() {
-		if ctx.Err() != nil {
+		if c.Request.Context().Err() != nil {
 			observation.Success, observation.ErrorCode = false, "timeout"
 			return observation
 		}
@@ -204,12 +205,12 @@ func RunActiveChannelProbe(ctx context.Context, probe model.ChannelProbe) model.
 		service.RequestPolicy(c).BeginAttempt(channel, probe.GroupName)
 		elapsed := time.Since(started).Milliseconds()
 		var attempt testResult
-		observation, attempt = runChannelProbeAttempt(ctx, channel, probe.Model)
+		observation, attempt = runChannelProbeAttempt(c.Request.Context(), channel, probe.Model)
 		if observation.TTFTMS != nil {
 			ms := *observation.TTFTMS + elapsed
 			observation.TTFTMS = &ms
 		}
-		if observation.Success || ctx.Err() != nil {
+		if observation.Success || c.Request.Context().Err() != nil {
 			return observation
 		}
 		retryError := attempt.newAPIError

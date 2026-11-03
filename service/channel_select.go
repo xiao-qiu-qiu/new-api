@@ -133,8 +133,10 @@ func (p *RetryParam) ResetRetryNextTry() {
 //	Retry=3: GroupB, priority1 (startRetryIndex=2, priorityRetry=1)
 //	         分组B, 优先级1
 func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, error) {
+	ReleaseChannelConcurrency(param.Ctx)
 	var channel *model.Channel
 	var err error
+	capacityLimited := false
 	selectGroup := param.TokenGroup
 	userGroup := common.GetContextKeyString(param.Ctx, constant.ContextKeyUserGroup)
 	filters := GetChannelConstraints(param.Ctx).Filters
@@ -143,9 +145,21 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 		if param.GetRetry() > 0 && ShouldSkipRetryAfterChannelAffinityFailure(param.Ctx) {
 			return nil, selectGroup, errors.New("strict_session_binding_unavailable")
 		}
-		channel, selectGroup = nextChannelAffinityFallback(param.Ctx, param.ModelName, param.TokenGroup, true)
-		if channel != nil {
-			return channel, selectGroup, nil
+		for {
+			channel, selectGroup = nextChannelAffinityFallback(param.Ctx, param.ModelName, param.TokenGroup, true)
+			if channel == nil {
+				break
+			}
+			if err = acquireChannelConcurrency(param.Ctx, channel); err == nil {
+				return channel, selectGroup, nil
+			}
+			if !errors.Is(err, errChannelConcurrencyLimited) {
+				return nil, selectGroup, err
+			}
+			capacityLimited = true
+		}
+		if capacityLimited {
+			return nil, selectGroup, errChannelConcurrencyLimited
 		}
 		return nil, selectGroup, errors.New("channel_affinity_fallback_exhausted")
 	}
@@ -179,12 +193,19 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			priorityRetry := max(groupRetry-affinityRetryOffset, 0)
 			logger.LogDebug(param.Ctx, "Auto selecting group: %s, priorityRetry: %d", autoGroup, priorityRetry)
 
-			channel, _ = model.GetRandomSatisfiedChannel(
+			channel, err = selectChannelWithConcurrency(
+				param.Ctx,
 				autoGroup,
 				param.ModelName,
 				priorityRetry,
 				filters,
 			)
+			if err != nil {
+				if !errors.Is(err, errChannelConcurrencyLimited) {
+					return nil, autoGroup, err
+				}
+				capacityLimited = true
+			}
 			if channel == nil {
 				// Current group has no available channel for this model, try next group
 				// 当前分组没有该模型的可用渠道，尝试下一个分组
@@ -225,7 +246,8 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 			break
 		}
 	} else {
-		channel, err = model.GetRandomSatisfiedChannel(
+		channel, err = selectChannelWithConcurrency(
+			param.Ctx,
 			param.TokenGroup,
 			param.ModelName,
 			max(param.GetRetry()-affinityRetryOffset, 0),
@@ -234,6 +256,9 @@ func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, 
 		if err != nil {
 			return nil, param.TokenGroup, err
 		}
+	}
+	if channel == nil && capacityLimited {
+		return nil, selectGroup, errChannelConcurrencyLimited
 	}
 	return channel, selectGroup, nil
 }
@@ -375,12 +400,16 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 				FilterKind: kind, Channel: channel,
 			}
 		}
+		if err := acquireChannelConcurrency(c, channel); err != nil {
+			return nil, "", channelConcurrencySelectionError(err)
+		}
 		return channel, "", nil
 	}
 
 	usingGroup := retry.TokenGroup
 	var channel *model.Channel
 	var selectGroup string
+	affinityBusy := false
 	if retry.GetRetry() == 0 {
 		if preferredChannelID, found := GetPreferredChannelByAffinity(c, modelName, usingGroup); found {
 			affinityUsable := false
@@ -397,19 +426,34 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 							selectGroup = g
 							common.SetContextKey(c, constant.ContextKeyAutoGroup, g)
 							channel = preferred
-							affinityUsable = true
-							MarkChannelAffinityUsed(c, g, preferred.Id)
 							break
 						}
 					}
 				} else if model.IsChannelEnabledForGroupModel(usingGroup, modelName, preferred.Id) {
 					channel = preferred
 					selectGroup = usingGroup
-					affinityUsable = true
-					MarkChannelAffinityUsed(c, usingGroup, preferred.Id)
 				}
 			}
-			if !affinityUsable && !ShouldKeepChannelAffinityOnChannelDisabled() {
+			if channel != nil {
+				if err := acquireChannelConcurrency(c, channel); err != nil {
+					if !errors.Is(err, errChannelConcurrencyLimited) || RequestPolicy(c).SessionMode == "strict" {
+						return nil, selectGroup, channelConcurrencySelectionError(err)
+					}
+					affinityBusy = true
+					if meta, ok := getChannelAffinityMeta(c); ok && len(meta.FallbackChannelIDs) > 0 {
+						next := len(meta.FallbackChannelIDs)
+						if index := slices.Index(meta.FallbackChannelIDs, channel.Id); index >= 0 {
+							next = index + 1
+						}
+						c.Set(ginKeyChannelAffinityFallbackIndex, next)
+					}
+					channel = nil
+				} else {
+					affinityUsable = true
+					MarkChannelAffinityUsed(c, selectGroup, preferred.Id)
+				}
+			}
+			if !affinityUsable && !affinityBusy && !ShouldKeepChannelAffinityOnChannelDisabled() {
 				ClearCurrentChannelAffinityCache(c)
 			}
 			if !affinityUsable && RequestPolicy(c).SessionMode == "strict" {
@@ -421,7 +465,13 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 	if channel == nil {
 		var err error
 		channel, selectGroup, err = CacheGetRandomSatisfiedChannel(retry)
+		if affinityBusy && channel == nil && (err == nil || err.Error() == "channel_affinity_fallback_exhausted") {
+			err = errChannelConcurrencyLimited
+		}
 		if err != nil {
+			if capacityErr := channelConcurrencySelectionError(err); capacityErr != nil {
+				return nil, selectGroup, capacityErr
+			}
 			showGroup := usingGroup
 			if usingGroup == "auto" {
 				showGroup = fmt.Sprintf("auto(%s)", selectGroup)
@@ -439,6 +489,7 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 		}
 	}
 	if ok, kind := model.ChannelSatisfiesFilters(channel, modelName, constraints.Filters); !ok {
+		ReleaseChannelConcurrency(c)
 		return nil, selectGroup, &ChannelSelectError{
 			StatusCode: http.StatusServiceUnavailable, Code: types.ErrorCodeModelNotFound, MessageID: i18n.MsgDistributorNoAvailableChannel,
 			Params:     map[string]any{"Group": common.GetContextKeyString(c, constant.ContextKeyUsingGroup), "Model": modelName},

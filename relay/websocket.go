@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -36,6 +37,14 @@ func WssHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types.
 	if resp != nil {
 		info.TargetWs = resp.(*websocket.Conn)
 		defer info.TargetWs.Close()
+		clientConn, targetConn := info.ClientWs, info.TargetWs
+		stopCancellation := context.AfterFunc(c.Request.Context(), func() {
+			_ = targetConn.Close()
+			if clientConn != nil {
+				_ = clientConn.Close()
+			}
+		})
+		defer stopCancellation()
 		var closeOnce sync.Once
 		unregister := wsmanager.Register(info.ChannelId, wsmanager.KindRealtime, func(reason string) {
 			closeOnce.Do(func() {

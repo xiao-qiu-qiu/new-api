@@ -324,6 +324,9 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 	}
 	channel, selectGroup, err := service.CacheGetRandomSatisfiedChannel(retryParam)
 	if err != nil {
+		if capacityErr := service.ChannelConcurrencyError(c, err); capacityErr != nil {
+			return nil, capacityErr
+		}
 		return nil, types.NewError(errors.New(i18n.T(c, i18n.MsgRelayRetryGetChannelFailed, map[string]any{"Group": selectGroup, "Model": info.OriginModelName, "Error": err.Error()})), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
 	}
 	if channel == nil {
@@ -572,6 +575,13 @@ func executeTaskSubmissionWith(
 		if lockedCh, ok := relayInfo.LockedChannel.(*model.Channel); ok && lockedCh != nil {
 			channel = lockedCh
 			policy.BeginAttempt(channel, relayInfo.UsingGroup)
+			if retryParam.GetRetry() > 0 {
+				service.ReleaseChannelConcurrency(c)
+			}
+			if capacityErr := service.AcquireChannelConcurrency(c, channel); capacityErr != nil {
+				taskErr = service.TaskErrorWrapperLocal(capacityErr.Err, string(capacityErr.GetErrorCode()), capacityErr.StatusCode)
+				break
+			}
 			if retryParam.GetRetry() > 0 {
 				if setupErr := middleware.SetupContextForSelectedChannel(c, channel, relayInfo.OriginModelName); setupErr != nil {
 					taskErr = service.TaskErrorWrapperLocal(setupErr.Err, "setup_locked_channel_failed", http.StatusInternalServerError)

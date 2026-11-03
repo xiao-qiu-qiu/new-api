@@ -25,6 +25,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -595,6 +596,167 @@ func newTestWebSocketPair(t *testing.T) (*websocket.Conn, *websocket.Conn, func(
 		server.Close()
 	}
 	return target, serverConn, cleanup
+}
+
+func TestResponsesWSChannelConcurrencyPerCreate(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	database := setupRelayChannelDB(t)
+	require.NoError(t, database.AutoMigrate(&model.User{}))
+	user := &model.User{Username: "ws-concurrency-user"}
+	require.NoError(t, database.Create(user).Error)
+	previousRedis, previousCountTokens, previousLog := common.RedisEnabled, constant.CountToken, common.LogConsumeEnabled
+	previousPrices := ratio_setting.ModelPrice2JSONString()
+	quotaSetting := operation_setting.GetQuotaSetting()
+	previousFreePreConsume := quotaSetting.EnableFreeModelPreConsume
+	common.RedisEnabled, constant.CountToken, common.LogConsumeEnabled = false, false, false
+	quotaSetting.EnableFreeModelPreConsume = false
+	t.Cleanup(func() {
+		common.RedisEnabled, constant.CountToken, common.LogConsumeEnabled = previousRedis, previousCountTokens, previousLog
+		quotaSetting.EnableFreeModelPreConsume = previousFreePreConsume
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(previousPrices))
+	})
+	const modelName = "ws-concurrency-model"
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"ws-concurrency-model":0}`))
+	var handshakes atomic.Int32
+	peers := make(chan *websocket.Conn, 1)
+	upstreamErrors := make(chan error, 1)
+	upgrader := websocket.Upgrader{}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		peer, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			upstreamErrors <- err
+			return
+		}
+		handshakes.Add(1)
+		peers <- peer
+	}))
+	t.Cleanup(upstream.Close)
+	channel := &model.Channel{Name: "ws-concurrency", Key: "sk-test", BaseURL: &upstream.URL, Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeOpenAI}
+	channel.SetSetting(dto.ChannelSettings{ResponsesWebSocketEnabled: true, MaxConcurrency: 1})
+	require.NoError(t, database.Create(channel).Error)
+	client, server, cleanup := newTestWebSocketPair(t)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	guardCtx, cancelGuard := context.WithCancelCause(t.Context())
+	t.Cleanup(func() { cancelGuard(context.Canceled) })
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ResponsesWebSocketHelper(c, server, func(request *http.Request, requestID string, run func(*gin.Context) *types.NewAPIError) *types.NewAPIError {
+			call, _ := gin.CreateTestContext(httptest.NewRecorder())
+			requestCtx, cancelRequest := context.WithCancelCause(request.Context())
+			stopGuard := context.AfterFunc(guardCtx, func() { cancelRequest(context.Cause(guardCtx)) })
+			defer stopGuard()
+			defer cancelRequest(context.Canceled)
+			call.Request = request.WithContext(context.WithValue(requestCtx, constant.ContextKeyChannelConcurrencyGuard, guardCtx))
+			defer common.CleanupBodyStorage(call)
+			common.SetContextKey(call, common.RequestIdKey, requestID)
+			common.SetContextKey(call, constant.ContextKeyUserId, user.Id)
+			common.SetContextKey(call, constant.ContextKeyUsingGroup, "default")
+			service.GetChannelConstraints(call).AddPin(appdto.ChannelPin{ChannelId: channel.Id, Source: appdto.PinSourceToken})
+			return run(call)
+		})
+	}()
+	t.Cleanup(func() {
+		cleanup()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("websocket relay did not finish")
+		}
+	})
+	probe, _ := gin.CreateTestContext(httptest.NewRecorder())
+	probe.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	t.Cleanup(func() { service.ReleaseChannelConcurrency(probe) })
+	var peer *websocket.Conn
+	for index, status := range []string{"completed", "failed", "cancelled"} {
+		streamID := fmt.Sprintf("stream-%d", index)
+		responseID := fmt.Sprintf("resp-%d", index)
+		create := fmt.Sprintf(`{"type":"response.create","stream_id":%q,"model":%q,"input":"hi"}`, streamID, modelName)
+		require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(create)))
+		if peer == nil {
+			select {
+			case peer = <-peers:
+				t.Cleanup(func() { _ = peer.Close() })
+			case err := <-upstreamErrors:
+				t.Fatalf("upstream handshake failed: %v", err)
+			case <-time.After(5 * time.Second):
+				t.Fatal("relay did not connect to upstream")
+			}
+		}
+		require.NoError(t, peer.SetReadDeadline(time.Now().Add(5*time.Second)))
+		_, body, err := peer.ReadMessage()
+		require.NoError(t, err)
+		var forwarded struct {
+			Type     string `json:"type"`
+			StreamID string `json:"stream_id"`
+		}
+		require.NoError(t, common.Unmarshal(body, &forwarded))
+		assert.Equal(t, "response.create", forwarded.Type)
+		assert.Equal(t, streamID, forwarded.StreamID, "a previously rejected create must not reach upstream")
+		created := fmt.Sprintf(`{"type":"response.created","stream_id":%q,"response":{"id":%q,"model":%q}}`, streamID, responseID, modelName)
+		require.NoError(t, peer.WriteMessage(websocket.TextMessage, []byte(created)))
+		require.NoError(t, client.SetReadDeadline(time.Now().Add(5*time.Second)))
+		_, body, err = client.ReadMessage()
+		require.NoError(t, err)
+		assert.JSONEq(t, created, string(body))
+		acquired, err := service.TryAcquireChannelConcurrency(probe, channel)
+		require.NoError(t, err)
+		require.False(t, acquired, "every active create must occupy capacity")
+
+		terminal := fmt.Sprintf(`{"type":%q,"stream_id":%q,"response":{"id":%q,"model":%q,"status":%q,"output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}`, "response."+status, streamID, responseID, modelName, status)
+		require.NoError(t, peer.WriteMessage(websocket.TextMessage, []byte(terminal)))
+		_, body, err = client.ReadMessage()
+		require.NoError(t, err)
+		assert.JSONEq(t, terminal, string(body))
+		acquired, err = service.TryAcquireChannelConcurrency(probe, channel)
+		require.NoError(t, err)
+		require.True(t, acquired, "%s must release capacity before publishing its terminal frame", status)
+
+		// An idle established upstream socket cannot bypass another request's slot.
+		require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","event_id":"busy-create","stream_id":"busy","model":"ws-concurrency-model","input":"hi"}`)))
+		_, body, err = client.ReadMessage()
+		require.NoError(t, err)
+		var rejected responsesWSErrorEvent
+		require.NoError(t, common.Unmarshal(body, &rejected))
+		assert.Equal(t, "error", rejected.Type)
+		assert.Equal(t, http.StatusTooManyRequests, rejected.Status)
+		assert.Equal(t, "busy-create", rejected.EventID)
+		assert.Equal(t, "busy", rejected.StreamID)
+		require.NotNil(t, rejected.Error)
+		assert.Equal(t, "channel_concurrency_limit", rejected.Error.Code)
+		service.ReleaseChannelConcurrency(probe)
+	}
+	assert.Equal(t, int32(1), handshakes.Load(), "all creates must reuse one physical upstream connection")
+	// Lease loss must stop an active generation even while the client is connected.
+	require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","stream_id":"guard-loss","model":"ws-concurrency-model","input":"hi"}`)))
+	require.NoError(t, peer.SetReadDeadline(time.Now().Add(5*time.Second)))
+	_, body, err := peer.ReadMessage()
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `"stream_id":"guard-loss"`)
+	created := `{"type":"response.created","stream_id":"guard-loss","response":{"id":"resp-guard-loss","model":"ws-concurrency-model"}}`
+	require.NoError(t, peer.WriteMessage(websocket.TextMessage, []byte(created)))
+	require.NoError(t, client.SetReadDeadline(time.Now().Add(5*time.Second)))
+	_, body, err = client.ReadMessage()
+	require.NoError(t, err)
+	assert.JSONEq(t, created, string(body))
+	acquired, err := service.TryAcquireChannelConcurrency(probe, channel)
+	require.NoError(t, err)
+	require.False(t, acquired)
+	cancelGuard(errors.New("channel concurrency lease lost"))
+	for _, conn := range []*websocket.Conn{client, peer} {
+		require.NoError(t, conn.SetReadDeadline(time.Now().Add(5*time.Second)))
+		_, _, err := conn.ReadMessage()
+		assert.True(t, websocket.IsCloseError(err, websocket.CloseInternalServerErr), "lease loss must close both peers with 1011: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("websocket relay did not stop after lease loss")
+	}
+	acquired, err = service.TryAcquireChannelConcurrency(probe, channel)
+	require.NoError(t, err)
+	assert.True(t, acquired, "the stopped generation must return capacity")
 }
 
 func TestResponsesWSMessageSizeLimit(t *testing.T) {
