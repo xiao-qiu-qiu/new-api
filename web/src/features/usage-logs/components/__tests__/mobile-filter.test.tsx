@@ -152,7 +152,7 @@ it('applies mobile drawer filters only when Search is pressed', async () => {
   await user.click(screen.getByRole('button', { name: 'Filter' }))
   const dialog = await screen.findByRole('dialog', { name: 'Filter' })
   await user.type(
-    within(dialog).getByRole('textbox', { name: 'Model Name', exact: true }),
+    within(dialog).getByRole('textbox', { name: 'Model Name' }),
     'gemini-3.7-flash'
   )
   expect(router.state.location.search).not.toHaveProperty('model')
