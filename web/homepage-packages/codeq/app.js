@@ -248,6 +248,7 @@ pointerGlow.className = 'pointer-glow'
 pointerLayer.append(pointerGlow)
 document.body.append(pointerLayer)
 let pointerFrame = 0
+let pointerFadeTimer
 let pointerX = 0
 let pointerY = 0
 document.addEventListener(
@@ -256,6 +257,8 @@ document.addEventListener(
     if (!pointerMotion.matches || event.pointerType === 'touch') return
     pointerX = event.clientX
     pointerY = event.clientY
+    clearTimeout(pointerFadeTimer)
+    pointerFadeTimer = setTimeout(hidePointerGlow, 800)
     if (pointerFrame) return
     pointerFrame = requestAnimationFrame(() => {
       pointerGlow.style.translate = `${pointerX}px ${pointerY}px`
@@ -266,6 +269,7 @@ document.addEventListener(
   { passive: true }
 )
 const hidePointerGlow = () => {
+  clearTimeout(pointerFadeTimer)
   cancelAnimationFrame(pointerFrame)
   pointerFrame = 0
   pointerLayer.classList.remove('is-active')
