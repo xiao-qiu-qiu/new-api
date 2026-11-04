@@ -4,6 +4,8 @@
 # Errors returned to AI clients
 distributor.channel_concurrency_limited: "可用管道的併發數已達上限，請稍後重試。"
 distributor.channel_concurrency_unavailable: "管道併發控制暫時無法使用，請稍後重試。"
+distributor.channel_maintenance_timeout: "管道維護等待逾時，請稍後重試"
+distributor.channel_maintenance_unavailable: "暫時無法確認管道維護狀態，請稍後重試"
 common.database_error: "資料庫出錯，請聯繫管理員"
 auth.user_banned: "使用者已被封禁"
 token.get_info_failed: "獲取令牌資訊失敗，請稍後重試"

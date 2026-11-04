@@ -27,6 +27,8 @@ const (
 	MsgDistributorChannelDisabled              = "distributor.channel_disabled"
 	MsgChannelConcurrencyLimited               = "distributor.channel_concurrency_limited"
 	MsgChannelConcurrencyUnavailable           = "distributor.channel_concurrency_unavailable"
+	MsgChannelMaintenanceTimeout               = "distributor.channel_maintenance_timeout"
+	MsgChannelMaintenanceUnavailable           = "distributor.channel_maintenance_unavailable"
 	MsgDistributorTokenNoModelAccess           = "distributor.token_no_model_access"
 	MsgDistributorTokenModelForbidden          = "distributor.token_model_forbidden"
 	MsgDistributorModelNameRequired            = "distributor.model_name_required"

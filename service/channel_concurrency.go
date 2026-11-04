@@ -32,10 +32,13 @@ var channelConcurrencyLocal = struct {
 // Scores are lease deadlines in Redis milliseconds. Every mutation uses Redis
 // TIME, so instances need neither synchronized clocks nor a shared process ID.
 var channelConcurrencyAcquireScript = redis.NewScript(`
+for i = 2, #KEYS do
+  if redis.call('EXISTS', KEYS[i]) ~= 0 then return -1 end
+end
 local clock = redis.call('TIME')
 local now = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
 redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now)
-if redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[1]) then return 0 end
+if tonumber(ARGV[1]) > 0 and redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[1]) then return 0 end
 redis.call('ZADD', KEYS[1], now + tonumber(ARGV[2]), ARGV[3])
 redis.call('PEXPIRE', KEYS[1], ARGV[2])
 return 1
@@ -75,6 +78,8 @@ type channelConcurrencyLease struct {
 
 // TryAcquireChannelConcurrency reserves one upstream attempt. Repeated calls
 // for the current channel reuse its lease; switching releases the previous one.
+// Redis also tracks unlimited channels, allowing deployments to fence new
+// admissions and observe existing requests without changing concurrency limits.
 // Call this and ReleaseChannelConcurrency only from the request's owner goroutine.
 // Client cancellation does not release capacity: drain and asynchronous task
 // submissions may still use upstream. Every forwarding owner must defer release.
@@ -86,7 +91,7 @@ func TryAcquireChannelConcurrency(c *gin.Context, channel *model.Channel) (bool,
 		return false, errors.New("channel concurrency requires a valid channel")
 	}
 	limit := channel.GetSetting().MaxConcurrency
-	if limit == 0 {
+	if limit == 0 && (!common.RedisEnabled || c == nil || c.Request == nil) {
 		ReleaseChannelConcurrency(c)
 		return true, nil
 	}
@@ -128,14 +133,18 @@ func TryAcquireChannelConcurrency(c *gin.Context, channel *model.Channel) (bool,
 		lease.key = "channel_concurrency:" + strconv.Itoa(channel.Id)
 		lease.token = token.String()
 		ctx, cancel := context.WithTimeout(requestCtx, channelConcurrencyTimeout)
+		keys := append([]string{lease.key}, channelMaintenanceFenceKeys(c, channel.Id)...)
 		acquired, err := channelConcurrencyAcquireScript.Run(ctx, lease.client,
-			[]string{lease.key}, limit, channelConcurrencyLeaseTTL.Milliseconds(), lease.token).Int()
+			keys, limit, channelConcurrencyLeaseTTL.Milliseconds(), lease.token).Int()
 		cancel()
 		if err != nil {
 			// A lost reply may still have reserved capacity. Remove only our token;
 			// if Redis remains unavailable its deadline handles eventual cleanup.
 			lease.release()
 			return false, fmt.Errorf("acquire channel concurrency lease: %w", err)
+		}
+		if acquired == -1 {
+			return false, errChannelMaintenanceBlocked
 		}
 		if acquired != 1 {
 			return false, nil

@@ -5,6 +5,16 @@ import type { TFunction } from 'i18next'
 // sources reported by the channel operations summary.
 export function policyLabel(t: TFunction, value: string): string {
   switch (value) {
+    case 'channel_maintenance':
+      return t('Deployment maintenance')
+    case 'deployment_wait':
+      return t('Waiting for deployment to finish')
+    case 'deployment_resumed':
+      return t('Deployment finished; resume the request')
+    case 'deployment_timeout':
+      return t('Deployment maintenance wait timed out')
+    case 'deployment_state_unavailable':
+      return t('Deployment maintenance state is unavailable')
     case 'channel_failover':
       return t('Primary and backup routing')
     case 'primary_ready':

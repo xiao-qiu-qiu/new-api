@@ -310,7 +310,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			groupSelectionFailed = true
 			return apiErr
 		}
-		if firstChannel.Id == s.lockedChannelID {
+		if firstChannel.Id == s.lockedChannelID && !service.ChannelMaintenanceWaited(c) {
 			firstChannel = nil
 		} else {
 			s.detachTarget()
@@ -326,6 +326,18 @@ routeAttempt:
 		if apiErr = s.restoreConnectionContext(c, modelName); apiErr != nil {
 			groupSelectionFailed = true
 			return apiErr
+		}
+		if service.ChannelMaintenanceWaited(c) {
+			var err error
+			firstChannel, err = appmodel.CacheGetChannel(s.lockedChannelID)
+			if err != nil {
+				return types.NewError(err, types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+			}
+			if firstChannel == nil {
+				return types.NewError(errors.New("the connection channel is unavailable"), types.ErrorCodeGetChannelFailed, types.ErrOptionWithSkipRetry())
+			}
+			s.detachTarget()
+			goto routeAttempt
 		}
 		info = relaycommon.GenRelayInfoResponses(c, &create.Request)
 		service.MarkMediaGenerationRequest(c, info)
@@ -723,6 +735,10 @@ func (s *responsesWSSession) restoreConnectionContext(c *gin.Context, model stri
 	common.SetContextKey(c, appconstant.ContextKeyChannelParamOverride, channel.GetParamOverride())
 	common.SetContextKey(c, appconstant.ContextKeyChannelModelMapping, channel.GetModelMapping())
 	common.SetContextKey(c, appconstant.ContextKeyChannelStatusCodeMapping, channel.GetStatusCodeMapping())
+	// A waited turn opens a fresh socket before beginning its upstream attempt.
+	if service.ChannelMaintenanceWaited(c) {
+		return nil
+	}
 	policy := service.RequestPolicy(c)
 	policy.BeginAttempt(channel, s.lockedGroup)
 	policy.AddEvent(service.PolicyEvent{ChannelID: channel.Id, Decision: service.PolicyDecision{Action: "select", Reason: "pinned_channel", Source: "channel_constraint"}})

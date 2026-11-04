@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
@@ -17,24 +18,48 @@ var errChannelConcurrencyLimited = errors.New("channel concurrency limit reached
 var errChannelConcurrencyUnavailable = errors.New("channel concurrency service unavailable")
 
 func acquireChannelConcurrency(c *gin.Context, channel *model.Channel) error {
-	acquired, err := TryAcquireChannelConcurrency(c, channel)
-	if err != nil {
-		logger.LogError(c, common.LogText("channel concurrency acquisition failed: %s", err.Error()))
-		return errChannelConcurrencyUnavailable
+	for {
+		acquired, err := TryAcquireChannelConcurrency(c, channel)
+		if errors.Is(err, errChannelMaintenanceBlocked) {
+			ReleaseChannelConcurrency(c)
+			if err := waitForChannelMaintenance(c, channel.Id); err != nil {
+				return err
+			}
+			continue
+		}
+		if err != nil {
+			logger.LogError(c, common.LogText("channel concurrency acquisition failed: %s", err.Error()))
+			return errChannelConcurrencyUnavailable
+		}
+		if !acquired {
+			return errChannelConcurrencyLimited
+		}
+		return nil
 	}
-	if !acquired {
-		return errChannelConcurrencyLimited
-	}
-	return nil
 }
 
 // AcquireChannelConcurrency also covers pinned channels and reused WebSocket
 // connections, which do not go through weighted channel selection.
 func AcquireChannelConcurrency(c *gin.Context, channel *model.Channel) *types.NewAPIError {
-	return ChannelConcurrencyError(c, acquireChannelConcurrency(c, channel))
+	if c != nil {
+		prepareChannelMaintenanceScope(c, common.GetContextKeyString(c, constant.ContextKeyOriginalModel), common.GetContextKeyString(c, constant.ContextKeyUsingGroup))
+	}
+	err := acquireChannelConcurrency(c, channel)
+	if err == nil {
+		return nil
+	}
+	if capacityErr := ChannelConcurrencyError(c, err); capacityErr != nil {
+		return capacityErr
+	}
+	// Cancellation while queued is still a rejected admission, even though
+	// it is neither a channel limit nor a maintenance timeout.
+	return types.NewErrorWithStatusCode(err, types.ErrorCodeGetChannelFailed, http.StatusRequestTimeout, types.ErrOptionWithSkipRetry())
 }
 
 func channelConcurrencySelectionError(err error) *ChannelSelectError {
+	if maintenanceErr := channelMaintenanceSelectionError(err); maintenanceErr != nil {
+		return maintenanceErr
+	}
 	switch {
 	case errors.Is(err, errChannelConcurrencyLimited):
 		return &ChannelSelectError{StatusCode: http.StatusTooManyRequests, Code: "channel_concurrency_limit", MessageID: i18n.MsgChannelConcurrencyLimited}
@@ -52,7 +77,11 @@ func ChannelConcurrencyError(c *gin.Context, err error) *types.NewAPIError {
 	if selectionErr == nil {
 		return nil
 	}
-	return types.NewErrorWithStatusCode(errors.New(i18n.T(c, selectionErr.MessageID)), selectionErr.Code, selectionErr.StatusCode, types.ErrOptionWithSkipRetry())
+	message := selectionErr.Message
+	if selectionErr.MessageID != "" {
+		message = i18n.T(c, selectionErr.MessageID)
+	}
+	return types.NewErrorWithStatusCode(errors.New(message), selectionErr.Code, selectionErr.StatusCode, types.ErrOptionWithSkipRetry())
 }
 
 func selectChannelWithConcurrency(c *gin.Context, group, modelName string, retry int, filters []dto.ChannelFilter) (*model.Channel, error) {

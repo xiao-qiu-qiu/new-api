@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -26,6 +27,7 @@ import (
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
+	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/mysql"
@@ -1127,4 +1129,382 @@ func TestChannelFailoverOnlyProbesSupportedTextRoutes(t *testing.T) {
 	passthrough := newChannelFailoverContext(t)
 	passthrough.Request.URL.Path = "/v1/chat/completions"
 	assert.Nil(t, prepareChannelFailover(passthrough, "alias", "default", 0), "a raw chat passthrough is not a Responses request")
+}
+
+// Observe a completed fence read, so tests can cancel or finish a deployment
+// only after admission has actually entered maintenance waiting.
+type channelMaintenanceWaitHook struct {
+	once    sync.Once
+	waiting chan struct{}
+}
+
+func (*channelMaintenanceWaitHook) BeforeProcess(ctx context.Context, _ redis.Cmder) (context.Context, error) {
+	return ctx, nil
+}
+
+func (h *channelMaintenanceWaitHook) AfterProcess(_ context.Context, cmd redis.Cmder) error {
+	if cmd.Name() == "exists" {
+		if result, ok := cmd.(*redis.IntCmd); ok && result.Err() == nil && result.Val() > 0 {
+			h.once.Do(func() { close(h.waiting) })
+		}
+	}
+	return nil
+}
+
+func (*channelMaintenanceWaitHook) BeforeProcessPipeline(ctx context.Context, _ []redis.Cmder) (context.Context, error) {
+	return ctx, nil
+}
+
+func (*channelMaintenanceWaitHook) AfterProcessPipeline(context.Context, []redis.Cmder) error {
+	return nil
+}
+
+func TestChannelMaintenanceUnlimitedInflight(t *testing.T) {
+	for _, backend := range []string{"real_redis", "redis"} {
+		t.Run(backend, func(t *testing.T) {
+			client := useChannelConcurrencyBackend(t, backend)
+			ctx := context.Background()
+			channel := &model.Channel{Id: 910080}
+			channel.SetSetting(kitdto.ChannelSettings{MaxConcurrency: 0})
+			activeKey := "channel_concurrency:910080"
+			fenceKey := "newapi:maintenance:channel:910080"
+			require.NoError(t, client.Del(ctx, activeKey, fenceKey).Err())
+			t.Cleanup(func() { assert.NoError(t, client.Del(ctx, activeKey, fenceKey).Err()) })
+			first, cancelFirst := newChannelConcurrencyTestContext(t)
+			second, _ := newChannelConcurrencyTestContext(t)
+			incoming, _ := newChannelConcurrencyTestContext(t)
+			for _, c := range []*gin.Context{first, second} {
+				acquired, err := TryAcquireChannelConcurrency(c, channel)
+				require.NoError(t, err)
+				require.True(t, acquired)
+			}
+			active, err := client.ZCard(ctx, activeKey).Result()
+			require.NoError(t, err)
+			assert.EqualValues(t, 2, active, "unlimited requests still count as inflight")
+			ReleaseChannelConcurrency(second)
+			require.NoError(t, client.Set(ctx, fenceKey, "deployment", 0).Err())
+			acquired, err := TryAcquireChannelConcurrency(incoming, channel)
+			require.Error(t, err)
+			assert.False(t, acquired, "a fence rejects new admission even when concurrency is unlimited")
+			cancelFirst()
+			active, err = client.ZCard(ctx, activeKey).Result()
+			require.NoError(t, err)
+			assert.EqualValues(t, 1, active, "cancelled clients may still have upstream work to drain")
+			ReleaseChannelConcurrency(first)
+			active, err = client.ZCard(ctx, activeKey).Result()
+			require.NoError(t, err)
+			assert.Zero(t, active)
+			acquired, err = TryAcquireChannelConcurrency(incoming, channel)
+			require.Error(t, err)
+			assert.False(t, acquired, "draining the last request must not remove the deployment fence")
+			require.NoError(t, client.Del(ctx, fenceKey).Err())
+			acquired, err = TryAcquireChannelConcurrency(incoming, channel)
+			require.NoError(t, err)
+			require.True(t, acquired)
+			active, err = client.ZCard(ctx, activeKey).Result()
+			require.NoError(t, err)
+			assert.EqualValues(t, 1, active)
+			ReleaseChannelConcurrency(incoming)
+			active, err = client.ZCard(ctx, activeKey).Result()
+			require.NoError(t, err)
+			assert.Zero(t, active)
+		})
+	}
+}
+
+func TestChannelMaintenanceRoutingWaitsWithoutCapacity(t *testing.T) {
+	for _, backend := range []string{"real_redis", "redis"} {
+		t.Run(backend, func(t *testing.T) {
+			// Skip an unavailable optional backend before creating its fixtures.
+			useChannelConcurrencyBackend(t, backend)
+			for _, route := range []struct {
+				name   string
+				state  string
+				pin    int
+				retry  bool
+				ws     bool
+				target int
+			}{
+				{name: "primary_ready", state: "ready", target: 7141},
+				{name: "primary_empty", state: "empty", target: 15},
+				{name: "fixed_primary", state: "ready", pin: 7141, target: 7141},
+				{name: "fixed_backup", state: "ready", pin: 15, target: 15},
+				{name: "ordinary_retry_backup", state: "ready", retry: true, target: 15},
+				{name: "ordinary_retry_third_channel", state: "ready", retry: true, target: 7143},
+				{name: "reused_websocket_primary", state: "ready", ws: true, target: 7141},
+				{name: "reused_websocket_backup", state: "ready", ws: true, target: 15},
+			} {
+				for _, resume := range []bool{false, true} {
+					t.Run(fmt.Sprintf("%s/resume_%t", route.name, resume), func(t *testing.T) {
+						db := channelFailoverDatabase(t, sqlite.Open(":memory:"))
+						primary, setting := channelFailoverFixture(t, db, true)
+						if route.retry {
+							for id, priority := range map[int]int{primary.Id: 200, route.target: 100} {
+								require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", id).Update("priority", priority).Error)
+								require.NoError(t, db.Model(&model.Ability{}).Where("channel_id = ?", id).Update("priority", priority).Error)
+							}
+							model.InitChannelCache()
+						}
+						recordChannelFailoverAvailability(t, primary, setting, route.state)
+						client := useChannelConcurrencyBackend(t, backend)
+						ctx := context.Background()
+						fenceKey := "newapi:maintenance:channel:7141"
+						keys := []string{fenceKey, "channel_concurrency:7141", "channel_concurrency:15", "channel_concurrency:7143"}
+						require.NoError(t, client.Del(ctx, keys...).Err())
+						t.Cleanup(func() { assert.NoError(t, client.Del(ctx, keys...).Err()) })
+						c := newChannelFailoverContext(t)
+						requestCtx, cancel := context.WithCancel(c.Request.Context())
+						c.Request = c.Request.WithContext(requestCtx)
+						common.SetContextKey(c, constant.ContextKeyOriginalModel, "alias")
+						common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+						if route.pin != 0 {
+							GetChannelConstraints(c).AddPin(dto.ChannelPin{ChannelId: route.pin, Source: dto.PinSourceToken, Rank: dto.PinRankToken, RetryMode: dto.PinRetrySingleAttempt})
+						}
+						target, err := model.CacheGetChannel(route.target)
+						require.NoError(t, err)
+						if route.ws {
+							require.Nil(t, AcquireChannelConcurrency(c, target))
+							ReleaseChannelConcurrency(c) // the previous create on this connection finished
+						}
+						require.NoError(t, client.Set(ctx, fenceKey, "deployment", 0).Err())
+						hook := &channelMaintenanceWaitHook{waiting: make(chan struct{})}
+						client.AddHook(hook)
+						type result struct {
+							channel      *model.Channel
+							selectionErr *ChannelSelectError
+							err          error
+							apiErr       *types.NewAPIError
+						}
+						completed := make(chan result, 1)
+						release := make(chan struct{})
+						ownerDone := make(chan struct{})
+						var finish sync.Once
+						t.Cleanup(func() {
+							cancel()
+							finish.Do(func() { close(release) })
+							<-ownerDone
+						})
+						go func() {
+							defer close(ownerDone)
+							defer ReleaseChannelConcurrency(c)
+							var got result
+							param := &RetryParam{Ctx: c, ModelName: "alias", TokenGroup: "default"}
+							switch {
+							case route.ws:
+								got.apiErr = AcquireChannelConcurrency(c, target)
+							case route.retry:
+								param.SetRetry(1)
+								got.channel, _, got.err = CacheGetRandomSatisfiedChannel(param)
+							default:
+								got.channel, _, got.selectionErr = SelectChannelForRequest(c, "alias", param)
+							}
+							completed <- got
+							<-release
+						}()
+						watchdog := time.NewTimer(5 * time.Second)
+						defer watchdog.Stop()
+						select {
+						case <-hook.waiting:
+						case got := <-completed:
+							require.FailNow(t, "request bypassed maintenance waiting", "%+v", got)
+						case <-watchdog.C:
+							t.Fatal("request did not reach the deployment fence")
+						}
+						for _, key := range keys[1:] {
+							active, err := client.ZCard(ctx, key).Result()
+							require.NoError(t, err)
+							assert.Zero(t, active, "waiting must not reserve capacity on %s", key)
+						}
+						select {
+						case got := <-completed:
+							require.FailNow(t, "request returned while deployment was fenced", "%+v", got)
+						default:
+						}
+						if resume {
+							require.NoError(t, client.Del(ctx, fenceKey).Err())
+						} else {
+							cancel()
+						}
+						var got result
+						select {
+						case got = <-completed:
+						case <-watchdog.C:
+							t.Fatal("request did not leave maintenance waiting")
+						}
+						if resume {
+							require.NoError(t, got.err)
+							require.Nil(t, got.selectionErr)
+							require.Nil(t, got.apiErr)
+							if !route.ws {
+								require.NotNil(t, got.channel)
+								assert.Equal(t, target.Id, got.channel.Id)
+							}
+							active, err := client.ZCard(ctx, "channel_concurrency:"+strconv.Itoa(target.Id)).Result()
+							require.NoError(t, err)
+							assert.EqualValues(t, 1, active, "resuming reserves exactly one upstream attempt")
+						} else {
+							assert.Nil(t, got.channel, "cancellation cannot select a backup or a third channel")
+							if route.retry {
+								assert.ErrorIs(t, got.err, context.Canceled)
+							}
+							if route.ws {
+								require.NotNil(t, got.apiErr, "a cancelled WebSocket turn must not be admitted without a lease")
+								assert.True(t, types.IsSkipRetryError(got.apiErr))
+							}
+						}
+						finish.Do(func() { close(release) })
+						<-ownerDone
+						for _, key := range keys[1:] {
+							active, err := client.ZCard(ctx, key).Result()
+							require.NoError(t, err)
+							assert.Zero(t, active, "the request owner released %s", key)
+						}
+						// Gin belongs to the owner until ownerDone closes.
+						var reasons []string
+						for _, event := range RequestPolicy(c).Events() {
+							if event.Decision.Source == "channel_maintenance" {
+								assert.Equal(t, "observe", event.Decision.Action)
+								reasons = append(reasons, event.Decision.Reason)
+							}
+						}
+						wantReasons := []string{"deployment_wait"}
+						if resume {
+							wantReasons = append(wantReasons, "deployment_resumed")
+						}
+						assert.Equal(t, wantReasons, reasons)
+					})
+				}
+			}
+		})
+	}
+}
+
+func TestChannelMaintenanceExhaustedBudgetStopsRetry(t *testing.T) {
+	for _, backend := range []string{"real_redis", "redis"} {
+		t.Run(backend, func(t *testing.T) {
+			db := channelFailoverDatabase(t, sqlite.Open(":memory:"))
+			primary, setting := channelFailoverFixture(t, db, true)
+			client := useChannelConcurrencyBackend(t, backend)
+			ctx := context.Background()
+			fenceKey := "newapi:maintenance:channel:7141"
+			keys := []string{fenceKey, "channel_concurrency:7141", "channel_concurrency:15", "channel_concurrency:7143"}
+			require.NoError(t, client.Del(ctx, keys...).Err())
+			t.Cleanup(func() { assert.NoError(t, client.Del(ctx, keys...).Err()) })
+			recordChannelFailoverAvailability(t, primary, setting, "ready")
+			c := newChannelFailoverContext(t)
+			assert.Equal(t, primary.Id, selectChannelFailoverForTest(t, c).Id)
+			ReleaseChannelConcurrency(c)
+			common.SetContextKey(c, constant.ContextKeyOriginalModel, "alias")
+			common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+			// The request already spent its maintenance budget on an earlier attempt.
+			c.Set(channelMaintenanceDeadlineKey, time.Now().Add(-time.Minute))
+			require.NoError(t, client.Set(ctx, fenceKey, "deployment", 0).Err())
+			channel, _, err := CacheGetRandomSatisfiedChannel(&RetryParam{Ctx: c, ModelName: "alias", TokenGroup: "default", Retry: common.GetPointer(1)})
+			assert.Nil(t, channel)
+			require.Error(t, err)
+			apiErr := ChannelConcurrencyError(c, err)
+			for _, failure := range []*types.NewAPIError{apiErr, AcquireChannelConcurrency(c, primary)} {
+				require.NotNil(t, failure)
+				assert.Equal(t, types.ErrorCode("channel_maintenance_timeout"), failure.GetErrorCode())
+				assert.Equal(t, http.StatusServiceUnavailable, failure.StatusCode)
+				assert.True(t, types.IsSkipRetryError(failure))
+				assert.Equal(t, PolicyDecision{Action: "stop", Reason: "deployment_timeout", Source: "channel_maintenance"}, DecideRelayRetry(c, failure, 10), "a remaining backup/retry budget cannot replay a maintenance timeout")
+			}
+			assert.NoError(t, c.Request.Context().Err(), "the maintenance budget, not client cancellation, stopped the request")
+			next := newChannelFailoverContext(t)
+			next.Set(channelMaintenanceDeadlineKey, time.Now().Add(-time.Minute))
+			channel, _, selectionErr := SelectChannelForRequest(next, "alias", &RetryParam{Ctx: next, ModelName: "alias", TokenGroup: "default"})
+			assert.Nil(t, channel)
+			require.NotNil(t, selectionErr)
+			assert.Equal(t, types.ErrorCode("channel_maintenance_timeout"), selectionErr.Code)
+			assert.Equal(t, http.StatusServiceUnavailable, selectionErr.StatusCode)
+			for _, key := range keys[1:] {
+				active, err := client.ZCard(ctx, key).Result()
+				require.NoError(t, err)
+				assert.Zero(t, active)
+			}
+		})
+	}
+}
+
+func TestChannelMaintenanceRedisLossStopsRetry(t *testing.T) {
+	for _, backend := range []string{"real_redis", "redis"} {
+		t.Run(backend, func(t *testing.T) {
+			db := channelFailoverDatabase(t, sqlite.Open(":memory:"))
+			primary, setting := channelFailoverFixture(t, db, true)
+			client := useChannelConcurrencyBackend(t, backend)
+			ctx := context.Background()
+			fenceKey := "newapi:maintenance:channel:7141"
+			keys := []string{fenceKey, "channel_concurrency:7141", "channel_concurrency:15", "channel_concurrency:7143"}
+			require.NoError(t, client.Del(ctx, keys...).Err())
+			t.Cleanup(func() { assert.NoError(t, client.Del(ctx, keys...).Err()) })
+			recordChannelFailoverAvailability(t, primary, setting, "ready")
+			c := newChannelFailoverContext(t)
+			assert.Equal(t, primary.Id, selectChannelFailoverForTest(t, c).Id)
+			ReleaseChannelConcurrency(c)
+			requestCtx, cancel := context.WithCancel(c.Request.Context())
+			c.Request = c.Request.WithContext(requestCtx)
+			// Close only the request client's pool; the shared Redis service stays up.
+			waitClient := redis.NewClient(client.Options())
+			common.RDB = waitClient
+			clientClosed := false
+			t.Cleanup(func() {
+				if !clientClosed {
+					assert.NoError(t, waitClient.Close())
+				}
+			})
+			require.NoError(t, client.Set(ctx, fenceKey, "deployment", 0).Err())
+			hook := &channelMaintenanceWaitHook{waiting: make(chan struct{})}
+			waitClient.AddHook(hook)
+			type result struct {
+				channel  *model.Channel
+				apiErr   *types.NewAPIError
+				decision PolicyDecision
+			}
+			completed := make(chan result, 1)
+			ownerDone := make(chan struct{})
+			t.Cleanup(func() { cancel(); <-ownerDone })
+			go func() {
+				defer close(ownerDone)
+				defer ReleaseChannelConcurrency(c)
+				channel, _, err := CacheGetRandomSatisfiedChannel(&RetryParam{Ctx: c, ModelName: "alias", TokenGroup: "default", Retry: common.GetPointer(1)})
+				apiErr := ChannelConcurrencyError(c, err)
+				completed <- result{channel: channel, apiErr: apiErr, decision: DecideRelayRetry(c, apiErr, 10)}
+			}()
+			watchdog := time.NewTimer(5 * time.Second)
+			defer watchdog.Stop()
+			select {
+			case <-hook.waiting:
+			case got := <-completed:
+				require.FailNow(t, "request did not wait for maintenance", "%+v", got)
+			case <-watchdog.C:
+				t.Fatal("request did not reach the deployment fence")
+			}
+			for _, key := range keys[1:] {
+				active, err := client.ZCard(ctx, key).Result()
+				require.NoError(t, err)
+				assert.Zero(t, active)
+			}
+			require.NoError(t, waitClient.Close())
+			clientClosed = true
+			var got result
+			select {
+			case got = <-completed:
+			case <-watchdog.C:
+				t.Fatal("Redis loss did not stop maintenance waiting")
+			}
+			<-ownerDone
+			assert.Nil(t, got.channel, "Redis loss cannot select a backup or a third channel")
+			require.NotNil(t, got.apiErr)
+			assert.Equal(t, types.ErrorCode("channel_maintenance_unavailable"), got.apiErr.GetErrorCode())
+			assert.Equal(t, http.StatusServiceUnavailable, got.apiErr.StatusCode)
+			assert.True(t, types.IsSkipRetryError(got.apiErr))
+			assert.Equal(t, PolicyDecision{Action: "stop", Reason: "deployment_state_unavailable", Source: "channel_maintenance"}, got.decision)
+			for _, key := range keys[1:] {
+				active, err := client.ZCard(ctx, key).Result()
+				require.NoError(t, err)
+				assert.Zero(t, active)
+			}
+		})
+	}
 }

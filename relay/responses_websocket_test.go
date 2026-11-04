@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -27,7 +28,9 @@ import (
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
+	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -77,6 +80,7 @@ func TestNormalizeResponsesWSMaxOutputTokens(t *testing.T) {
 }
 
 func TestSelectResponsesWSChannelHonorsPinsAndFilters(t *testing.T) {
+	useResponsesWSLocalConcurrency(t)
 	require.NoError(t, i18n.Init())
 	database := setupRelayChannelDB(t)
 	enabled := &model.Channel{Name: "enabled", Key: "sk-test", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeOpenAI}
@@ -152,6 +156,7 @@ func TestCheckResponsesWSModelAccessMatchesHTTPTokenLimits(t *testing.T) {
 }
 
 func TestSelectResponsesWSChannelAcceptsNativeResponsesChannelTypes(t *testing.T) {
+	useResponsesWSLocalConcurrency(t)
 	require.NoError(t, i18n.Init())
 	database := setupRelayChannelDB(t)
 	nativeRoute := &dto.AdvancedCustomConfig{Routes: []dto.AdvancedCustomRoute{{IncomingPath: "/v1/responses", UpstreamPath: "/v1/responses"}}}
@@ -261,6 +266,7 @@ func TestResponsesWSAzureDialUsesAzureResponsesURLAndAPIKey(t *testing.T) {
 }
 
 func TestRestoreConnectionContextRejectsChangedAdvancedCustomRoute(t *testing.T) {
+	useResponsesWSLocalConcurrency(t)
 	database := setupRelayChannelDB(t)
 	baseURL := "http://upstream.example"
 	channel := &model.Channel{Name: "advanced", Key: "sk-test", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeAdvancedCustom, BaseURL: &baseURL}
@@ -290,6 +296,7 @@ func TestRestoreConnectionContextRejectsChangedAdvancedCustomRoute(t *testing.T)
 }
 
 func TestResponsesWSChannelRoutingRequiresExplicitOptIn(t *testing.T) {
+	useResponsesWSLocalConcurrency(t)
 	require.NoError(t, i18n.Init())
 	database := setupRelayChannelDB(t)
 	require.NoError(t, database.AutoMigrate(&model.Ability{}))
@@ -341,6 +348,7 @@ func TestResponsesWSChannelRoutingRequiresExplicitOptIn(t *testing.T) {
 // unusable channel fails the request, a prefer binding falls back, and an
 // unusable binding is dropped from the cache either way.
 func TestSelectResponsesWSChannelHonorsStrictSessionBinding(t *testing.T) {
+	useResponsesWSLocalConcurrency(t)
 	require.NoError(t, i18n.Init())
 	database := setupRelayChannelDB(t)
 	require.NoError(t, database.AutoMigrate(&model.Ability{}))
@@ -581,6 +589,13 @@ func TestResponsesWSInvalidRequestErrorUsesBadRequestStatus(t *testing.T) {
 	}
 }
 
+func useResponsesWSLocalConcurrency(t *testing.T) {
+	t.Helper()
+	previousRedis := common.RedisEnabled
+	common.RedisEnabled = false
+	t.Cleanup(func() { common.RedisEnabled = previousRedis })
+}
+
 func newTestResponsesWSTarget(t *testing.T) (*websocket.Conn, func()) {
 	t.Helper()
 	target, _, cleanup := newTestWebSocketPair(t)
@@ -774,6 +789,214 @@ func TestResponsesWSChannelConcurrencyPerCreate(t *testing.T) {
 	acquired, err = service.TryAcquireChannelConcurrency(probe, channel)
 	require.NoError(t, err)
 	assert.True(t, acquired, "the stopped generation must return capacity")
+}
+
+type responsesWSMaintenanceObserver struct {
+	waiting chan struct{}
+	resume  <-chan struct{}
+}
+
+func (*responsesWSMaintenanceObserver) BeforeProcess(ctx context.Context, _ redis.Cmder) (context.Context, error) {
+	return ctx, nil
+}
+
+func (h *responsesWSMaintenanceObserver) AfterProcess(ctx context.Context, cmd redis.Cmder) error {
+	if count, ok := cmd.(*redis.IntCmd); ok && cmd.Name() == "exists" && count.Val() > 0 {
+		select {
+		case h.waiting <- struct{}{}:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		select {
+		case <-h.resume:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+func (*responsesWSMaintenanceObserver) BeforeProcessPipeline(ctx context.Context, _ []redis.Cmder) (context.Context, error) {
+	return ctx, nil
+}
+
+func (*responsesWSMaintenanceObserver) AfterProcessPipeline(context.Context, []redis.Cmder) error {
+	return nil
+}
+
+func TestResponsesWSMaintenanceReconnectsBeforeCreate(t *testing.T) {
+	for _, pinned := range []bool{true, false} {
+		t.Run(fmt.Sprintf("pinned=%t", pinned), func(t *testing.T) {
+			t.Setenv("CYBER_SESSION_BLOCK_ENABLED", "false")
+			require.NoError(t, i18n.Init())
+			database := setupRelayChannelDB(t)
+			require.NoError(t, database.AutoMigrate(&model.User{}, &model.Ability{}, &model.Option{}))
+			user := &model.User{Username: "ws-maintenance-user"}
+			require.NoError(t, database.Create(user).Error)
+			previousRedis, previousRDB := common.RedisEnabled, common.RDB
+			previousCount, previousLog := constant.CountToken, common.LogConsumeEnabled
+			previousPrices := ratio_setting.ModelPrice2JSONString()
+			previousOptions := maps.Clone(model.CurrentRequestPolicy().Options)
+			common.OptionMapRWMutex.Lock()
+			previousOptionMap := common.OptionMap
+			common.OptionMap = make(map[string]string)
+			maps.Copy(common.OptionMap, previousOptions)
+			common.OptionMapRWMutex.Unlock()
+			quotaSetting := operation_setting.GetQuotaSetting()
+			previousPreConsume := quotaSetting.EnableFreeModelPreConsume
+			redisServer := miniredis.RunT(t)
+			redisClient := redis.NewClient(&redis.Options{Addr: redisServer.Addr()})
+			common.RedisEnabled, common.RDB = true, redisClient
+			constant.CountToken, common.LogConsumeEnabled, quotaSetting.EnableFreeModelPreConsume = false, false, false
+			t.Cleanup(func() {
+				common.RedisEnabled, common.RDB = previousRedis, previousRDB
+				constant.CountToken, common.LogConsumeEnabled, quotaSetting.EnableFreeModelPreConsume = previousCount, previousLog, previousPreConsume
+				require.NoError(t, redisClient.Close())
+				require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(previousPrices))
+				require.NoError(t, model.UpdateRequestPolicyOptions(previousOptions))
+				common.OptionMapRWMutex.Lock()
+				common.OptionMap = previousOptionMap
+				common.OptionMapRWMutex.Unlock()
+			})
+			const modelName = "ws-maintenance-model"
+			require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"ws-maintenance-model":0}`))
+			var handshakes atomic.Int32
+			var creates [2]atomic.Int32
+			peers := make(chan *websocket.Conn, 2)
+			upgrader := websocket.Upgrader{}
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				peer, err := upgrader.Upgrade(w, r, nil)
+				if !assert.NoError(t, err) {
+					return
+				}
+				defer peer.Close()
+				index := handshakes.Add(1) - 1
+				if !assert.Less(t, index, int32(len(creates))) {
+					return
+				}
+				assert.Equal(t, "Bearer sk-maintenance-test", r.Header.Get("Authorization"))
+				peers <- peer
+				for {
+					_, body, err := peer.ReadMessage()
+					if err != nil {
+						return
+					}
+					// Decode the actual wire names; an extra create on either socket
+					// increments the same counter instead of being silently ignored.
+					var event struct {
+						Type     string `json:"type"`
+						StreamID string `json:"stream_id"`
+					}
+					if !assert.NoError(t, common.Unmarshal(body, &event)) {
+						return
+					}
+					assert.Equal(t, "response.create", event.Type)
+					creates[index].Add(1)
+					terminal := fmt.Sprintf(`{"type":"response.completed","stream_id":%q,"response":{"id":%q,"model":%q,"status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}`, event.StreamID, "resp-"+event.StreamID, modelName)
+					if err := peer.WriteMessage(websocket.TextMessage, []byte(terminal)); err != nil {
+						return
+					}
+				}
+			}))
+			t.Cleanup(upstream.Close)
+			channel := &model.Channel{Name: "ws-maintenance", Key: "sk-maintenance-test", BaseURL: &upstream.URL, Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled, Group: "default", Models: modelName}
+			channel.SetSetting(dto.ChannelSettings{ResponsesWebSocketEnabled: true})
+			require.NoError(t, database.Create(channel).Error)
+			fallback := &model.Channel{Name: "ws-maintenance-fallback", Key: "sk-fallback-test", BaseURL: &upstream.URL, Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled, Group: "default", Models: modelName}
+			fallback.SetSetting(dto.ChannelSettings{ResponsesWebSocketEnabled: true})
+			require.NoError(t, database.Create(fallback).Error)
+			for _, selected := range []*model.Channel{channel, fallback} {
+				require.NoError(t, database.Create(&model.Ability{ChannelId: selected.Id, Model: modelName, Group: "default", Enabled: true}).Error)
+			}
+			common.MemoryCacheEnabled = true
+			model.InitChannelCache()
+			require.NoError(t, model.UpdateRequestPolicyOptions(map[string]string{
+				"channel_failover_setting.enabled": "true", "channel_failover_setting.primary_channel_id": fmt.Sprint(channel.Id),
+				"channel_failover_setting.fallback_channel_id": fmt.Sprint(fallback.Id), "channel_failover_setting.model_regex": "[]",
+				"channel_failover_setting.fallback_rules": "[]", "channel_affinity_setting.enabled": "false",
+			}))
+			client, server, cleanup := newTestWebSocketPair(t)
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+			type outcome struct {
+				err               *types.NewAPIError
+				waited, reroutes  bool
+				channel, attempts int
+			}
+			results := make(chan outcome, 3)
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				ResponsesWebSocketHelper(c, server, func(request *http.Request, requestID string, run func(*gin.Context) *types.NewAPIError) *types.NewAPIError {
+					call, _ := gin.CreateTestContext(httptest.NewRecorder())
+					call.Request = request
+					defer common.CleanupBodyStorage(call)
+					common.SetContextKey(call, common.RequestIdKey, requestID)
+					common.SetContextKey(call, constant.ContextKeyUserId, user.Id)
+					common.SetContextKey(call, constant.ContextKeyUsingGroup, "default")
+					if pinned {
+						service.GetChannelConstraints(call).AddPin(appdto.ChannelPin{ChannelId: channel.Id, Source: appdto.PinSourceToken})
+					}
+					reroutes := service.ChannelFailoverMayReroute(call, modelName, "default", channel.Id)
+					err := run(call)
+					results <- outcome{err, service.ChannelMaintenanceWaited(call), reroutes, common.GetContextKeyInt(call, constant.ContextKeyChannelId), service.RequestPolicy(call).Attempts}
+					return err
+				})
+			}()
+			t.Cleanup(func() {
+				cleanup()
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Error("websocket relay did not finish")
+				}
+			})
+			resume := make(chan struct{})
+			defer func() {
+				if resume != nil {
+					close(resume)
+				}
+			}()
+			waiting := make(chan struct{}, 1)
+			redisClient.AddHook(&responsesWSMaintenanceObserver{waiting: waiting, resume: resume})
+			for index, streamID := range []string{"before", "resumed", "next"} {
+				create := fmt.Sprintf(`{"type":"response.create","stream_id":%q,"model":%q,"input":"hi"}`, streamID, modelName)
+				require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(create)))
+				if index == 1 {
+					select {
+					case <-waiting:
+					case <-time.After(5 * time.Second):
+						t.Fatal("create did not enter maintenance wait")
+					}
+					assert.Equal(t, int32(1), handshakes.Load())
+					assert.Equal(t, int32(1), creates[0].Load(), "the waiting create must not reach the old socket")
+					oldPeer := <-peers
+					require.NoError(t, oldPeer.Close())
+					redisServer.Del("newapi:maintenance:channel:" + fmt.Sprint(channel.Id))
+					close(resume)
+					resume = nil
+				}
+				require.NoError(t, client.SetReadDeadline(time.Now().Add(5*time.Second)))
+				_, body, err := client.ReadMessage()
+				require.NoError(t, err, "the same client websocket must survive maintenance")
+				assert.Contains(t, string(body), `"type":"response.completed"`, string(body))
+				assert.Contains(t, string(body), `"stream_id":"`+streamID+`"`)
+				result := <-results
+				require.Nil(t, result.err)
+				assert.Equal(t, index == 1, result.waited)
+				assert.Equal(t, !pinned, result.reroutes)
+				assert.Equal(t, channel.Id, result.channel, "maintenance cannot move this turn to the fallback")
+				assert.Equal(t, 1, result.attempts)
+				if index == 0 {
+					require.NoError(t, redisServer.Set("newapi:maintenance:channel:"+fmt.Sprint(channel.Id), "test-maintenance"))
+				} else {
+					assert.Equal(t, int32(2), handshakes.Load())
+					assert.Equal(t, int32(1), creates[0].Load(), "the completed response must never be replayed")
+					assert.Equal(t, int32(index), creates[1].Load(), "each new turn must send exactly one create")
+				}
+			}
+		})
+	}
 }
 
 func TestResponsesWSCyberSessionBlock(t *testing.T) {
@@ -1269,6 +1492,7 @@ func TestServiceTierHTTPRoutingAndOutboundValidation(t *testing.T) {
 }
 
 func TestResponsesWSServiceTierRevalidatesEachCreate(t *testing.T) {
+	useResponsesWSLocalConcurrency(t)
 	database := setupRelayChannelDB(t)
 	baseURL := "http://upstream.example"
 	channel := &model.Channel{Name: "ws-tier", Key: "sk-test", Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeOpenAI, BaseURL: &baseURL}

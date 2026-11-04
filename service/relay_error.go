@@ -21,6 +21,13 @@ func DecideRelayRetry(c *gin.Context, err *types.NewAPIError, retryTimes int) Po
 	if err == nil {
 		return PolicyDecision{Action: "stop", Reason: "request_completed", Source: "system"}
 	}
+	if IsChannelMaintenanceError(err) {
+		reason := "deployment_state_unavailable"
+		if err.GetErrorCode() == "channel_maintenance_timeout" {
+			reason = "deployment_timeout"
+		}
+		return PolicyDecision{Action: "stop", Reason: reason, Source: "channel_maintenance"}
+	}
 	if IsCyberPolicyError(err) {
 		return PolicyDecision{Action: "stop", Reason: "cyber_policy", Source: "cyber_policy"}
 	}
@@ -96,7 +103,7 @@ func ProcessChannelError(c *gin.Context, channelError types.ChannelError, err *t
 	}
 	upstreamURLs := common.UpstreamAddresses(c)
 	logger.LogError(c, common.LogText("channel error (channel #%d, status code: %d): %s", channelError.ChannelId, err.StatusCode, common.LocalLogPreview(err.MaskSensitiveErrorWithStatusCode(upstreamURLs...))))
-	if ShouldDisableChannel(err) && channelError.AutoBan && !channelFailoverTransientCapacity(c, channelError.ChannelId, err) {
+	if !IsChannelMaintenanceError(err) && ShouldDisableChannel(err) && channelError.AutoBan && !channelFailoverTransientCapacity(c, channelError.ChannelId, err) {
 		reason := err.MaskSensitiveErrorWithStatusCode(upstreamURLs...)
 		gopool.Go(func() {
 			DisableChannel(channelError, reason)

@@ -4,6 +4,8 @@
 # Errors returned to AI clients
 distributor.channel_concurrency_limited: "可用渠道的并发数已达上限，请稍后重试。"
 distributor.channel_concurrency_unavailable: "渠道并发控制暂时不可用，请稍后重试。"
+distributor.channel_maintenance_timeout: "渠道维护等待超时，请稍后重试"
+distributor.channel_maintenance_unavailable: "暂时无法确认渠道维护状态，请稍后重试"
 common.database_error: "数据库出错，请联系管理员"
 auth.user_banned: "用户已被封禁"
 token.get_info_failed: "获取令牌信息失败，请稍后重试"

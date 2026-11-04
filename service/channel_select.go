@@ -134,6 +134,7 @@ func (p *RetryParam) ResetRetryNextTry() {
 //	         分组B, 优先级1
 func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, error) {
 	ReleaseChannelConcurrency(param.Ctx)
+	prepareChannelMaintenanceScope(param.Ctx, param.ModelName, param.TokenGroup)
 	if state := requestChannelFailover(param.Ctx); state != nil {
 		return selectChannelFailover(param.Ctx, state)
 	}
@@ -400,6 +401,7 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 	if apiErr := CheckCyberSessionBlock(c); apiErr != nil {
 		return nil, "", &ChannelSelectError{StatusCode: apiErr.StatusCode, Code: apiErr.GetErrorCode(), Message: apiErr.Error()}
 	}
+	prepareChannelMaintenanceScope(c, modelName, retry.TokenGroup)
 	constraints := GetChannelConstraints(c)
 	if pin, found, overridden := constraints.ResolvedPin(); found {
 		for _, lost := range overridden {
