@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -171,7 +172,11 @@ func TestChannelFailoverRoutingAcrossDatabases(t *testing.T) {
 				channelFailover.finish(entry, entry.revision, channelAvailability{State: "ready"}, time.Now())
 				assert.Equal(t, primary.Id, selectChannelFailoverForTest(t, newChannelFailoverContext(t)).Id, "two ready results immediately restore the primary")
 				channelFailover.finish(entry, entry.revision, channelAvailability{State: "busy"}, time.Now())
-				assert.Equal(t, 15, selectChannelFailoverForTest(t, newChannelFailoverContext(t)).Id)
+				busy := newChannelFailoverContext(t)
+				state := prepareChannelFailover(busy, "alias", "default", 0)
+				require.NotNil(t, state)
+				state.busyWaitDeadline = time.Now().Add(-time.Second)
+				assert.Equal(t, 15, selectChannelFailoverForTest(t, busy).Id)
 				channelFailover.finish(entry, entry.revision, channelAvailability{State: "ready"}, time.Now())
 				assert.Equal(t, primary.Id, selectChannelFailoverForTest(t, newChannelFailoverContext(t)).Id, "busy never latches recovery mode")
 				channelFailover.finish(entry, entry.revision, channelAvailability{State: "empty"}, time.Now())
@@ -185,6 +190,201 @@ func TestChannelFailoverRoutingAcrossDatabases(t *testing.T) {
 			})
 		}
 	}
+}
+
+func TestChannelFailoverBusyWait(t *testing.T) {
+	db := channelFailoverDatabase(t, sqlite.Open(":memory:"))
+	primary, _ := channelFailoverFixture(t, db, true)
+	require.NoError(t, model.UpdateRequestPolicyOptions(map[string]string{"channel_failover_setting.poll_interval_seconds": "60"}))
+	require.NoError(t, db.Model(&model.Channel{}).Where("id IN ?", []int{primary.Id, 15}).Update("setting", `{"max_concurrency":1}`).Error)
+	model.InitChannelCache()
+	primary, err := model.CacheGetChannel(primary.Id)
+	require.NoError(t, err)
+	backup, err := model.CacheGetChannel(15)
+	require.NoError(t, err)
+	setting := model.CurrentRequestPolicy().Failover
+	for _, tc := range []struct {
+		name         string
+		after        time.Duration
+		availability channelAvailability
+		cancel       bool
+		deadline     bool
+		stale        bool
+		wantID       int
+		wantState    string
+		wantErr      error
+	}{
+		{name: "busy_until_timeout", after: 29 * time.Second, wantID: 15, wantState: "busy"},
+		{name: "ready_during_wait", after: 4 * time.Second, availability: channelAvailability{State: "ready"}, wantID: primary.Id, wantState: "ready"},
+		{name: "unknown_during_wait", after: 4 * time.Second, availability: channelAvailability{State: "unknown"}, wantID: primary.Id, wantState: "unknown"},
+		{name: "cancelled_during_wait", after: 4 * time.Second, cancel: true, wantErr: context.Canceled},
+		{name: "deadline_during_wait", after: 4 * time.Second, deadline: true, wantErr: context.DeadlineExceeded},
+		{name: "rotation_during_wait", after: 4 * time.Second, availability: channelAvailability{State: "busy", Reason: "account_rotation"}, wantID: primary.Id, wantState: "rotation_wait"},
+		{name: "empty_during_wait", after: 4 * time.Second, availability: channelAvailability{State: "empty"}, wantID: 15, wantState: "empty"},
+		{name: "stale_busy_tries_primary", after: 10 * time.Second, stale: true, wantID: primary.Id, wantState: "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				channelFailover = newChannelFailoverRuntime()
+				entry := recordChannelFailoverAvailability(t, primary, setting, "busy")
+				if tc.stale {
+					entry.setting.PollIntervalSeconds = 3
+				}
+				c := newChannelFailoverContext(t)
+				defer ReleaseChannelConcurrency(c)
+				ctx, cancel := context.WithCancel(c.Request.Context())
+				defer cancel()
+				if tc.deadline {
+					var cancelDeadline context.CancelFunc
+					ctx, cancelDeadline = context.WithTimeout(ctx, tc.after)
+					defer cancelDeadline()
+				}
+				c.Request = c.Request.WithContext(ctx)
+				start := time.Now()
+				state := prepareChannelFailover(c, "alias", "default", 0)
+				require.NotNil(t, state)
+				assert.Equal(t, start, time.Now(), "preparing a busy request does not wait")
+				var selected *model.Channel
+				var group string
+				var selectionErr error
+				completed := false
+				go func() {
+					selected, group, selectionErr = CacheGetRandomSatisfiedChannel(&RetryParam{Ctx: c, ModelName: "alias", TokenGroup: "default"})
+					completed = true
+				}()
+				synctest.Wait()
+				require.False(t, completed, "busy selection must wait before attempting either channel")
+				for _, channel := range []*model.Channel{primary, backup} {
+					probe := newChannelFailoverContext(t)
+					require.NoError(t, acquireChannelConcurrency(probe, channel), "waiting must leave channel %d's only slot available", channel.Id)
+					ReleaseChannelConcurrency(probe)
+				}
+				time.Sleep(tc.after)
+				synctest.Wait()
+				if !tc.deadline {
+					require.False(t, completed, "selection must still be waiting before the availability change or 30-second budget")
+				}
+				switch {
+				case tc.cancel:
+					cancel()
+				case tc.availability.State != "":
+					channelFailover.finish(entry, entry.revision, tc.availability, time.Now())
+					time.Sleep(250 * time.Millisecond)
+				case tc.stale:
+					time.Sleep(250 * time.Millisecond)
+				case !tc.deadline:
+					time.Sleep(time.Second)
+				}
+				synctest.Wait()
+				require.True(t, completed, "selection must finish at the virtual timeout, cancellation, or next availability poll")
+				assert.Equal(t, "default", group)
+				if tc.wantErr != nil {
+					assert.ErrorIs(t, selectionErr, tc.wantErr)
+					assert.Nil(t, selected)
+					assert.Empty(t, state.visited, "cancellation must not attempt the primary or backup")
+					return
+				}
+				require.NoError(t, selectionErr)
+				require.NotNil(t, selected)
+				assert.Equal(t, tc.wantID, selected.Id)
+				assert.Equal(t, tc.wantState, state.state)
+				if tc.wantID == primary.Id {
+					assert.False(t, state.visited[15], "recovering availability must not send this request to the backup")
+				}
+			})
+		})
+	}
+	t.Run("request_budgets_are_independent", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			channelFailover = newChannelFailoverRuntime()
+			recordChannelFailoverAvailability(t, primary, setting, "busy")
+			firstContext := newChannelFailoverContext(t)
+			secondContext := newChannelFailoverContext(t)
+			ctx, cancel := context.WithCancel(firstContext.Request.Context())
+			defer cancel()
+			firstContext.Request = firstContext.Request.WithContext(ctx)
+			secondContext.Request = secondContext.Request.WithContext(ctx)
+			firstState := prepareChannelFailover(firstContext, "alias", "default", 0)
+			require.NotNil(t, firstState)
+			var first, second *model.Channel
+			var firstErr, secondErr error
+			firstDone, secondDone := false, false
+			go func() {
+				first, _, firstErr = CacheGetRandomSatisfiedChannel(&RetryParam{Ctx: firstContext, ModelName: "alias", TokenGroup: "default"})
+				ReleaseChannelConcurrency(firstContext)
+				firstDone = true
+			}()
+			synctest.Wait()
+			require.False(t, firstDone)
+			time.Sleep(10 * time.Second)
+			secondState := prepareChannelFailover(secondContext, "alias", "default", 0)
+			require.NotNil(t, secondState)
+			assert.Equal(t, firstState.key, secondState.key)
+			go func() {
+				second, _, secondErr = CacheGetRandomSatisfiedChannel(&RetryParam{Ctx: secondContext, ModelName: "alias", TokenGroup: "default"})
+				ReleaseChannelConcurrency(secondContext)
+				secondDone = true
+			}()
+			synctest.Wait()
+			time.Sleep(20 * time.Second)
+			synctest.Wait()
+			require.True(t, firstDone)
+			require.NoError(t, firstErr)
+			require.NotNil(t, first)
+			assert.Equal(t, 15, first.Id)
+			require.False(t, secondDone, "one request exhausting its budget must not shorten another request's wait")
+			time.Sleep(10 * time.Second)
+			synctest.Wait()
+			require.True(t, secondDone)
+			require.NoError(t, secondErr)
+			require.NotNil(t, second)
+			assert.Equal(t, 15, second.Id)
+		})
+	})
+	t.Run("reentry_preserves_request_budget", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			channelFailover = newChannelFailoverRuntime()
+			entry := recordChannelFailoverAvailability(t, primary, setting, "busy")
+			c := newChannelFailoverContext(t)
+			defer ReleaseChannelConcurrency(c)
+			ctx, cancel := context.WithCancel(c.Request.Context())
+			defer cancel()
+			c.Request = c.Request.WithContext(ctx)
+			state := prepareChannelFailover(c, "alias", "default", 0)
+			require.NotNil(t, state)
+			var waitErr error
+			waitDone := false
+			go func() {
+				waitErr = state.waitForBusyPrimary(c.Request.Context())
+				waitDone = true
+			}()
+			synctest.Wait()
+			time.Sleep(4 * time.Second)
+			channelFailover.finish(entry, entry.revision, channelAvailability{State: "ready"}, time.Now())
+			time.Sleep(250 * time.Millisecond)
+			synctest.Wait()
+			require.True(t, waitDone)
+			require.NoError(t, waitErr)
+			channelFailover.finish(entry, entry.revision, channelAvailability{State: "busy"}, time.Now())
+			var selected *model.Channel
+			var selectionErr error
+			completed := false
+			go func() {
+				selected, _, selectionErr = CacheGetRandomSatisfiedChannel(&RetryParam{Ctx: c, ModelName: "alias", TokenGroup: "default"})
+				completed = true
+			}()
+			synctest.Wait()
+			time.Sleep(25 * time.Second)
+			synctest.Wait()
+			require.False(t, completed)
+			time.Sleep(750 * time.Millisecond)
+			synctest.Wait()
+			require.True(t, completed, "re-entering selection must use the original 30-second budget")
+			require.NoError(t, selectionErr)
+			require.NotNil(t, selected)
+			assert.Equal(t, 15, selected.Id)
+		})
+	})
 }
 
 func TestChannelFailoverModelBackups(t *testing.T) {
@@ -511,7 +711,11 @@ func TestChannelFailoverRotationWaitStaysOnPrimary(t *testing.T) {
 
 	response.Store(channelAvailability{State: "busy", Reason: "capacity_busy"})
 	channelFailover.finish(entry, entry.revision, probeChannelAvailability(context.Background(), entry), time.Now())
-	assert.Equal(t, 15, selectChannelFailoverForTest(t, newChannelFailoverContext(t)).Id, "ordinary saturation still uses the backup")
+	busy := newChannelFailoverContext(t)
+	state := prepareChannelFailover(busy, "alias", "default", 0)
+	require.NotNil(t, state)
+	state.busyWaitDeadline = time.Now().Add(-time.Second)
+	assert.Equal(t, 15, selectChannelFailoverForTest(t, busy).Id, "ordinary saturation still uses the backup after the wait budget")
 	response.Store(channelAvailability{State: "ready", Reason: "account_rotation"})
 	channelFailover.finish(entry, entry.revision, probeChannelAvailability(context.Background(), entry), time.Now())
 	channelFailover.finish(entry, entry.revision, probeChannelAvailability(context.Background(), entry), time.Now())
@@ -566,7 +770,11 @@ func TestChannelFailoverRotationWaitAtConcurrencyLimit(t *testing.T) {
 	assert.Equal(t, primary.Id, selectChannelFailoverForTest(t, next).Id, "freeing a slot admits the next request to the primary")
 	ReleaseChannelConcurrency(next)
 	channelFailover.finish(entry, entry.revision, channelAvailability{State: "busy", Reason: "capacity_busy"}, time.Now())
-	assert.Equal(t, 15, selectChannelFailoverForTest(t, newChannelFailoverContext(t)).Id, "ordinary upstream saturation still permits the backup")
+	busy := newChannelFailoverContext(t)
+	state := prepareChannelFailover(busy, "alias", "default", 0)
+	require.NotNil(t, state)
+	state.busyWaitDeadline = time.Now().Add(-time.Second)
+	assert.Equal(t, 15, selectChannelFailoverForTest(t, busy).Id, "ordinary upstream saturation still permits the backup after the wait budget")
 }
 
 func TestChannelFailoverMultiKeyRequestDoesNotMarkWholePoolEmpty(t *testing.T) {

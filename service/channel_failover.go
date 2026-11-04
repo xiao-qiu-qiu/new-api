@@ -24,11 +24,12 @@ import (
 )
 
 const (
-	channelFailoverContextKey = "channel_failover_request"
-	channelFailoverMaxEntries = 1024
-	channelFailoverWorkers    = 4
-	channelFailoverTimeout    = 2 * time.Second
-	channelFailoverIdleTTL    = 5 * time.Minute
+	channelFailoverContextKey      = "channel_failover_request"
+	channelFailoverMaxEntries      = 1024
+	channelFailoverWorkers         = 4
+	channelFailoverTimeout         = 2 * time.Second
+	channelFailoverIdleTTL         = 5 * time.Minute
+	channelFailoverBusyWaitTimeout = 30 * time.Second
 )
 
 // ApplyChannelFailoverProbeHeaders is wired to the relay's shared header
@@ -391,14 +392,15 @@ func probeChannelAvailability(parent context.Context, entry *channelFailoverEntr
 }
 
 type channelFailoverRequest struct {
-	key       channelFailoverKey
-	setting   operation_setting.ChannelFailoverSetting
-	modelName string
-	group     string
-	order     []int
-	visited   map[int]bool
-	current   int
-	state     string
+	key              channelFailoverKey
+	setting          operation_setting.ChannelFailoverSetting
+	modelName        string
+	group            string
+	order            []int
+	visited          map[int]bool
+	current          int
+	state            string
+	busyWaitDeadline time.Time
 }
 
 func requestChannelFailover(c *gin.Context) *channelFailoverRequest {
@@ -495,7 +497,7 @@ func prepareChannelFailover(c *gin.Context, modelName, usingGroup string, prefer
 	order := []int{setting.PrimaryChannelID, fallbackID}
 	if availability == "rotation_wait" {
 		order = []int{setting.PrimaryChannelID}
-	} else if availability == "empty" || availability == "busy" || availability == "recovering" {
+	} else if availability == "empty" || availability == "recovering" {
 		if fallback := eligibleFailoverChannel(c, fallbackID, group, modelName); fallback != nil {
 			order = []int{fallbackID}
 		}
@@ -516,8 +518,72 @@ func eligibleFailoverChannel(c *gin.Context, channelID int, group, modelName str
 	return channel
 }
 
+// Busy means the primary still has eligible accounts. Give each request its
+// own admission window, using the shared background observations without
+// holding a channel concurrency lease or probing on the request path.
+func (state *channelFailoverRequest) waitForBusyPrimary(ctx context.Context) error {
+	var ticks, timeout <-chan time.Time
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		now := time.Now()
+		channelFailover.mu.Lock()
+		entry := channelFailover.entries[state.key]
+		state.state = "unknown"
+		if entry != nil {
+			entry.lastUsed = now
+			state.state = entry.availability(now)
+			channelFailover.enqueue(entry, now)
+		}
+		channelFailover.mu.Unlock()
+		if state.state != "busy" {
+			return nil
+		}
+		if state.busyWaitDeadline.IsZero() {
+			state.busyWaitDeadline = now.Add(channelFailoverBusyWaitTimeout)
+		}
+		if !now.Before(state.busyWaitDeadline) {
+			return nil
+		}
+		if ticks == nil {
+			ticker := time.NewTicker(250 * time.Millisecond)
+			defer ticker.Stop()
+			timer := time.NewTimer(time.Until(state.busyWaitDeadline))
+			defer timer.Stop()
+			ticks, timeout = ticker.C, timer.C
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timeout:
+		case <-ticks:
+		}
+	}
+}
+
 func selectChannelFailover(c *gin.Context, state *channelFailoverRequest) (*model.Channel, string, error) {
 	ReleaseChannelConcurrency(c)
+	ctx := context.Background()
+	if c.Request != nil {
+		ctx = c.Request.Context()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, state.group, err
+	}
+	if state.current == 0 {
+		if err := state.waitForBusyPrimary(ctx); err != nil {
+			return nil, state.group, err
+		}
+		state.order = []int{state.setting.PrimaryChannelID, state.key.FallbackChannelID}
+		if state.state == "rotation_wait" {
+			state.order = []int{state.setting.PrimaryChannelID}
+		} else if state.state == "empty" || state.state == "busy" || state.state == "recovering" {
+			if eligibleFailoverChannel(c, state.key.FallbackChannelID, state.group, state.modelName) != nil {
+				state.order = []int{state.key.FallbackChannelID}
+			}
+		}
+	}
 	// The primary may enter rotation after the route or retry was planned.
 	// Re-read the latest observation before admitting a request to the backup.
 	if state.current == 0 || state.current == state.setting.PrimaryChannelID {
@@ -531,6 +597,9 @@ func selectChannelFailover(c *gin.Context, state *channelFailoverRequest) (*mode
 	}
 	var selectionErr error
 	for _, channelID := range state.order {
+		if err := ctx.Err(); err != nil {
+			return nil, state.group, err
+		}
 		if state.visited[channelID] {
 			continue
 		}
