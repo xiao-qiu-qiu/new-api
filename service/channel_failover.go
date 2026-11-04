@@ -592,7 +592,39 @@ func channelRotationWaiting(err *types.NewAPIError) bool {
 // broad global automatic-disable rule includes 429 or 503.
 func channelFailoverTransientCapacity(c *gin.Context, channelID int, err *types.NewAPIError) bool {
 	state := requestChannelFailover(c)
-	return state != nil && state.setting.PrimaryChannelID == channelID && (channelCapacityExhausted(err) || channelRotationWaiting(err))
+	if state == nil || state.setting.PrimaryChannelID != channelID || err == nil {
+		return false
+	}
+	if channelCapacityExhausted(err) || channelRotationWaiting(err) {
+		return true
+	}
+	// Only temporary upstream 503s inherit a known rotation wait. Authentication,
+	// permanent provider rejections, and local channel errors retain normal bans.
+	if err.StatusCode != http.StatusServiceUnavailable || err.GetErrorType() == types.ErrorTypeNewAPIError || types.IsChannelError(err) || types.IsSkipRetryError(err) {
+		return false
+	}
+	upstream := err.ToOpenAIError()
+	switch upstream.Type {
+	case "", "api_error", "server_error", "overloaded_error":
+	default:
+		return false
+	}
+	code, isString := upstream.Code.(string)
+	if upstream.Code != nil && !isString {
+		return false
+	}
+	switch code {
+	case "", "upstream_unavailable", "service_unavailable", "temporarily_unavailable", "upstream_error", "server_error", "overloaded_error":
+	default:
+		return false
+	}
+	if state.state == "rotation_wait" {
+		return true
+	}
+	channelFailover.mu.Lock()
+	defer channelFailover.mu.Unlock()
+	entry := channelFailover.entries[state.key]
+	return entry != nil && entry.availability(time.Now()) == "rotation_wait"
 }
 
 func channelFailoverRetry(c *gin.Context, err *types.NewAPIError, retryTimes int) (PolicyDecision, bool) {
@@ -610,12 +642,18 @@ func channelFailoverRetry(c *gin.Context, err *types.NewAPIError, retryTimes int
 		if rotation || entry != nil && entry.availability(now) == "rotation_wait" {
 			state.state, state.order = "rotation_wait", []int{state.setting.PrimaryChannelID}
 		}
-		if rotation && entry != nil && !entry.channel.ChannelInfo.IsMultiKey {
+		if rotation && entry != nil {
 			// A structured rotation rejection also protects cold-cache requests;
 			// an older in-flight probe must not undo this newer observation.
 			entry.revision++
 			entry.state, entry.readyCount, entry.recovering = "rotation_wait", 0, false
 			entry.lastValid = now
+			if entry.channel.ChannelInfo.IsMultiKey {
+				// One credential cannot speak for the pool. Discard the older
+				// aggregate and let a fresh probe evaluate all enabled keys.
+				entry.state, entry.lastValid = "unknown", time.Time{}
+				entry.nextCheck = now
+			}
 		}
 		observedEmpty := capacity && state.state != "rotation_wait" && entry != nil && !entry.channel.ChannelInfo.IsMultiKey
 		if observedEmpty {

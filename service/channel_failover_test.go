@@ -543,6 +543,32 @@ func TestChannelFailoverCacheSingleflightAndStaleProbe(t *testing.T) {
 	assert.False(t, channelCapacityExhausted(types.NewOpenAIError(errors.New("model_capacity_exhausted in free text"), types.ErrorCodeBadResponse, 503)), "free text never marks account exhaustion")
 }
 
+func TestChannelFailoverRotationWaitAtConcurrencyLimit(t *testing.T) {
+	db := channelFailoverDatabase(t, sqlite.Open(":memory:"))
+	primary, setting := channelFailoverFixture(t, db, true)
+	require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", primary.Id).Update("setting", `{"max_concurrency":1}`).Error)
+	model.InitChannelCache()
+	primary, err := model.CacheGetChannel(primary.Id)
+	require.NoError(t, err)
+	held := newChannelFailoverContext(t)
+	require.NoError(t, acquireChannelConcurrency(held, primary))
+	entry := recordChannelFailoverAvailability(t, primary, setting, "ready")
+	channelFailover.finish(entry, entry.revision, channelAvailability{State: "busy", Reason: "account_rotation"}, time.Now())
+	c := newChannelFailoverContext(t)
+	selected, _, selectionErr := SelectChannelForRequest(c, "alias", &RetryParam{Ctx: c, ModelName: "alias", TokenGroup: "default"})
+	assert.Nil(t, selected)
+	require.NotNil(t, selectionErr)
+	assert.Equal(t, http.StatusTooManyRequests, selectionErr.StatusCode)
+	assert.Equal(t, types.ErrorCode("channel_concurrency_limit"), selectionErr.Code)
+	assert.False(t, requestChannelFailover(c).visited[15], "rotation cannot overflow into a free backup")
+	ReleaseChannelConcurrency(held)
+	next := newChannelFailoverContext(t)
+	assert.Equal(t, primary.Id, selectChannelFailoverForTest(t, next).Id, "freeing a slot admits the next request to the primary")
+	ReleaseChannelConcurrency(next)
+	channelFailover.finish(entry, entry.revision, channelAvailability{State: "busy", Reason: "capacity_busy"}, time.Now())
+	assert.Equal(t, 15, selectChannelFailoverForTest(t, newChannelFailoverContext(t)).Id, "ordinary upstream saturation still permits the backup")
+}
+
 func TestChannelFailoverMultiKeyRequestDoesNotMarkWholePoolEmpty(t *testing.T) {
 	db := channelFailoverDatabase(t, sqlite.Open(":memory:"))
 	primary, _ := channelFailoverFixture(t, db, true)
@@ -595,6 +621,30 @@ func TestChannelFailoverMultiKeyRequestDoesNotMarkWholePoolEmpty(t *testing.T) {
 			result := probeChannelAvailability(context.Background(), entry)
 			assert.Equal(t, tc.state, result.State)
 			assert.Equal(t, tc.reason, result.Reason)
+		})
+	}
+	for _, staleState := range []string{"empty", "busy"} {
+		t.Run("rotation_invalidates_old_"+staleState, func(t *testing.T) {
+			channelFailover.finish(entry, entry.revision, channelAvailability{State: "unknown"}, time.Now())
+			c := newChannelFailoverContext(t)
+			require.Equal(t, primary.Id, selectChannelFailoverForTest(t, c).Id)
+			revision := entry.revision
+			stale := channelAvailability{State: staleState, Reason: "capacity_busy"}
+			channelFailover.finish(entry, revision, stale, time.Now())
+			rotation := types.WithOpenAIError(types.OpenAIError{Code: "account_rotation", Type: "api_error"}, 503)
+			decision := DecideRelayRetry(c, rotation, 8)
+			assert.Equal(t, "stop", decision.Action)
+			assert.Equal(t, "primary_rotation_wait", decision.Reason)
+			channelFailover.finish(entry, revision, stale, time.Now())
+			assert.Equal(t, "unknown", entry.availability(time.Now()), "a single rotating key invalidates stale pool observations without marking the whole pool rotating")
+			require.Equal(t, primary.Id, selectChannelFailoverForTest(t, newChannelFailoverContext(t)).Id)
+			firstState.Store(channelAvailability{State: "busy", Reason: "account_rotation"})
+			secondState.Store(channelAvailability{State: "ready"})
+			channelFailover.finish(entry, entry.revision, probeChannelAvailability(context.Background(), entry), time.Now())
+			next := newChannelFailoverContext(t)
+			require.Equal(t, primary.Id, selectChannelFailoverForTest(t, next).Id)
+			assert.Equal(t, "ready", entry.availability(time.Now()), "another ready key clears uncertainty without a recovery latch")
+			assert.Equal(t, "retry", DecideRelayRetry(next, err, 8).Action, "another key's capacity failure retains its own fallback decision")
 		})
 	}
 }
@@ -764,7 +814,7 @@ func TestChannelFailoverOverridesOnlyPrimaryBackupSessionRules(t *testing.T) {
 
 func TestChannelFailoverCapacityKeepsPrimaryEnabledForRecovery(t *testing.T) {
 	db := channelFailoverDatabase(t, sqlite.Open(":memory:"))
-	primary, _ := channelFailoverFixture(t, db, true)
+	primary, setting := channelFailoverFixture(t, db, true)
 	require.NoError(t, model.UpdateRequestPolicyOptions(map[string]string{"AutomaticDisableChannelEnabled": "true", "AutomaticDisableStatusCodes": "401,429,503"}))
 	previousErrorLog := constant.ErrorLogEnabled
 	constant.ErrorLogEnabled = false
@@ -785,6 +835,54 @@ func TestChannelFailoverCapacityKeepsPrimaryEnabledForRecovery(t *testing.T) {
 		assert.Equal(t, common.ChannelStatusEnabled, persisted.Status)
 		assert.False(t, channelFailoverTransientCapacity(newChannelFailoverContext(t), primary.Id, err), "unmatched requests retain normal disabling")
 		assert.False(t, channelFailoverTransientCapacity(c, 15, err), "the exception applies only to the primary")
+	}
+	for _, initialState := range []string{"ready", "rotation_wait"} {
+		t.Run("temporary_503_during_"+initialState, func(t *testing.T) {
+			entry := recordChannelFailoverAvailability(t, primary, setting, "busy")
+			channelFailover.finish(entry, entry.revision, channelAvailability{State: "busy", Reason: "account_rotation"}, time.Now())
+			if initialState == "ready" {
+				channelFailover.finish(entry, entry.revision, channelAvailability{State: "ready"}, time.Now())
+			}
+			c := newChannelFailoverContext(t)
+			require.Equal(t, primary.Id, selectChannelFailoverForTest(t, c).Id)
+			c.Set("auto_ban", true)
+			channelFailover.finish(entry, entry.revision, channelAvailability{State: "busy", Reason: "account_rotation"}, time.Now())
+			err := types.WithOpenAIError(types.OpenAIError{Type: "api_error", Code: "upstream_unavailable"}, 503)
+			require.True(t, ShouldDisableChannel(err))
+			assert.True(t, channelFailoverTransientCapacity(c, primary.Id, err), "health protection also reads a newer rotation probe before retry evaluation")
+			// Match HTTP and initial WebSocket failures: decide, record, then process.
+			decision := DecideRelayRetry(c, err, 8)
+			assert.Equal(t, "primary_rotation_wait", decision.Reason)
+			RecordPolicyFailure(c, primary.Id, err, decision)
+			events := RequestPolicy(c).Events()
+			assert.Equal(t, "unchanged", events[len(events)-1].Health)
+			ProcessChannelError(c, *types.NewChannelError(primary.Id, primary.Type, primary.Name, false, primary.Key, true), err, nil)
+			var persisted model.Channel
+			require.NoError(t, db.First(&persisted, primary.Id).Error)
+			assert.Equal(t, common.ChannelStatusEnabled, persisted.Status)
+			assert.Equal(t, primary.Id, selectChannelFailoverForTest(t, newChannelFailoverContext(t)).Id)
+			channelFailover.finish(entry, entry.revision, channelAvailability{State: "ready"}, time.Now())
+			assert.False(t, channelFailoverTransientCapacity(newChannelFailoverContext(t), primary.Id, err))
+			next := newChannelFailoverContext(t)
+			selectChannelFailoverForTest(t, next)
+			assert.False(t, channelFailoverTransientCapacity(next, primary.Id, err), "a recovered primary resumes ordinary health handling")
+		})
+	}
+	for _, upstream := range []types.OpenAIError{
+		{Type: "authentication_error", Code: "invalid_api_key"},
+		{Type: "api_error", Code: "insufficient_quota"},
+		{Type: "permission_error", Code: "upstream_unavailable"},
+	} {
+		entry := recordChannelFailoverAvailability(t, primary, setting, "rotation_wait")
+		c := newChannelFailoverContext(t)
+		selectChannelFailoverForTest(t, c)
+		c.Set("auto_ban", true)
+		err := types.WithOpenAIError(upstream, 503)
+		assert.False(t, channelFailoverTransientCapacity(c, primary.Id, err), "permanent errors cannot inherit a rotation exemption even with status 503")
+		RecordPolicyFailure(c, primary.Id, err, DecideRelayRetry(c, err, 8))
+		events := RequestPolicy(c).Events()
+		assert.Equal(t, "channel_disable_requested", events[len(events)-1].Health)
+		channelFailover.finish(entry, entry.revision, channelAvailability{State: "ready"}, time.Now())
 	}
 	credentialError := types.WithOpenAIError(types.OpenAIError{Type: "authentication_error", Code: "invalid_api_key"}, 401)
 	assert.False(t, channelFailoverTransientCapacity(c, primary.Id, credentialError))
