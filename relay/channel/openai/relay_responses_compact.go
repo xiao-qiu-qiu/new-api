@@ -22,6 +22,10 @@ func OaiResponsesCompactionHandler(c *gin.Context, resp *http.Response, info *re
 	}
 
 	var compactResp dto.OpenAIResponsesCompactionResponse
+	if apiErr := service.CyberPolicyErrorFromPayload(responseBody, resp.StatusCode); apiErr != nil {
+		service.ObserveCyberPolicyError(c, apiErr)
+		return nil, apiErr
+	}
 	if err := common.Unmarshal(responseBody, &compactResp); err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}

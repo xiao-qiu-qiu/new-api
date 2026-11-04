@@ -6,26 +6,197 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/cachex"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
+	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
+
+func cyberPolicyTestContext(t *testing.T, tokenID int, headers http.Header, body string) *gin.Context {
+	t.Helper()
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+	if headers != nil {
+		c.Request.Header = headers.Clone()
+	}
+	c.Request.Header.Set("Content-Type", "application/json")
+	common.SetContextKey(c, constant.ContextKeyUserId, 71)
+	common.SetContextKey(c, constant.ContextKeyTokenId, tokenID)
+	t.Cleanup(func() { common.CleanupBodyStorage(c) })
+	return c
+}
+
+func TestCyberSessionBlockLifecycle(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	t.Setenv("CYBER_SESSION_BLOCK_ENABLED", "true")
+	t.Setenv("CYBER_SESSION_BLOCK_TTL_SECONDS", "60")
+	for _, backend := range []string{"memory", "redis"} {
+		t.Run(backend, func(t *testing.T) {
+			previousRedis, previousRDB := common.RedisEnabled, common.RDB
+			previousCache, previousNow := cyberSessionBlockCache, cyberSessionBlockNow
+			t.Cleanup(func() {
+				common.RedisEnabled, common.RDB = previousRedis, previousRDB
+				cyberSessionBlockCache, cyberSessionBlockNow = previousCache, previousNow
+			})
+			common.RedisEnabled, common.RDB = backend == "redis", nil
+			if backend == "redis" {
+				address := os.Getenv("TEST_REDIS_ADDR")
+				if address == "" {
+					address = miniredis.RunT(t).Addr()
+				}
+				client := redis.NewClient(&redis.Options{Addr: address})
+				common.RDB = client
+				t.Cleanup(func() { assert.NoError(t, client.Close()) })
+			}
+			cache := newCyberSessionBlockCache()
+			cyberSessionBlockCache = func() *cachex.HybridCache[string] { return cache }
+			now := time.Now()
+			cyberSessionBlockNow = func() time.Time { return now }
+			headers := http.Header{}
+			headers.Set("session_id", common.GetUUID())
+			first := cyberPolicyTestContext(t, 7101, headers, `{"input":"first turn"}`)
+			require.Nil(t, CheckCyberSessionBlock(first))
+			require.True(t, ObserveCyberPolicyPayload(first, []byte(`{"error":{"code":"cyber_policy","message":"rejected"}}`)))
+			t.Cleanup(func() {
+				_, err := cache.DeleteMany([]string{cyberSessionForRequest(first).key})
+				assert.NoError(t, err)
+			})
+
+			if backend == "redis" {
+				// Another process has no local cache but must see the shared block.
+				cache = newCyberSessionBlockCache()
+			}
+			blocked := cyberPolicyTestContext(t, 7101, headers, `{"model":"another-model","input":"next turn"}`)
+			apiErr := CheckCyberSessionBlock(blocked)
+			require.NotNil(t, apiErr)
+			assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
+			assert.Equal(t, types.ErrorCode("session_blocked_by_cyber_policy"), apiErr.GetErrorCode())
+			assert.Equal(t, "60", blocked.Writer.Header().Get("Retry-After"))
+			assert.False(t, ShouldRetryRelayError(blocked, apiErr, 10))
+			selected, _, selectionErr := SelectChannelForRequest(cyberPolicyTestContext(t, 7101, headers, `{"input":"endpoint selection"}`), "unused-model", &RetryParam{})
+			require.NotNil(t, selectionErr, "endpoint ownership must reject before any channel lookup or availability probe")
+			assert.Nil(t, selected)
+			assert.Equal(t, http.StatusForbidden, selectionErr.StatusCode)
+			assert.Equal(t, types.ErrorCode("session_blocked_by_cyber_policy"), selectionErr.Code)
+			now = now.Add(30 * time.Second)
+			blocked = cyberPolicyTestContext(t, 7101, headers, `{"input":"third turn"}`)
+			require.NotNil(t, CheckCyberSessionBlock(blocked))
+			assert.Equal(t, "30", blocked.Writer.Header().Get("Retry-After"))
+			now = now.Add(31 * time.Second)
+			require.Nil(t, CheckCyberSessionBlock(cyberPolicyTestContext(t, 7101, headers, `{"input":"after expiry"}`)), "reads must not extend the original expiry")
+			t.Setenv("CYBER_SESSION_BLOCK_ENABLED", "false")
+			ObserveCyberPolicyError(cyberPolicyTestContext(t, 7101, headers, `{"input":"disabled"}`), types.WithOpenAIError(types.OpenAIError{Code: "cyber_policy"}, 403))
+			t.Setenv("CYBER_SESSION_BLOCK_ENABLED", "true")
+			require.Nil(t, CheckCyberSessionBlock(cyberPolicyTestContext(t, 7101, headers, `{"input":"still allowed"}`)))
+		})
+	}
+}
+
+func TestCyberSessionBlockIdentity(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	previousRedis := common.RedisEnabled
+	common.RedisEnabled = false
+	t.Cleanup(func() { common.RedisEnabled = previousRedis })
+	t.Setenv("CYBER_SESSION_BLOCK_ENABLED", "true")
+	for i, tc := range []struct {
+		name, body, nextBody string
+		headers, nextHeaders map[string]string
+		blocked              bool
+	}{
+		{name: "session alias and whitespace", headers: map[string]string{"session_id": " same "}, nextHeaders: map[string]string{"X-Session-Id": "same"}, blocked: true},
+		{name: "thread takes precedence", headers: map[string]string{"thread_id": "thread", "session_id": "one"}, nextHeaders: map[string]string{"thread-id": "thread", "session_id": "two"}, blocked: true},
+		{name: "body metadata and header alias", body: `{"input":"one","client_metadata":{"thread_id":"thread"}}`, nextHeaders: map[string]string{"conversation_id": "thread"}, blocked: true},
+		{name: "wrapped websocket metadata", body: `{"response":{"client_metadata":{"session_id":"session"}}}`, nextHeaders: map[string]string{"session_id": "session"}, blocked: true},
+		{name: "conflicting headers", headers: map[string]string{"session_id": "one", "session-id": "two"}},
+		{name: "conflicting body and header", headers: map[string]string{"thread_id": "one"}, body: `{"client_metadata":{"thread_id":"two"}}`},
+		{name: "invalid metadata type", body: `{"client_metadata":{"thread_id":123}}`},
+		{name: "invalid session character", headers: map[string]string{"session_id": "bad\x01id"}},
+		{name: "kind separates equal IDs", headers: map[string]string{"session_id": "same"}, nextHeaders: map[string]string{"thread_id": "same"}},
+		{name: "exact retry without session", body: `{"model":"first","input":"same","stream":false}`, nextBody: `{"model":"second","input":"same","stream":true,"prompt_cache_key":"different"}`, blocked: true},
+		{name: "wrapped create matches HTTP content", body: `{"type":"response.create","response":{"model":"first","input":"same"}}`, nextBody: `{"model":"second","input":"same"}`, blocked: true},
+		{name: "new content without session", body: `{"input":"one"}`, nextBody: `{"input":"two"}`},
+		{name: "explicit session never inherits fingerprint", body: `{"input":"same"}`, nextBody: `{"input":"same"}`, nextHeaders: map[string]string{"session_id": "independent"}},
+		{name: "explicit session never writes fingerprint", headers: map[string]string{"session_id": "explicit"}, body: `{"input":"same"}`, nextBody: `{"input":"same"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			firstHeaders, nextHeaders := http.Header{}, http.Header{}
+			for name, value := range tc.headers {
+				firstHeaders.Set(name, value)
+			}
+			for name, value := range tc.nextHeaders {
+				nextHeaders.Set(name, value)
+			}
+			first := cyberPolicyTestContext(t, 7200+i, firstHeaders, tc.body)
+			require.Nil(t, CheckCyberSessionBlock(first))
+			ObserveCyberPolicyError(first, types.WithOpenAIError(types.OpenAIError{Code: "cyber_policy"}, 403))
+			if len(tc.nextHeaders) == 0 && tc.nextBody == "" {
+				nextHeaders = firstHeaders
+			}
+			if tc.nextBody == "" {
+				tc.nextBody = tc.body
+			}
+			blocked := CheckCyberSessionBlock(cyberPolicyTestContext(t, 7200+i, nextHeaders, tc.nextBody))
+			assert.Equal(t, tc.blocked, blocked != nil)
+		})
+	}
+}
+
+func TestCyberPolicySignalDetection(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	previousDisable, previousStatuses := common.AutomaticDisableChannelEnabled, operation_setting.AutomaticDisableStatusCodeRanges
+	common.AutomaticDisableChannelEnabled = true
+	operation_setting.AutomaticDisableStatusCodeRanges = []operation_setting.StatusCodeRange{{Start: 502, End: 502}}
+	t.Cleanup(func() {
+		common.AutomaticDisableChannelEnabled, operation_setting.AutomaticDisableStatusCodeRanges = previousDisable, previousStatuses
+	})
+	for _, tc := range []struct {
+		name, payload string
+		cyber         bool
+	}{
+		{"normalized code", `{"error":{"code":" CYBER_POLICY "}}`, true},
+		{"nested failure", `{"type":"response.failed","response":{"error":{"code":"cyber_policy","message":"rejected"}}}`, true},
+		{"flattened error", `{"type":"error","code":"cyber_policy"}`, true},
+		{"response error", `{"type":"response.error","error":{"code":"cyber_policy"}}`, true},
+		{"code precedence", `{"error":{"code":"content_policy"},"response":{"error":{"code":"cyber_policy"}}}`, false},
+		{"successful event", `{"type":"response.completed","response":{"error":{"code":"cyber_policy"}}}`, false},
+		{"plain text", `{"error":{"message":"cyber_policy"}}`, false},
+		{"numeric code", `{"error":{"code":403}}`, false},
+		{"invalid JSON", `{"error":{"code":"cyber_policy"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := cyberPolicyTestContext(t, 7300, http.Header{}, "{}")
+			assert.Equal(t, tc.cyber, ObserveCyberPolicyPayload(c, []byte(tc.payload)))
+			apiErr := RelayErrorHandler(c.Request.Context(), &http.Response{StatusCode: 502, Body: io.NopCloser(strings.NewReader(tc.payload))}, false)
+			assert.Equal(t, tc.cyber, IsCyberPolicyError(apiErr))
+			if tc.cyber {
+				assert.False(t, ShouldRetryRelayError(c, apiErr, 10))
+				assert.False(t, ShouldDisableChannel(apiErr))
+			}
+		})
+	}
+}
 
 func TestShouldRetryRelayErrorHonorsChannelPinOnChannelError(t *testing.T) {
 	err := types.NewError(errors.New("channel failed"), types.ErrorCodeChannelNoAvailableKey)

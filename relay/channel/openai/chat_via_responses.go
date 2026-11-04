@@ -32,6 +32,10 @@ func OaiResponsesToChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
+	if apiErr := service.CyberPolicyErrorFromPayload(body, resp.StatusCode); apiErr != nil {
+		service.ObserveCyberPolicyError(c, apiErr)
+		return nil, apiErr
+	}
 
 	if err := common.Unmarshal(body, &responsesResp); err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
@@ -85,6 +89,10 @@ func OaiResponsesToChatBufferedStreamHandler(c *gin.Context, info *relaycommon.R
 		}
 
 		var streamResp dto.ResponsesStreamResponse
+		if apiErr := service.CyberPolicyErrorFromPayload(common.StringToByteSlice(data), resp.StatusCode); apiErr != nil {
+			service.ObserveCyberPolicyError(c, apiErr)
+			return nil, apiErr
+		}
 		if err := common.UnmarshalJsonStr(data, &streamResp); err != nil {
 			logger.LogError(c, common.LogText("failed to unmarshal buffered responses stream event: %s", err.Error()))
 			streamErr = types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
@@ -282,6 +290,16 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			info.ObserveResponseModel(streamResp.Response.Model)
 		}
 		info.ObserveResponseServiceTier(common.StringToByteSlice(data))
+		if apiErr := service.CyberPolicyErrorFromPayload(common.StringToByteSlice(data), resp.StatusCode); apiErr != nil {
+			service.ObserveCyberPolicyError(c, apiErr)
+			upstreamFailed = true
+			if streamResp.Response != nil {
+				failedUsage = streamResp.Response.Usage
+			}
+			streamErr = apiErr
+			stopStream(sr, apiErr)
+			return
+		}
 		if streamResp.Type == "response.error" || streamResp.Type == "response.failed" {
 			upstreamFailed = true
 			if streamResp.Response != nil {

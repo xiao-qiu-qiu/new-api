@@ -130,6 +130,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		}
 		return
 	}
+	if newAPIError = service.CheckCyberSessionBlock(c); newAPIError != nil {
+		return
+	}
 
 	relayInfo, err := relaycommon.GenRelayInfo(c, relayFormat, request, ws)
 	if err != nil {
@@ -225,6 +228,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 				return relayHandler(c, relayInfo)
 			}
 		})
+		service.ObserveCyberPolicyError(c, newAPIError)
 
 		if newAPIError == nil {
 			service.MarkRequestPolicySuccess(c, relayInfo.StreamStatus)

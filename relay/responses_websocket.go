@@ -123,6 +123,7 @@ type responsesWSSession struct {
 	lockedKeyIndex  int
 	lockedContext   map[appconstant.ContextKey]any
 	lockedRoute     dto.AdvancedCustomRoute
+	cyberBlockUntil time.Time
 }
 
 func ResponsesWebSocketHelper(c *gin.Context, client *websocket.Conn, runner ResponsesWSRequestRunner) *types.NewAPIError {
@@ -287,6 +288,13 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 		return newResponsesWSInvalidRequestError(fmt.Errorf("responses websocket connection is locked to model %q", s.lockedModel))
 	}
 	if apiErr = checkResponsesWSModelAccess(c, modelName); apiErr != nil {
+		return apiErr
+	}
+	// Explicit sessions use their own block keys; only unidentified turns share the connection window.
+	if time.Now().Before(s.cyberBlockUntil) && service.CyberSessionBlockEnabled() && !service.HasCyberSessionIdentity(c) {
+		return service.CyberSessionBlockedError(c)
+	}
+	if apiErr = service.CheckCyberSessionBlock(c); apiErr != nil {
 		return apiErr
 	}
 	common.SetContextKey(c, appconstant.ContextKeyOriginalModel, modelName)
@@ -494,6 +502,9 @@ routeAttempt:
 						}
 						continue
 					}
+					if service.ObserveCyberPolicyPayload(c, incoming.body) {
+						s.cyberBlockUntil = time.Now().Add(service.CyberSessionBlockTTL())
+					}
 					probeObserver.ObserveEvent(incoming.body)
 					groupProbeObserver.ObserveEvent(incoming.body)
 					if accepted {
@@ -541,6 +552,9 @@ routeAttempt:
 						goto routeAttempt
 					}
 					return rejected
+				}
+				if service.ObserveCyberPolicyPayload(c, incoming.body) {
+					s.cyberBlockUntil = time.Now().Add(service.CyberSessionBlockTTL())
 				}
 				probeObserver.ObserveEvent(incoming.body)
 				groupProbeObserver.ObserveEvent(incoming.body)

@@ -776,6 +776,221 @@ func TestResponsesWSChannelConcurrencyPerCreate(t *testing.T) {
 	assert.True(t, acquired, "the stopped generation must return capacity")
 }
 
+func TestResponsesWSCyberSessionBlock(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	t.Setenv("CYBER_SESSION_BLOCK_ENABLED", "true")
+	t.Setenv("CYBER_SESSION_BLOCK_TTL_SECONDS", "3600")
+	database := setupRelayChannelDB(t)
+	require.NoError(t, database.AutoMigrate(&model.User{}))
+	user := &model.User{Username: "ws-cyber-user"}
+	require.NoError(t, database.Create(user).Error)
+	previousRedis, previousCountTokens, previousLog := common.RedisEnabled, constant.CountToken, common.LogConsumeEnabled
+	previousPrices := ratio_setting.ModelPrice2JSONString()
+	quotaSetting := operation_setting.GetQuotaSetting()
+	previousFreePreConsume := quotaSetting.EnableFreeModelPreConsume
+	common.RedisEnabled, constant.CountToken, common.LogConsumeEnabled = false, false, false
+	quotaSetting.EnableFreeModelPreConsume = false
+	t.Cleanup(func() {
+		common.RedisEnabled, constant.CountToken, common.LogConsumeEnabled = previousRedis, previousCountTokens, previousLog
+		quotaSetting.EnableFreeModelPreConsume = previousFreePreConsume
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(previousPrices))
+	})
+	const modelName = "ws-cyber-model"
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"ws-cyber-model":0}`))
+	for _, eventType := range []string{"error", "response.failed"} {
+		for _, explicit := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/explicit=%t", eventType, explicit), func(t *testing.T) {
+				type upstreamCreate struct {
+					peer *websocket.Conn
+					body []byte
+				}
+				var handshakes, creates atomic.Int32
+				requests := make(chan upstreamCreate, 8)
+				upgrader := websocket.Upgrader{}
+				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					peer, err := upgrader.Upgrade(w, r, nil)
+					if err != nil {
+						t.Errorf("upgrade upstream websocket: %v", err)
+						return
+					}
+					defer peer.Close()
+					handshakes.Add(1)
+					for {
+						_, body, err := peer.ReadMessage()
+						if err != nil {
+							return
+						}
+						creates.Add(1)
+						requests <- upstreamCreate{peer: peer, body: body}
+					}
+				}))
+				t.Cleanup(upstream.Close)
+				channel := &model.Channel{Name: "ws-cyber", Key: "sk-test", BaseURL: &upstream.URL, Status: common.ChannelStatusEnabled, Type: constant.ChannelTypeOpenAI}
+				channel.SetSetting(dto.ChannelSettings{ResponsesWebSocketEnabled: true})
+				require.NoError(t, database.Create(channel).Error)
+				type callResult struct {
+					context *gin.Context
+					err     *types.NewAPIError
+				}
+				openSession := func(identity string) (*websocket.Conn, <-chan callResult) {
+					client, server, cleanup := newTestWebSocketPair(t)
+					c, _ := gin.CreateTestContext(httptest.NewRecorder())
+					c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+					if explicit && eventType == "error" {
+						c.Request.Header.Set("thread_id", identity)
+					}
+					results := make(chan callResult, 4)
+					done := make(chan struct{})
+					go func() {
+						defer close(done)
+						ResponsesWebSocketHelper(c, server, func(request *http.Request, requestID string, run func(*gin.Context) *types.NewAPIError) *types.NewAPIError {
+							call, _ := gin.CreateTestContext(httptest.NewRecorder())
+							call.Request = request
+							defer common.CleanupBodyStorage(call)
+							common.SetContextKey(call, common.RequestIdKey, requestID)
+							common.SetContextKey(call, constant.ContextKeyUserId, user.Id)
+							common.SetContextKey(call, constant.ContextKeyTokenId, 1001)
+							common.SetContextKey(call, constant.ContextKeyUsingGroup, "default")
+							service.GetChannelConstraints(call).AddPin(appdto.ChannelPin{ChannelId: channel.Id, Source: appdto.PinSourceToken})
+							apiErr := run(call)
+							results <- callResult{context: call, err: apiErr}
+							return apiErr
+						})
+					}()
+					t.Cleanup(func() {
+						cleanup()
+						select {
+						case <-done:
+						case <-time.After(5 * time.Second):
+							t.Error("cyber websocket relay did not finish")
+						}
+					})
+					return client, results
+				}
+				sendCreate := func(client *websocket.Conn, identity, streamID, input string) {
+					metadata := ""
+					if explicit && eventType == "response.failed" {
+						metadata = fmt.Sprintf(`,"client_metadata":{"session_id":%q}`, identity)
+					}
+					payload := fmt.Sprintf(`{"type":"response.create","event_id":%q,"stream_id":%q,"response":{"model":%q,"input":%q%s}}`, streamID, streamID, modelName, input, metadata)
+					require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(payload)))
+				}
+				readClient := func(client *websocket.Conn) []byte {
+					require.NoError(t, client.SetReadDeadline(time.Now().Add(5*time.Second)))
+					_, body, err := client.ReadMessage()
+					require.NoError(t, err)
+					return body
+				}
+				receiveCreate := func(streamID string) *websocket.Conn {
+					select {
+					case request := <-requests:
+						var forwarded struct {
+							Type     string `json:"type"`
+							StreamID string `json:"stream_id"`
+						}
+						require.NoError(t, common.Unmarshal(request.body, &forwarded))
+						require.Equal(t, "response.create", forwarded.Type)
+						require.Equal(t, streamID, forwarded.StreamID, "a locally blocked create must never reach upstream")
+						return request.peer
+					case <-time.After(5 * time.Second):
+						t.Fatal("create did not reach upstream")
+						return nil
+					}
+				}
+				identity := common.GetUUID()
+				followUp := "follow-up " + identity
+				client, results := openSession(identity)
+				sendCreate(client, identity, "unrelated-check", identity)
+				peer := receiveCreate("unrelated-check")
+				cyber := `{"code":"cyber_policy","message":"blocked by upstream policy","type":"invalid_request_error"}`
+				failure := fmt.Sprintf(`{"type":"error","stream_id":"other","status":503,"error":%s}`, cyber)
+				if eventType == "response.failed" {
+					failure = fmt.Sprintf(`{"type":"response.failed","stream_id":"other","response":{"id":"other","status":"failed","error":%s}}`, cyber)
+				}
+				require.NoError(t, peer.WriteMessage(websocket.TextMessage, []byte(failure)))
+				assert.JSONEq(t, failure, string(readClient(client)))
+				completed := `{"type":"response.completed","stream_id":"unrelated-check","response":{"id":"unrelated-check","status":"completed","output":[]}}`
+				require.NoError(t, peer.WriteMessage(websocket.TextMessage, []byte(completed)))
+				assert.JSONEq(t, completed, string(readClient(client)))
+				require.Nil(t, (<-results).err)
+
+				// A different stream's cyber frame must not poison this connection or identity.
+				sendCreate(client, identity, "cyber-hit", identity)
+				require.Same(t, peer, receiveCreate("cyber-hit"))
+				failure = strings.ReplaceAll(failure, `"other"`, `"cyber-hit"`)
+				require.NoError(t, peer.WriteMessage(websocket.TextMessage, []byte(failure)))
+				body := readClient(client)
+				hit := <-results
+				if eventType == "error" {
+					var rejected responsesWSErrorEvent
+					require.NoError(t, common.Unmarshal(body, &rejected))
+					require.NotNil(t, rejected.Error)
+					assert.Equal(t, "cyber_policy", rejected.Error.Code)
+					assert.Equal(t, http.StatusServiceUnavailable, rejected.Status)
+					require.NotNil(t, hit.err)
+					assert.False(t, service.ShouldRetryRelayError(hit.context, hit.err, 2))
+					assert.False(t, service.ShouldDisableChannel(hit.err))
+				} else {
+					assert.JSONEq(t, failure, string(body))
+					require.Nil(t, hit.err)
+				}
+				otherIdentity := common.GetUUID()
+				other, otherResults := client, results
+				wantHandshakes := int32(1)
+				// Body metadata can select a new session on the same socket; HTTP headers are fixed.
+				if !explicit || eventType == "error" {
+					other, otherResults = openSession(otherIdentity)
+					wantHandshakes++
+				}
+				otherInput := identity
+				if !explicit {
+					otherInput = followUp
+				}
+				sendCreate(other, otherIdentity, "allowed", otherInput)
+				otherPeer := receiveCreate("allowed")
+				if explicit && eventType == "response.failed" {
+					require.Same(t, peer, otherPeer, "a different metadata session must reuse the upstream socket")
+				}
+				completed = `{"type":"response.completed","stream_id":"allowed","response":{"id":"allowed","status":"completed","output":[]}}`
+				require.NoError(t, otherPeer.WriteMessage(websocket.TextMessage, []byte(completed)))
+				assert.JSONEq(t, completed, string(readClient(other)))
+				require.Nil(t, (<-otherResults).err)
+				assert.Equal(t, int32(3), creates.Load())
+				assert.Equal(t, wantHandshakes, handshakes.Load())
+
+				var before model.User
+				require.NoError(t, database.First(&before, user.Id).Error)
+				if explicit {
+					// Persistent session blocks must survive a new client WebSocket.
+					client, results = openSession(identity)
+				}
+				// Changing the content proves anonymous sockets use connection state, not a fingerprint hit.
+				sendCreate(client, identity, "blocked", followUp)
+				var blocked responsesWSErrorEvent
+				require.NoError(t, common.Unmarshal(readClient(client), &blocked))
+				require.NotNil(t, blocked.Error)
+				assert.Equal(t, http.StatusForbidden, blocked.Status)
+				assert.Equal(t, "session_blocked_by_cyber_policy", blocked.Error.Code)
+				assert.Equal(t, "blocked", blocked.StreamID)
+				local := <-results
+				require.NotNil(t, local.err)
+				assert.Zero(t, service.RequestPolicy(local.context).Attempts, "local rejection must precede routing and billing")
+				assert.Zero(t, common.GetContextKeyInt(local.context, constant.ContextKeyChannelId))
+				assert.Equal(t, int32(3), creates.Load())
+				assert.Equal(t, wantHandshakes, handshakes.Load(), "local rejection must not open another upstream socket")
+				var after model.User
+				require.NoError(t, database.First(&after, user.Id).Error)
+				assert.Equal(t, before.Quota, after.Quota)
+				assert.Equal(t, before.UsedQuota, after.UsedQuota)
+				assert.Equal(t, before.RequestCount, after.RequestCount)
+
+				require.NoError(t, database.First(channel, channel.Id).Error)
+				assert.Equal(t, common.ChannelStatusEnabled, channel.Status)
+			})
+		}
+	}
+}
+
 func TestResponsesWSMessageSizeLimit(t *testing.T) {
 	previous := constant.MaxRequestBodyMB
 	constant.MaxRequestBodyMB = 1

@@ -101,6 +101,15 @@ func RelayErrorHandler(ctx context.Context, resp *http.Response, showBodyWhenFai
 		}
 		return fmt.Errorf("bad response status code %d, message: %s, body: %s", resp.StatusCode, message, responseBodyText)
 	}
+	// Preserve the policy code before generic parsing or status remapping can
+	// turn a Responses failure envelope into an ordinary retryable 5xx.
+	if cyberErr := CyberPolicyErrorFromPayload(responseBody, resp.StatusCode); cyberErr != nil {
+		newApiErr = cyberErr
+		if showBodyWhenFail {
+			newApiErr.Err = buildErrWithBody(newApiErr.Error())
+		}
+		return
+	}
 
 	err = common.Unmarshal(responseBody, &errResponse)
 	if err != nil {

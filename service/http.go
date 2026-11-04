@@ -42,6 +42,7 @@ func ShouldCopyUpstreamHeader(c *gin.Context, k string, v []string) bool {
 }
 
 func IOCopyBytesGracefully(c *gin.Context, src *http.Response, data []byte) {
+	ObserveCyberPolicyPayload(c, data)
 	if c.Writer == nil {
 		return
 	}

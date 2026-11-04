@@ -27,6 +27,10 @@ func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeReadResponseBodyFailed, http.StatusInternalServerError)
 	}
+	if apiErr := service.CyberPolicyErrorFromPayload(responseBody, resp.StatusCode); apiErr != nil {
+		service.ObserveCyberPolicyError(c, apiErr)
+		return nil, apiErr
+	}
 	err = common.Unmarshal(responseBody, &responsesResponse)
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)

@@ -9,11 +9,13 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/i18n"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -40,6 +42,95 @@ func newResponsesChatTestContext(t *testing.T, body string, isStream bool) (*gin
 		DisablePing:        true,
 	}
 	return c, recorder, resp, info
+}
+
+func TestCyberPolicyBlocksChatResponsesConversions(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	t.Setenv("CYBER_SESSION_BLOCK_ENABLED", "true")
+	t.Setenv("CYBER_SESSION_BLOCK_TTL_SECONDS", "3600")
+	previousRedis := common.RedisEnabled
+	previousRetryStatuses := operation_setting.AutomaticRetryStatusCodeRanges
+	common.RedisEnabled = false
+	operation_setting.AutomaticRetryStatusCodeRanges = []operation_setting.StatusCodeRange{{Start: 403, End: 403}, {Start: 502, End: 502}}
+	t.Cleanup(func() {
+		common.RedisEnabled = previousRedis
+		operation_setting.AutomaticRetryStatusCodeRanges = previousRetryStatuses
+	})
+
+	for index, tc := range []struct {
+		name, payload            string
+		sse, stream, toResponses bool
+		handler                  func(*gin.Context, *relaycommon.RelayInfo, *http.Response) (*dto.Usage, *types.NewAPIError)
+	}{
+		{name: "Responses to Chat JSON without error type", payload: `{"error":{"code":"cyber_policy","message":"policy rejected"}}`, handler: OaiResponsesToChatHandler},
+		{name: "Chat to Responses JSON without error type", payload: `{"error":{"code":"cyber_policy","message":"policy rejected"}}`, toResponses: true, handler: OaiChatToResponsesHandler},
+		{name: "buffered SSE error", sse: true, payload: `{"type":"error","code":"cyber_policy","message":"policy rejected"}`, handler: OaiResponsesToChatBufferedStreamHandler},
+		{name: "buffered SSE response.error", sse: true, payload: `{"type":"response.error","response":{"error":{"code":"cyber_policy","message":"policy rejected"}}}`, handler: OaiResponsesToChatBufferedStreamHandler},
+		{name: "buffered SSE response.failed", sse: true, payload: `{"type":"response.failed","response":{"status":"failed","error":{"code":"cyber_policy","message":"policy rejected"}}}`, handler: OaiResponsesToChatBufferedStreamHandler},
+		{name: "Responses to Chat stream before output", sse: true, stream: true, payload: `{"type":"response.failed","response":{"status":"failed","error":{"code":"cyber_policy","message":"policy rejected"}}}`, handler: OaiResponsesToChatStreamHandler},
+		{name: "Chat to Responses stream emits response.failed", sse: true, stream: true, toResponses: true, payload: `{"error":{"code":"cyber_policy","message":"policy rejected"}}`, handler: OaiChatToResponsesStreamHandler},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			upstreamBody := tc.payload
+			contentType := "application/json"
+			if tc.sse {
+				upstreamBody = "data: " + tc.payload + "\n\ndata: [DONE]\n\n"
+				contentType = "text/event-stream"
+			}
+			c, recorder, resp, info := newResponsesChatTestContext(t, upstreamBody, tc.stream)
+			resp.Header.Set("Content-Type", contentType)
+			path := "/v1/chat/completions"
+			requestBody := `{"model":"gpt-test","messages":[{"role":"user","content":"first turn"}]}`
+			followupBody := `{"model":"gpt-test","messages":[{"role":"user","content":"next turn"}]}`
+			if tc.toResponses {
+				path = "/v1/responses"
+				requestBody = `{"model":"gpt-test","input":"first turn"}`
+				followupBody = `{"model":"gpt-test","input":"next turn"}`
+				info.RelayFormat = types.RelayFormatOpenAIResponses
+			}
+			if tc.stream {
+				requestBody = strings.TrimSuffix(requestBody, "}") + `,"stream":true}`
+			}
+			c.Request = httptest.NewRequest(http.MethodPost, path, strings.NewReader(requestBody))
+			followup, _ := gin.CreateTestContext(httptest.NewRecorder())
+			followup.Request = httptest.NewRequest(http.MethodPost, path, strings.NewReader(followupBody))
+			sessionID := common.GetUUID()
+			for _, context := range []*gin.Context{c, followup} {
+				context.Request.Header.Set("Content-Type", "application/json")
+				context.Request.Header.Set("session_id", sessionID)
+				common.SetContextKey(context, constant.ContextKeyUserId, 8100+index)
+				common.SetContextKey(context, constant.ContextKeyTokenId, 8200+index)
+				t.Cleanup(func() { common.CleanupBodyStorage(context) })
+			}
+			require.Nil(t, service.CheckCyberSessionBlock(c), "the first request must be admitted")
+
+			usage, apiErr := tc.handler(c, info, resp)
+
+			require.NotNil(t, apiErr)
+			assert.Nil(t, usage, "a rejected upstream response must not reach usage settlement")
+			assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
+			assert.Equal(t, types.ErrorCode("cyber_policy"), apiErr.GetErrorCode())
+			assert.Equal(t, "policy rejected", apiErr.ToOpenAIError().Message)
+			assert.NotEmpty(t, apiErr.ToOpenAIError().Type, "missing upstream error types must be filled")
+			if tc.stream && tc.toResponses {
+				assert.Contains(t, recorder.Body.String(), "event: response.failed", "the converted stream must terminate with a failure")
+				assert.NotContains(t, recorder.Body.String(), "event: response.completed")
+				assert.True(t, c.Writer.Written())
+			} else {
+				assert.Empty(t, recorder.Body.String(), "no converted success payload may be emitted")
+				assert.False(t, c.Writer.Written())
+			}
+			assert.False(t, service.ShouldRetryRelayError(c, apiErr, 2), "configured 403 retries must not resubmit cyber requests")
+			service.ResetStatusCode(apiErr, `{"403":502}`)
+			assert.Equal(t, http.StatusBadGateway, apiErr.StatusCode)
+			assert.False(t, service.ShouldRetryRelayError(c, apiErr, 2), "status remapping to a retryable 502 must preserve the cyber stop")
+
+			blocked := service.CheckCyberSessionBlock(followup)
+			require.NotNil(t, blocked, "the handler must cache the signal before discarding the raw payload")
+			assert.Equal(t, http.StatusForbidden, blocked.StatusCode)
+			assert.Equal(t, types.ErrorCode("session_blocked_by_cyber_policy"), blocked.GetErrorCode())
+		})
+	}
 }
 
 func TestOaiResponsesToChatStreamHandlerConvertsSSEOrderAndUsage(t *testing.T) {

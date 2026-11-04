@@ -424,7 +424,12 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 		if resp != nil {
 			statusCode = resp.StatusCode
 			if resp.Body != nil {
+				body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 				_ = resp.Body.Close()
+				if service.ObserveCyberPolicyPayload(c, body) {
+					resp.Body = io.NopCloser(bytes.NewReader(body))
+					return nil, service.RelayErrorHandler(c.Request.Context(), resp, false)
+				}
 			}
 		}
 		return nil, types.NewErrorWithStatusCode(fmt.Errorf("dial failed to %s: %w", common.SanitizeURLForLog(fullRequestURL), err), types.ErrorCodeDoRequestFailed, statusCode)

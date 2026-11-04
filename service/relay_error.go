@@ -21,6 +21,9 @@ func DecideRelayRetry(c *gin.Context, err *types.NewAPIError, retryTimes int) Po
 	if err == nil {
 		return PolicyDecision{Action: "stop", Reason: "request_completed", Source: "system"}
 	}
+	if IsCyberPolicyError(err) {
+		return PolicyDecision{Action: "stop", Reason: "cyber_policy", Source: "cyber_policy"}
+	}
 	if IsMediaGenerationRequest(c) {
 		return PolicyDecision{Action: "stop", Reason: MediaGenerationNoRetryReason, Source: MediaGenerationNoRetrySource}
 	}

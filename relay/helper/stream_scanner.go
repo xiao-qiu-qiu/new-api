@@ -315,6 +315,7 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 		}
 		info.SetFirstResponseTime()
 		info.ReceivedResponseCount++
+		service.ObserveCyberPolicyPayload(c, common.StringToByteSlice(payload))
 		sr.reset()
 		dataHandler(payload, sr)
 		if err := lifecycle.ClientError(); err != nil {

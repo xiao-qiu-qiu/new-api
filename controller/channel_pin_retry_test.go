@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/relay"
@@ -28,7 +29,198 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
+
+func TestCyberSessionBlockRelayHTTPAndSSE(t *testing.T) {
+	db := modelManagementDB(t, "sqlite", "")
+	require.NoError(t, db.AutoMigrate(&model.Token{}))
+	previousRetries, previousCount := common.RetryTimes, constant.CountToken
+	previousErrorLog, previousAutoDisable := constant.ErrorLogEnabled, common.AutomaticDisableChannelEnabled
+	previousConsumeLog, previousBatch := common.LogConsumeEnabled, common.BatchUpdateEnabled
+	previousRetryStatuses := operation_setting.AutomaticRetryStatusCodeRanges
+	quotaSetting := operation_setting.GetQuotaSetting()
+	previousQuotaSetting := *quotaSetting
+	previousGroupRatio := ratio_setting.GroupRatio2JSONString()
+	common.RetryTimes, constant.CountToken = 2, false
+	constant.ErrorLogEnabled, common.AutomaticDisableChannelEnabled = false, false
+	common.LogConsumeEnabled, common.BatchUpdateEnabled = false, false
+	operation_setting.AutomaticRetryStatusCodeRanges = []operation_setting.StatusCodeRange{{Start: 403, End: 403}, {Start: 502, End: 502}}
+	quotaSetting.TrustQuotaUSD = 0
+	t.Cleanup(func() {
+		common.RetryTimes, constant.CountToken = previousRetries, previousCount
+		constant.ErrorLogEnabled, common.AutomaticDisableChannelEnabled = previousErrorLog, previousAutoDisable
+		common.LogConsumeEnabled, common.BatchUpdateEnabled = previousConsumeLog, previousBatch
+		operation_setting.AutomaticRetryStatusCodeRanges = previousRetryStatuses
+		*quotaSetting = previousQuotaSetting
+		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(previousGroupRatio))
+	})
+	require.NoError(t, i18n.Init())
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1}`))
+	const modelName, initialQuota = "cyber-session-test", 100000
+	const blockedCode = "session_blocked_by_cyber_policy"
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"cyber-session-test":0.001}`))
+	service.InitHttpClient()
+
+	// Count debits, including ones that a failed request later refunds. A final
+	// unchanged balance alone would miss a block checked after pre-consumption.
+	var reservations atomic.Int32
+	require.NoError(t, db.Callback().Update().Before("gorm:update").Register("test:cyber_reservations", func(tx *gorm.DB) {
+		if tx.Statement.Table != "users" && tx.Statement.Table != "tokens" {
+			return
+		}
+		updates, _ := tx.Statement.Dest.(map[string]any)
+		for _, field := range []string{"quota", "remain_quota"} {
+			if value, ok := updates[field].(clause.Expr); ok && strings.Contains(value.SQL, " - ") {
+				reservations.Add(1)
+			}
+		}
+	}))
+	t.Cleanup(func() { require.NoError(t, db.Callback().Update().Remove("test:cyber_reservations")) })
+
+	for _, tc := range []struct {
+		name, payload string
+		status        int
+		stream, block bool
+	}{
+		{name: "HTTP 403 cyber", status: 403, block: true, payload: `{"error":{"message":"request rejected","type":"invalid_request_error","code":"cyber_policy"}}`},
+		{name: "HTTP 502 wrapped cyber", status: 502, block: true, payload: `{"error":{"message":"request rejected","type":"upstream_error","code":"cyber_policy"}}`},
+		{name: "HTTP upstream session already blocked", status: 403, block: true, payload: `{"error":{"message":"session unavailable","type":"invalid_request_error","code":"session_blocked_by_cyber_policy"}}`},
+		{name: "SSE response.failed", status: 200, stream: true, block: true, payload: "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"id\":\"resp_cyber\",\"status\":\"failed\",\"error\":{\"message\":\"request rejected\",\"type\":\"invalid_request_error\",\"code\":\"cyber_policy\"}}}\n\n"},
+		{name: "SSE error", status: 200, stream: true, block: true, payload: "event: error\ndata: {\"type\":\"error\",\"code\":\"cyber_policy\",\"message\":\"request rejected\"}\n\n"},
+		{name: "ordinary HTTP 403", status: 403, payload: `{"error":{"message":"access denied","type":"invalid_request_error","code":"permission_denied"}}`},
+		{name: "cyber mentioned in code and message", status: 403, payload: `{"error":{"message":"cyber model is unavailable","type":"upstream_error","code":"cyber_model_unavailable"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			users := []*model.User{
+				{Username: common.GetUUID(), Group: "default", Status: common.UserStatusEnabled, Quota: initialQuota},
+				{Username: common.GetUUID(), Group: "default", Status: common.UserStatusEnabled, Quota: initialQuota},
+			}
+			for _, user := range users {
+				user.AffCode = common.GetUUID()
+				require.NoError(t, db.Create(user).Error)
+			}
+			tokens := []*model.Token{
+				{UserId: users[0].Id, Key: common.GetUUID(), Status: common.TokenStatusEnabled, RemainQuota: initialQuota},
+				{UserId: users[0].Id, Key: common.GetUUID(), Status: common.TokenStatusEnabled, RemainQuota: initialQuota},
+				{UserId: users[1].Id, Key: common.GetUUID(), Status: common.TokenStatusEnabled, RemainQuota: initialQuota},
+			}
+			for _, token := range tokens {
+				require.NoError(t, db.Create(token).Error)
+			}
+			// Failed relays refund asynchronously; drain those refunds before the
+			// shared fixture restores model.DB and the billing configuration.
+			t.Cleanup(func() {
+				require.EventuallyWithT(t, func(collect *assert.CollectT) {
+					for _, user := range users {
+						var quota int
+						if assert.NoError(collect, db.Model(&model.User{}).Where("id = ?", user.Id).Select("quota").Scan(&quota).Error) {
+							assert.Equal(collect, initialQuota, quota)
+						}
+					}
+					for _, token := range tokens {
+						var quota int
+						if assert.NoError(collect, db.Model(&model.Token{}).Where("id = ?", token.Id).Select("remain_quota").Scan(&quota).Error) {
+							assert.Equal(collect, initialQuota, quota)
+						}
+					}
+				}, 3*time.Second, time.Millisecond)
+			})
+			var attempts atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				attempts.Add(1)
+				assert.Equal(t, "/v1/responses", r.URL.Path)
+				contentType := "application/json"
+				if tc.stream {
+					contentType = "text/event-stream"
+				}
+				w.Header().Set("Content-Type", contentType)
+				w.WriteHeader(tc.status)
+				_, _ = fmt.Fprint(w, tc.payload)
+			}))
+			t.Cleanup(upstream.Close)
+			channel := &model.Channel{Type: constant.ChannelTypeOpenAI, Name: tc.name, Key: "test-key", Status: common.ChannelStatusEnabled, Group: "default", Models: modelName, BaseURL: &upstream.URL}
+			require.NoError(t, db.Create(channel).Error)
+			require.NoError(t, channel.AddAbilities(db))
+			t.Cleanup(func() {
+				require.NoError(t, db.Where("channel_id = ?", channel.Id).Delete(&model.Ability{}).Error)
+				require.NoError(t, db.Delete(channel).Error)
+			})
+			request := func(user *model.User, token *model.Token, session string) (*gin.Context, *httptest.ResponseRecorder) {
+				t.Helper()
+				recorder := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(recorder)
+				body := fmt.Sprintf(`{"model":%q,"input":"hello","stream":%t}`, modelName, tc.stream)
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+				c.Request.Header.Set("Content-Type", "application/json")
+				c.Request.Header.Set("session_id", session)
+				common.SetContextKey(c, constant.ContextKeyUserId, user.Id)
+				user.ToBaseUser().WriteContext(c)
+				common.SetContextKey(c, constant.ContextKeyUserSetting, kitdto.UserSetting{BillingPreference: "wallet_only"})
+				common.SetContextKey(c, constant.ContextKeyTokenId, token.Id)
+				common.SetContextKey(c, constant.ContextKeyTokenKey, token.Key)
+				common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+				common.SetContextKey(c, constant.ContextKeyTokenGroup, "default")
+				require.Nil(t, middleware.SetupContextForSelectedChannel(c, channel, modelName))
+				defer service.ReleaseChannelConcurrency(c)
+				Relay(c, types.RelayFormatOpenAIResponses)
+				return c, recorder
+			}
+
+			session := common.GetUUID()
+			beforeReservations := reservations.Load()
+			first, firstResponse := request(users[0], tokens[0], session)
+			wantAttempts := common.RetryTimes + 1
+			if tc.block {
+				wantAttempts = 1
+			}
+			assert.Equal(t, tc.status, firstResponse.Code, firstResponse.Body.String())
+			assert.EqualValues(t, wantAttempts, attempts.Load(), "cyber must stop the current request even when 403/502 retries are configured")
+			assert.Len(t, first.GetStringSlice("use_channel"), wantAttempts)
+			assert.Greater(t, reservations.Load(), beforeReservations, "the paid fixture must actually exercise pre-consumption")
+			if tc.stream {
+				assert.Contains(t, firstResponse.Body.String(), "cyber_policy", "the upstream terminal event must reach the client")
+			}
+
+			beforeAttempts, beforeReservations := attempts.Load(), reservations.Load()
+			second, secondResponse := request(users[0], tokens[0], session)
+			if !tc.block {
+				assert.Equal(t, tc.status, secondResponse.Code, secondResponse.Body.String())
+				assert.EqualValues(t, wantAttempts, attempts.Load()-beforeAttempts, "ordinary errors must not poison the session")
+				assert.Len(t, second.GetStringSlice("use_channel"), wantAttempts)
+				return
+			}
+			assert.Equal(t, http.StatusForbidden, secondResponse.Code, secondResponse.Body.String())
+			var blocked struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			require.NoError(t, common.Unmarshal(secondResponse.Body.Bytes(), &blocked))
+			assert.Equal(t, blockedCode, blocked.Error.Code)
+			assert.Equal(t, beforeAttempts, attempts.Load(), "a blocked session must not contact upstream")
+			assert.Equal(t, beforeReservations, reservations.Load(), "a blocked session must not reserve user or token quota, even temporarily")
+			assert.Empty(t, second.GetStringSlice("use_channel"))
+
+			for _, identity := range []struct {
+				name    string
+				user    *model.User
+				token   *model.Token
+				session string
+			}{
+				{name: "different session", user: users[0], token: tokens[0], session: common.GetUUID()},
+				{name: "different token", user: users[0], token: tokens[1], session: session},
+				{name: "different user", user: users[1], token: tokens[2], session: session},
+			} {
+				before := attempts.Load()
+				c, _ := request(identity.user, identity.token, identity.session)
+				assert.EqualValues(t, 1, attempts.Load()-before, identity.name)
+				assert.Len(t, c.GetStringSlice("use_channel"), 1, identity.name)
+			}
+		})
+	}
+}
 
 func TestMediaGenerationRelaySingleAttempt(t *testing.T) {
 	db := modelManagementDB(t, "sqlite", "")
