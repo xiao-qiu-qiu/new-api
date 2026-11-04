@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/model"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/model_setting"
@@ -620,6 +622,212 @@ func TestChannelFailoverProbeContractAndIsolation(t *testing.T) {
 	assert.Zero(t, redirected.Load(), "credentials never follow a redirect")
 	primary.BaseURL = nil
 	assert.Equal(t, "unknown", probeChannelAvailability(context.Background(), entry).State)
+}
+
+func TestChannelFailoverProbeMaintenanceFence(t *testing.T) {
+	client := useChannelConcurrencyBackend(t, "redis")
+	InitHttpClient()
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		calls.Add(1)
+		body, _ := common.Marshal(channelAvailability{Object: "routing.availability", Model: "alias", State: "ready", CheckedAt: time.Now().Unix()})
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(server.Close)
+	primary := &model.Channel{Id: 910081, Type: constant.ChannelTypeOpenAI, Key: "probe-key", BaseURL: &server.URL}
+	entry := &channelFailoverEntry{channel: primary, key: channelFailoverKey{ChannelID: 910082, Model: "alias"}}
+	ctx := context.Background()
+	fenceKey := channelMaintenanceFenceKeys(nil, primary.Id)[0]
+	require.NoError(t, client.Set(ctx, channelMaintenanceFenceKeys(nil, entry.key.ChannelID)[0], "other-deployment", 0).Err())
+	assert.Equal(t, "ready", probeChannelAvailability(ctx, entry).State, "only the actual upstream channel's fence pauses its probe")
+	require.EqualValues(t, 1, calls.Load())
+	require.NoError(t, client.Set(ctx, fenceKey, "deployment", 0).Err())
+	assert.Equal(t, "unknown", probeChannelAvailability(ctx, entry).State)
+	assert.EqualValues(t, 1, calls.Load(), "maintenance must not contact the upstream")
+	capabilities := ChannelMaintenanceCapabilities()
+	assert.Equal(t, 1, capabilities["version"])
+	assert.Equal(t, true, capabilities["probe_pause"])
+	require.NoError(t, client.Del(ctx, fenceKey).Err())
+	assert.Equal(t, "ready", probeChannelAvailability(ctx, entry).State)
+	assert.EqualValues(t, 2, calls.Load(), "removing the fence restores probing")
+	primary.SetSetting(kitdto.ChannelSettings{Proxy: "://invalid"})
+	assert.Equal(t, "unknown", probeChannelAvailability(ctx, entry).State)
+	assert.EqualValues(t, 2, calls.Load(), "client construction failure must not contact the upstream")
+}
+
+func TestChannelFailoverProbeMaintenanceClosesOnlyIdleConnections(t *testing.T) {
+	redisClient := useChannelConcurrencyBackend(t, "redis")
+	idle, closed := make(chan net.Conn, 8), make(chan net.Conn, 8)
+	release := make(chan struct{})
+	var finish sync.Once
+	var calls atomic.Int32
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Path {
+		case "/active":
+			_, _ = w.Write([]byte("start"))
+			w.(http.Flusher).Flush()
+			select {
+			case <-release:
+				_, _ = w.Write([]byte("finished"))
+			case <-req.Context().Done():
+			}
+		case "/idle":
+			_, _ = w.Write([]byte("idle"))
+		default:
+			calls.Add(1)
+		}
+	}))
+	server.Config.ConnState = func(conn net.Conn, state http.ConnState) {
+		switch state {
+		case http.StateIdle:
+			idle <- conn
+		case http.StateClosed:
+			closed <- conn
+		}
+	}
+	server.Start()
+	t.Cleanup(server.Close)
+	client := server.Client()
+	t.Cleanup(client.CloseIdleConnections)
+	previousClient := httpClient
+	httpClient = client
+	t.Cleanup(func() { httpClient = previousClient })
+	t.Cleanup(func() { finish.Do(func() { close(release) }) })
+	active, err := client.Get(server.URL + "/active")
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, active.Body.Close()) })
+	start := make([]byte, len("start"))
+	_, err = io.ReadFull(active.Body, start)
+	require.NoError(t, err)
+	assert.Equal(t, "start", string(start))
+	warmup, err := client.Get(server.URL + "/idle")
+	require.NoError(t, err)
+	drainClose(t, warmup)
+	var idleConn net.Conn
+	select {
+	case idleConn = <-idle:
+	case <-time.After(5 * time.Second):
+		t.Fatal("warmup connection did not become idle")
+	}
+	primary := &model.Channel{Id: 910081, Type: constant.ChannelTypeOpenAI, Key: "probe-key", BaseURL: &server.URL}
+	entry := &channelFailoverEntry{channel: primary, key: channelFailoverKey{Model: "alias"}}
+	require.NoError(t, redisClient.Set(context.Background(), channelMaintenanceFenceKeys(nil, primary.Id)[0], "deployment", 0).Err())
+	assert.Equal(t, "unknown", probeChannelAvailability(context.Background(), entry).State)
+	assert.Zero(t, calls.Load())
+	select {
+	case conn := <-closed:
+		assert.Same(t, idleConn, conn, "maintenance closes the existing idle connection")
+	case <-time.After(5 * time.Second):
+		t.Fatal("maintenance left the idle TCP connection open")
+	}
+	finish.Do(func() { close(release) })
+	body, err := io.ReadAll(active.Body)
+	require.NoError(t, err, "closing idle connections must not interrupt the active stream")
+	assert.Equal(t, "finished", string(body))
+	assert.Same(t, client, GetHttpClient(), "maintenance preserves the shared client")
+	warmup, err = client.Get(server.URL + "/idle")
+	require.NoError(t, err, "the shared transport remains usable after closing idle connections")
+	drainClose(t, warmup)
+}
+
+func TestChannelFailoverProbeMaintenanceFenceRace(t *testing.T) {
+	for _, tc := range []struct {
+		name, response, want string
+		beforeDo             bool
+		calls                int32
+	}{
+		{name: "before_do", beforeDo: true, want: "unknown"},
+		{name: "between_keys", response: "empty", want: "unknown", calls: 1},
+		{name: "inflight_ready", response: "ready", want: "ready", calls: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := useChannelConcurrencyBackend(t, "redis")
+			InitHttpClient()
+			primary := &model.Channel{Id: 910081, Type: constant.ChannelTypeOpenAI, Key: "first-key\nsecond-key", ChannelInfo: model.ChannelInfo{IsMultiKey: true, MultiKeySize: 2}}
+			fenceKey := channelMaintenanceFenceKeys(nil, primary.Id)[0]
+			var calls atomic.Int32
+			var closeRequested atomic.Bool
+			closed := make(chan struct{}, 2)
+			server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				calls.Add(1)
+				closeRequested.Store(req.Close)
+				if err := client.Set(req.Context(), fenceKey, "deployment", 0).Err(); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				body, _ := common.Marshal(channelAvailability{Object: "routing.availability", Model: "alias", State: tc.response, CheckedAt: time.Now().Unix()})
+				_, _ = w.Write(body)
+			}))
+			server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+				if state == http.StateClosed {
+					closed <- struct{}{}
+				}
+			}
+			server.Start()
+			t.Cleanup(server.Close)
+			primary.BaseURL = &server.URL
+			entry := &channelFailoverEntry{channel: primary, key: channelFailoverKey{Model: "alias"}}
+			if tc.beforeDo {
+				previousHeaders := ApplyChannelFailoverProbeHeaders
+				ApplyChannelFailoverProbeHeaders = func(_ *relaycommon.RelayInfo, req *http.Request) error {
+					return client.Set(req.Context(), fenceKey, "deployment", 0).Err()
+				}
+				t.Cleanup(func() { ApplyChannelFailoverProbeHeaders = previousHeaders })
+			}
+			assert.Equal(t, tc.want, probeChannelAvailability(context.Background(), entry).State)
+			require.Equal(t, tc.calls, calls.Load(), "no new credential probe may start after the fence")
+			if tc.calls != 0 {
+				assert.True(t, closeRequested.Load(), "a probe already in flight must not leave a new idle connection")
+				select {
+				case <-closed:
+				case <-time.After(5 * time.Second):
+					t.Fatal("the in-flight probe left its TCP connection open")
+				}
+			}
+		})
+	}
+}
+
+func TestChannelFailoverProbeMaintenanceRedisUnavailable(t *testing.T) {
+	useChannelConcurrencyBackend(t, "redis")
+	InitHttpClient()
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	t.Cleanup(server.Close)
+	primary := &model.Channel{Id: 910081, Type: constant.ChannelTypeOpenAI, Key: "probe-key", BaseURL: &server.URL}
+	entry := &channelFailoverEntry{channel: primary, key: channelFailoverKey{Model: "alias"}}
+	client := common.RDB
+	t.Run("missing_client", func(t *testing.T) {
+		common.RDB = nil
+		t.Cleanup(func() { common.RDB = client })
+		assert.Equal(t, "unknown", probeChannelAvailability(context.Background(), entry).State)
+	})
+	t.Run("redis_error", func(t *testing.T) {
+		unavailable := redis.NewClient(client.Options())
+		require.NoError(t, unavailable.Close())
+		common.RDB = unavailable
+		t.Cleanup(func() { common.RDB = client })
+		assert.Equal(t, "unknown", probeChannelAvailability(context.Background(), entry).State)
+	})
+	t.Run("bounded_read", func(t *testing.T) {
+		deadline := make(chan time.Time, 1)
+		unavailable := redis.NewClient(&redis.Options{MaxRetries: -1, Dialer: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			limit, _ := ctx.Deadline()
+			deadline <- limit
+			return nil, errors.New("test Redis unavailable")
+		}})
+		common.RDB = unavailable
+		t.Cleanup(func() {
+			common.RDB = client
+			assert.NoError(t, unavailable.Close())
+		})
+		assert.True(t, channelMaintenanceProbePaused(context.Background(), primary.Id))
+		limit := <-deadline
+		require.False(t, limit.IsZero(), "even a background parent must produce a bounded Redis read")
+		assert.WithinDuration(t, time.Now(), limit, channelConcurrencyTimeout)
+		assert.Equal(t, "unknown", probeChannelAvailability(context.Background(), entry).State)
+	})
+	assert.Zero(t, calls.Load(), "unknown maintenance state must not contact the upstream")
 }
 
 func TestChannelFailoverRotationWaitStaysOnPrimary(t *testing.T) {

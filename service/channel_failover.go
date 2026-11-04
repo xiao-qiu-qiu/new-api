@@ -303,6 +303,15 @@ func probeChannelAvailability(parent context.Context, entry *channelFailoverEntr
 	ctx, cancel := context.WithTimeout(parent, channelFailoverTimeout)
 	defer cancel()
 	channel := entry.channel
+	settings := channel.GetSetting()
+	client, err := GetHttpClientWithProxySettings(settings.Proxy, settings)
+	if err != nil || client == nil {
+		return unknown
+	}
+	if channelMaintenanceProbePaused(ctx, channel.Id) {
+		client.CloseIdleConnections()
+		return unknown
+	}
 	baseURL := channel.GetBaseURL()
 	if baseURL == "" || channel.HeaderOverride != nil && strings.Contains(*channel.HeaderOverride, "{client_header:") {
 		return unknown
@@ -320,11 +329,6 @@ func probeChannelAvailability(parent context.Context, entry *channelFailoverEntr
 	query.Set("transport", entry.key.Transport)
 	query.Set("require_compact", strconv.FormatBool(entry.key.Compact))
 	u.RawQuery = query.Encode()
-	settings := channel.GetSetting()
-	client, err := GetHttpClientWithProxySettings(settings.Proxy, settings)
-	if err != nil || client == nil {
-		return unknown
-	}
 	// Never forward the channel credential to a redirect target, even on the
 	// same host. Copy the shared client instead of changing its policy.
 	probeClient := *client
@@ -360,6 +364,13 @@ func probeChannelAvailability(parent context.Context, entry *channelFailoverEntr
 				return unknown
 			}
 		} else if len(info.HeadersOverride) != 0 {
+			return unknown
+		}
+		// A fence can appear between credentials or after this check. The
+		// short-lived probe must not leave a new idle connection behind.
+		req.Close = true
+		if channelMaintenanceProbePaused(ctx, channel.Id) {
+			probeClient.CloseIdleConnections()
 			return unknown
 		}
 		response, err := probeClient.Do(req)

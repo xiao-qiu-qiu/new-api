@@ -38,6 +38,7 @@ func ChannelMaintenanceCapabilities() gin.H {
 		"version": 1, "redis": common.RedisEnabled && common.RDB != nil,
 		"wait_seconds":  int(channelMaintenanceWaitTimeout / time.Second),
 		"lease_seconds": int(channelConcurrencyLeaseTTL / time.Second),
+		"probe_pause":   true,
 	}
 }
 
@@ -105,6 +106,21 @@ func channelMaintenanceFenceKeys(c *gin.Context, channelID int) []string {
 		keys = append(keys, "newapi:maintenance:channel:"+strconv.Itoa(id))
 	}
 	return keys
+}
+
+// Background probes check only the channel they will actually contact. An
+// unavailable maintenance store pauses probing until its state is known again.
+func channelMaintenanceProbePaused(parent context.Context, channelID int) bool {
+	if !common.RedisEnabled {
+		return false
+	}
+	if common.RDB == nil {
+		return true
+	}
+	ctx, cancel := context.WithTimeout(parent, channelConcurrencyTimeout)
+	defer cancel()
+	blocked, err := common.RDB.Exists(ctx, channelMaintenanceFenceKeys(nil, channelID)...).Result()
+	return err != nil || blocked != 0
 }
 
 // A deployment fence deliberately outlives its owner's heartbeat. Losing an
