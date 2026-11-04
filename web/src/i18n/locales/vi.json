@@ -5270,6 +5270,7 @@
     "Primary and backup attempts exhausted": "Đã thử cả kênh chính và dự phòng",
     "Primary and backup routing": "Định tuyến chính và dự phòng",
     "Primary attempt failed; try the backup": "Kênh chính thất bại; thử kênh dự phòng",
+    "Primary accounts are resting; wait for recovery": "Tài khoản kênh chính đang nghỉ; chờ hoạt động trở lại",
     "Primary capacity is available": "Kênh chính có tài khoản khả dụng",
     "Primary capacity is unknown; try the primary": "Chưa rõ trạng thái kênh chính; thử kênh chính",
     "Primary channel (Sub2API)": "Kênh chính (Sub2API)",

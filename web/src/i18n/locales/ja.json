@@ -5270,6 +5270,7 @@
     "Primary and backup attempts exhausted": "プライマリとバックアップの試行が完了しました",
     "Primary and backup routing": "プライマリとバックアップのルーティング",
     "Primary attempt failed; try the backup": "プライマリへの接続に失敗したためバックアップを試行",
+    "Primary accounts are resting; wait for recovery": "プライマリのアカウントは休止中です。復帰を待機します",
     "Primary capacity is available": "プライマリに利用可能なアカウントがあります",
     "Primary capacity is unknown; try the primary": "プライマリの状態が不明なため接続を試行",
     "Primary channel (Sub2API)": "プライマリチャネル（Sub2API）",

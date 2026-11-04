@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
@@ -173,6 +174,11 @@ func TestChannelFailoverRoutingAcrossDatabases(t *testing.T) {
 				assert.Equal(t, 15, selectChannelFailoverForTest(t, newChannelFailoverContext(t)).Id)
 				channelFailover.finish(entry, entry.revision, channelAvailability{State: "ready"}, time.Now())
 				assert.Equal(t, primary.Id, selectChannelFailoverForTest(t, newChannelFailoverContext(t)).Id, "busy never latches recovery mode")
+				channelFailover.finish(entry, entry.revision, channelAvailability{State: "empty"}, time.Now())
+				channelFailover.finish(entry, entry.revision, channelAvailability{State: "busy", Reason: "account_rotation"}, time.Now())
+				assert.Equal(t, primary.Id, selectChannelFailoverForTest(t, newChannelFailoverContext(t)).Id, "rotation waits on the primary even after an empty pool")
+				channelFailover.finish(entry, entry.revision, channelAvailability{State: "ready"}, time.Now())
+				assert.Equal(t, primary.Id, selectChannelFailoverForTest(t, newChannelFailoverContext(t)).Id, "rotation does not leave an empty-pool recovery latch")
 				channelFailover.finish(entry, entry.revision, channelAvailability{State: "empty"}, time.Now())
 				entry.lastValid = time.Now().Add(-time.Minute)
 				assert.Equal(t, primary.Id, selectChannelFailoverForTest(t, newChannelFailoverContext(t)).Id, "stale empty cannot lock traffic to backup")
@@ -414,6 +420,106 @@ func TestChannelFailoverProbeContractAndIsolation(t *testing.T) {
 	assert.Equal(t, "unknown", probeChannelAvailability(context.Background(), entry).State)
 }
 
+func TestChannelFailoverRotationWaitStaysOnPrimary(t *testing.T) {
+	db := channelFailoverDatabase(t, sqlite.Open(":memory:"))
+	primary, setting := channelFailoverFixture(t, db, true)
+	InitHttpClient()
+	var response atomic.Value
+	response.Store(channelAvailability{State: "busy", Reason: "account_rotation"})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		availability := response.Load().(channelAvailability)
+		availability.Object, availability.Model, availability.CheckedAt = "routing.availability", "alias", time.Now().Unix()
+		body, err := common.Marshal(availability)
+		if err != nil {
+			http.Error(w, "encoding failed", http.StatusInternalServerError)
+			return
+		}
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+	entry := recordChannelFailoverAvailability(t, primary, setting, "empty")
+	probeChannel := *primary
+	probeChannel.BaseURL = &server.URL
+	entry.channel = &probeChannel
+	result := probeChannelAvailability(context.Background(), entry)
+	require.Equal(t, "account_rotation", result.Reason)
+	channelFailover.finish(entry, entry.revision, result, time.Now())
+
+	for _, code := range []string{"upstream_unavailable", "model_capacity_exhausted"} {
+		t.Run(code, func(t *testing.T) {
+			channelFailover.finish(entry, entry.revision, result, time.Now())
+			c := newChannelFailoverContext(t)
+			assert.Equal(t, primary.Id, selectChannelFailoverForTest(t, c).Id)
+			err := types.WithOpenAIError(types.OpenAIError{Code: code, Type: "api_error"}, http.StatusServiceUnavailable)
+			decision := DecideRelayRetry(c, err, 8)
+			assert.Equal(t, "stop", decision.Action, "waiting requests must not spill into the backup on failure")
+			assert.Equal(t, "primary_rotation_wait", decision.Reason)
+			assert.Equal(t, "rotation_wait", entry.availability(time.Now()), "a rotation wait rejection cannot turn later requests into an empty-pool failover")
+			_, _, retryErr := CacheGetRandomSatisfiedChannel(&RetryParam{Ctx: c, ModelName: "alias", TokenGroup: "default", Retry: common.GetPointer(1)})
+			assert.NotNil(t, retryErr, "even a direct retry cannot select the backup")
+		})
+	}
+	for _, tc := range []struct {
+		initialState string
+		afterRetry   bool
+	}{
+		{"ready", false}, {"unknown", false}, {"ready", true},
+	} {
+		t.Run(fmt.Sprintf("rotation_during_%s_request/after_retry_%t", tc.initialState, tc.afterRetry), func(t *testing.T) {
+			channelFailover.finish(entry, entry.revision, result, time.Now())
+			channelFailover.finish(entry, entry.revision, channelAvailability{State: tc.initialState}, time.Now())
+			c := newChannelFailoverContext(t)
+			require.Equal(t, primary.Id, selectChannelFailoverForTest(t, c).Id)
+			capacity := types.WithOpenAIError(types.OpenAIError{Code: "model_capacity_exhausted", Type: "api_error"}, 503)
+			if tc.afterRetry {
+				require.Equal(t, "retry", DecideRelayRetry(c, capacity, 8).Action)
+			}
+			channelFailover.finish(entry, entry.revision, result, time.Now())
+			if !tc.afterRetry {
+				assert.Equal(t, "stop", DecideRelayRetry(c, capacity, 8).Action)
+			}
+			_, _, retryErr := CacheGetRandomSatisfiedChannel(&RetryParam{Ctx: c, ModelName: "alias", TokenGroup: "default", Retry: common.GetPointer(1)})
+			assert.NotNil(t, retryErr, "a newer rotation observation takes precedence over the request's old availability")
+			assert.Equal(t, "rotation_wait", entry.availability(time.Now()), "old capacity errors cannot overwrite a newer rotation observation")
+		})
+	}
+	t.Run("cold_cache_rotation_rejection", func(t *testing.T) {
+		channelFailover.finish(entry, entry.revision, channelAvailability{State: "unknown"}, time.Now())
+		c := newChannelFailoverContext(t)
+		require.Equal(t, primary.Id, selectChannelFailoverForTest(t, c).Id)
+		revision := entry.revision
+		rotation := RelayErrorHandler(c.Request.Context(), &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"type":"api_error","code":"account_rotation","message":"No available accounts"}}`)),
+		}, false)
+		assert.True(t, channelFailoverTransientCapacity(c, primary.Id, rotation), "rotation must not automatically disable the primary")
+		decision := DecideRelayRetry(c, rotation, 8)
+		assert.Equal(t, "stop", decision.Action)
+		assert.Equal(t, "primary_rotation_wait", decision.Reason)
+		channelFailover.finish(entry, revision, channelAvailability{State: "empty"}, time.Now())
+		assert.Equal(t, "rotation_wait", entry.availability(time.Now()), "a stale probe cannot undo the explicit rotation rejection")
+		assert.Equal(t, primary.Id, selectChannelFailoverForTest(t, newChannelFailoverContext(t)).Id)
+		assert.False(t, channelRotationWaiting(types.NewOpenAIError(errors.New("account_rotation"), types.ErrorCodeBadResponse, 503)), "free text must not change failover behavior")
+	})
+	t.Run("rotation_before_first_selection", func(t *testing.T) {
+		channelFailover.finish(entry, entry.revision, channelAvailability{State: "busy", Reason: "capacity_busy"}, time.Now())
+		c := newChannelFailoverContext(t)
+		require.NotNil(t, prepareChannelFailover(c, "alias", "default", 0))
+		channelFailover.finish(entry, entry.revision, result, time.Now())
+		assert.Equal(t, primary.Id, selectChannelFailoverForTest(t, c).Id, "a newer rotation signal also overrides an unstarted backup plan")
+	})
+
+	response.Store(channelAvailability{State: "busy", Reason: "capacity_busy"})
+	channelFailover.finish(entry, entry.revision, probeChannelAvailability(context.Background(), entry), time.Now())
+	assert.Equal(t, 15, selectChannelFailoverForTest(t, newChannelFailoverContext(t)).Id, "ordinary saturation still uses the backup")
+	response.Store(channelAvailability{State: "ready", Reason: "account_rotation"})
+	channelFailover.finish(entry, entry.revision, probeChannelAvailability(context.Background(), entry), time.Now())
+	channelFailover.finish(entry, entry.revision, probeChannelAvailability(context.Background(), entry), time.Now())
+	c := newChannelFailoverContext(t)
+	assert.Equal(t, primary.Id, selectChannelFailoverForTest(t, c).Id)
+	assert.Equal(t, "retry", DecideRelayRetry(c, types.WithOpenAIError(types.OpenAIError{Code: "upstream_unavailable"}, 503), 8).Action, "a reason without busy does not lock normal requests")
+}
+
 func TestChannelFailoverCacheSingleflightAndStaleProbe(t *testing.T) {
 	runtime := newChannelFailoverRuntime()
 	runtime.running = true
@@ -453,14 +559,16 @@ func TestChannelFailoverMultiKeyRequestDoesNotMarkWholePoolEmpty(t *testing.T) {
 	assert.Equal(t, primary.Id, selectChannelFailoverForTest(t, newChannelFailoverContext(t)).Id)
 
 	InitHttpClient()
-	var secondState atomic.Value
-	secondState.Store("ready")
+	var firstState, secondState atomic.Value
+	firstState.Store(channelAvailability{State: "empty"})
+	secondState.Store(channelAvailability{State: "ready"})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		state := "empty"
+		availability := firstState.Load().(channelAvailability)
 		if req.Header.Get("Authorization") == "Bearer second-key" {
-			state = secondState.Load().(string)
+			availability = secondState.Load().(channelAvailability)
 		}
-		body, _ := common.Marshal(channelAvailability{Object: "routing.availability", Model: "alias", State: state, CheckedAt: time.Now().Unix()})
+		availability.Object, availability.Model, availability.CheckedAt = "routing.availability", "alias", time.Now().Unix()
+		body, _ := common.Marshal(availability)
 		_, _ = w.Write(body)
 	}))
 	defer server.Close()
@@ -469,8 +577,26 @@ func TestChannelFailoverMultiKeyRequestDoesNotMarkWholePoolEmpty(t *testing.T) {
 	copyChannel.BaseURL = &server.URL
 	entry.channel = &copyChannel
 	assert.Equal(t, "ready", probeChannelAvailability(context.Background(), entry).State)
-	secondState.Store("empty")
+	secondState.Store(channelAvailability{State: "empty"})
 	assert.Equal(t, "empty", probeChannelAvailability(context.Background(), entry).State, "only all enabled credentials being empty marks the channel empty")
+	for _, tc := range []struct {
+		name          string
+		first, second channelAvailability
+		state, reason string
+	}{
+		{"rotation_then_busy", channelAvailability{State: "busy", Reason: "account_rotation"}, channelAvailability{State: "busy", Reason: "capacity_busy"}, "busy", "account_rotation"},
+		{"busy_then_rotation", channelAvailability{State: "busy", Reason: "capacity_busy"}, channelAvailability{State: "busy", Reason: "account_rotation"}, "busy", "account_rotation"},
+		{"rotation_then_ready", channelAvailability{State: "busy", Reason: "account_rotation"}, channelAvailability{State: "ready"}, "ready", ""},
+		{"rotation_then_unknown", channelAvailability{State: "busy", Reason: "account_rotation"}, channelAvailability{State: "unknown"}, "unknown", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			firstState.Store(tc.first)
+			secondState.Store(tc.second)
+			result := probeChannelAvailability(context.Background(), entry)
+			assert.Equal(t, tc.state, result.State)
+			assert.Equal(t, tc.reason, result.Reason)
+		})
+	}
 }
 
 func TestChannelFailoverWorkerDropsRetiredCredentialsAndStops(t *testing.T) {
@@ -616,6 +742,9 @@ func TestChannelFailoverOverridesOnlyPrimaryBackupSessionRules(t *testing.T) {
 	assert.Equal(t, 15, bound)
 	recordChannelFailoverAvailability(t, primary, setting, "empty")
 	assert.Equal(t, 15, selectChannelFailoverForTest(t, contextForSession(t.Name())).Id, "the configured fallback chain cannot block the primary/backup policy")
+	entry := recordChannelFailoverAvailability(t, primary, setting, "busy")
+	channelFailover.finish(entry, entry.revision, channelAvailability{State: "busy", Reason: "account_rotation"}, time.Now())
+	assert.Equal(t, primary.Id, selectChannelFailoverForTest(t, contextForSession(t.Name())).Id, "an old backup binding cannot move rotation waits away from the primary")
 	recordChannelFailoverAvailability(t, primary, setting, "ready")
 	recordChannelFailoverAvailability(t, primary, setting, "ready")
 	assert.Equal(t, primary.Id, selectChannelFailoverForTest(t, contextForSession(t.Name())).Id, "strict affinity and backup residence TTL cannot delay failback")

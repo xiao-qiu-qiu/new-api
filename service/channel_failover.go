@@ -274,6 +274,12 @@ func (r *channelFailoverRuntime) finish(entry *channelFailoverEntry, revision ui
 		return
 	}
 	entry.state = result.State
+	if result.State == "busy" && result.Reason == "account_rotation" {
+		// Rotation is a deliberate wait inside the primary, not a reason to
+		// move the conversation to a different upstream.
+		entry.state = "rotation_wait"
+		entry.recovering = false
+	}
 	if result.State != "unknown" {
 		entry.lastValid = now
 	}
@@ -371,7 +377,11 @@ func probeChannelAvailability(parent context.Context, entry *channelFailoverEntr
 		case "ready":
 			return availability
 		case "busy":
-			result = availability
+			// A rotating credential can resume on this upstream. Keep that
+			// signal even if another credential is merely at capacity.
+			if result.Reason != "account_rotation" {
+				result = availability
+			}
 		case "empty":
 		default:
 			return unknown
@@ -483,7 +493,9 @@ func prepareChannelFailover(c *gin.Context, modelName, usingGroup string, prefer
 	key := makeChannelFailoverKey(c, primary, modelName, setting)
 	availability := channelFailover.observe(key, primary, setting, time.Now())
 	order := []int{setting.PrimaryChannelID, fallbackID}
-	if availability == "empty" || availability == "busy" || availability == "recovering" {
+	if availability == "rotation_wait" {
+		order = []int{setting.PrimaryChannelID}
+	} else if availability == "empty" || availability == "busy" || availability == "recovering" {
 		if fallback := eligibleFailoverChannel(c, fallbackID, group, modelName); fallback != nil {
 			order = []int{fallbackID}
 		}
@@ -506,6 +518,17 @@ func eligibleFailoverChannel(c *gin.Context, channelID int, group, modelName str
 
 func selectChannelFailover(c *gin.Context, state *channelFailoverRequest) (*model.Channel, string, error) {
 	ReleaseChannelConcurrency(c)
+	// The primary may enter rotation after the route or retry was planned.
+	// Re-read the latest observation before admitting a request to the backup.
+	if state.current == 0 || state.current == state.setting.PrimaryChannelID {
+		channelFailover.mu.Lock()
+		entry := channelFailover.entries[state.key]
+		rotating := entry != nil && entry.availability(time.Now()) == "rotation_wait"
+		channelFailover.mu.Unlock()
+		if rotating {
+			state.state, state.order = "rotation_wait", []int{state.setting.PrimaryChannelID}
+		}
+	}
 	var selectionErr error
 	for _, channelID := range state.order {
 		if state.visited[channelID] {
@@ -556,12 +579,20 @@ func channelCapacityExhausted(err *types.NewAPIError) bool {
 	}
 }
 
+func channelRotationWaiting(err *types.NewAPIError) bool {
+	if err == nil || err.GetErrorType() == types.ErrorTypeNewAPIError {
+		return false
+	}
+	code, _ := err.ToOpenAIError().Code.(string)
+	return code == "account_rotation"
+}
+
 // Capacity is a pool scheduling signal, not a failed credential. Keeping the
 // primary enabled lets availability checks observe its recovery even when a
 // broad global automatic-disable rule includes 429 or 503.
 func channelFailoverTransientCapacity(c *gin.Context, channelID int, err *types.NewAPIError) bool {
 	state := requestChannelFailover(c)
-	return state != nil && state.setting.PrimaryChannelID == channelID && channelCapacityExhausted(err)
+	return state != nil && state.setting.PrimaryChannelID == channelID && (channelCapacityExhausted(err) || channelRotationWaiting(err))
 }
 
 func channelFailoverRetry(c *gin.Context, err *types.NewAPIError, retryTimes int) (PolicyDecision, bool) {
@@ -571,15 +602,31 @@ func channelFailoverRetry(c *gin.Context, err *types.NewAPIError, retryTimes int
 	}
 	decision := PolicyDecision{Action: "stop", Source: "channel_failover"}
 	capacity := channelCapacityExhausted(err)
-	if capacity && state.current == state.setting.PrimaryChannelID {
+	rotation := channelRotationWaiting(err)
+	if state.current == state.setting.PrimaryChannelID {
 		channelFailover.mu.Lock()
-		if entry := channelFailover.entries[state.key]; entry != nil && !entry.channel.ChannelInfo.IsMultiKey {
+		entry := channelFailover.entries[state.key]
+		now := time.Now()
+		if rotation || entry != nil && entry.availability(now) == "rotation_wait" {
+			state.state, state.order = "rotation_wait", []int{state.setting.PrimaryChannelID}
+		}
+		if rotation && entry != nil && !entry.channel.ChannelInfo.IsMultiKey {
+			// A structured rotation rejection also protects cold-cache requests;
+			// an older in-flight probe must not undo this newer observation.
+			entry.revision++
+			entry.state, entry.readyCount, entry.recovering = "rotation_wait", 0, false
+			entry.lastValid = now
+		}
+		observedEmpty := capacity && state.state != "rotation_wait" && entry != nil && !entry.channel.ChannelInfo.IsMultiKey
+		if observedEmpty {
 			entry.revision++
 			entry.state, entry.readyCount, entry.recovering = "empty", 0, true
-			entry.lastValid = time.Now()
+			entry.lastValid = now
 		}
 		channelFailover.mu.Unlock()
-		RequestPolicy(c).AddEvent(PolicyEvent{ChannelID: state.current, Decision: PolicyDecision{Action: "observe", Reason: "primary_capacity_exhausted", Source: "channel_failover"}})
+		if observedEmpty {
+			RequestPolicy(c).AddEvent(PolicyEvent{ChannelID: state.current, Decision: PolicyDecision{Action: "observe", Reason: "primary_capacity_exhausted", Source: "channel_failover"}})
+		}
 	}
 	// Any emitted output is final for this attempt. The WS relay also calls
 	// this decision before forwarding a rejection and never after acceptance.
@@ -589,6 +636,10 @@ func channelFailoverRetry(c *gin.Context, err *types.NewAPIError, retryTimes int
 	}
 	if c.Request != nil && c.Request.Context().Err() != nil {
 		decision.Reason = "request_cancelled"
+		return decision, true
+	}
+	if state.state == "rotation_wait" {
+		decision.Reason = "primary_rotation_wait"
 		return decision, true
 	}
 	if retryTimes <= 0 && len(state.visited) >= 2 {

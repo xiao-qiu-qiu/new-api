@@ -9,6 +9,8 @@ export function policyLabel(t: TFunction, value: string): string {
       return t('Primary and backup routing')
     case 'primary_ready':
       return t('Primary capacity is available')
+    case 'primary_rotation_wait':
+      return t('Primary accounts are resting; wait for recovery')
     case 'primary_unknown':
       return t('Primary capacity is unknown; try the primary')
     case 'primary_busy':

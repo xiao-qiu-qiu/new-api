@@ -5270,6 +5270,7 @@
     "Primary and backup attempts exhausted": "主备渠道均已尝试",
     "Primary and backup routing": "主备路由",
     "Primary attempt failed; try the backup": "主渠道请求失败，尝试备用渠道",
+    "Primary accounts are resting; wait for recovery": "主渠道轮休中，等待恢复",
     "Primary capacity is available": "主渠道有可用账号",
     "Primary capacity is unknown; try the primary": "主渠道状态未知，尝试主渠道",
     "Primary channel (Sub2API)": "主渠道（Sub2API）",

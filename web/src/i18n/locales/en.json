@@ -5270,6 +5270,7 @@
     "Primary and backup attempts exhausted": "Primary and backup attempts exhausted",
     "Primary and backup routing": "Primary and backup routing",
     "Primary attempt failed; try the backup": "Primary attempt failed; try the backup",
+    "Primary accounts are resting; wait for recovery": "Primary accounts are resting; wait for recovery",
     "Primary capacity is available": "Primary capacity is available",
     "Primary capacity is unknown; try the primary": "Primary capacity is unknown; try the primary",
     "Primary channel (Sub2API)": "Primary channel (Sub2API)",

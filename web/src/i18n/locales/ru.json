@@ -5270,6 +5270,7 @@
     "Primary and backup attempts exhausted": "Основной и резервный каналы уже проверены",
     "Primary and backup routing": "Основной и резервный маршруты",
     "Primary attempt failed; try the backup": "Сбой основного канала: пробуем резервный",
+    "Primary accounts are resting; wait for recovery": "Аккаунты основного канала отдыхают; ожидание восстановления",
     "Primary capacity is available": "На основном канале есть доступные аккаунты",
     "Primary capacity is unknown; try the primary": "Доступность неизвестна: пробуем основной канал",
     "Primary channel (Sub2API)": "Основной канал (Sub2API)",

@@ -5270,6 +5270,7 @@
     "Primary and backup attempts exhausted": "Canaux principal et de secours déjà essayés",
     "Primary and backup routing": "Routage principal et de secours",
     "Primary attempt failed; try the backup": "Échec du canal principal : essayer le secours",
+    "Primary accounts are resting; wait for recovery": "Les comptes principaux sont au repos ; attendre leur reprise",
     "Primary capacity is available": "Le canal principal dispose de comptes disponibles",
     "Primary capacity is unknown; try the primary": "Disponibilité inconnue : essayer le canal principal",
     "Primary channel (Sub2API)": "Canal principal (Sub2API)",
