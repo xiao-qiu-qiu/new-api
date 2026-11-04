@@ -1,7 +1,10 @@
 package gemini
 
 import (
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/MoeForge/moego/ojson"
@@ -9,9 +12,59 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestEmbeddingHandlersUseUpstreamUsageWithEstimateFallback(t *testing.T) {
+	for _, protocol := range []string{"native_single", "native_batch", "openai"} {
+		for _, tc := range []struct {
+			name     string
+			metadata string
+			tokens   int
+		}{
+			{"upstream", `,"usageMetadata":{"promptTokenCount":23}`, 23},
+			{"missing", "", 7},
+			{"zero", `,"usageMetadata":{"promptTokenCount":0}`, 7},
+			{"negative", `,"usageMetadata":{"promptTokenCount":-3}`, 7},
+		} {
+			t.Run(protocol+"/"+tc.name, func(t *testing.T) {
+				body := `{"embeddings":[{"values":[0.25,0.5]}]` + tc.metadata + `}`
+				if protocol == "native_single" {
+					body = `{"embedding":{"values":[0.25,0.5]}` + tc.metadata + `}`
+				}
+				recorder := httptest.NewRecorder()
+				ctx, _ := gin.CreateTestContext(recorder)
+				ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/embeddings", nil)
+				info := &relaycommon.RelayInfo{ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gemini-embedding-test"}, IsGeminiBatchEmbedding: protocol == "native_batch"}
+				info.SetEstimatePromptTokens(7)
+				response := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(body))}
+				var usage *dto.Usage
+				var apiErr *types.NewAPIError
+				if protocol == "openai" {
+					usage, apiErr = GeminiEmbeddingHandler(ctx, info, response)
+				} else {
+					usage, apiErr = NativeGeminiEmbeddingHandler(ctx, response, info)
+				}
+				require.Nil(t, apiErr)
+				require.NotNil(t, usage)
+				assert.Equal(t, tc.tokens, usage.PromptTokens)
+				assert.Equal(t, tc.tokens, usage.TotalTokens)
+				assert.Zero(t, usage.CompletionTokens)
+				if protocol == "openai" {
+					var result dto.OpenAIEmbeddingResponse
+					require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &result))
+					assert.Equal(t, *usage, result.Usage)
+					require.Len(t, result.Data, 1)
+					assert.Equal(t, []float64{0.25, 0.5}, result.Data[0].Embedding)
+				} else {
+					assert.JSONEq(t, body, recorder.Body.String())
+				}
+			})
+		}
+	}
+}
 
 func TestConvertOpenAIResponsesRequestToGeminiInstructionsAndInput(t *testing.T) {
 	got := mustConvertResponsesToGemini(t, dto.OpenAIResponsesRequest{
