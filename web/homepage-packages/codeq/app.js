@@ -185,6 +185,7 @@ addEventListener('newapi:context', (event) => {
     document.querySelector('.hero-description').textContent = config.subtitle
   }
   renderCode()
+  document.documentElement.classList.add('motion-ready')
 })
 document.querySelectorAll('a[href^="#"]').forEach((link) =>
   link.addEventListener('click', (event) => {
@@ -195,3 +196,81 @@ document.querySelectorAll('a[href^="#"]').forEach((link) =>
     }
   })
 )
+
+if (!window.NewAPIHomepage) {
+  document.documentElement.classList.add('motion-ready')
+}
+
+// The observer respects the host viewport even inside the homepage iframe.
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)')
+if (!reducedMotion.matches && 'IntersectionObserver' in window) {
+  const revealTargets = document.querySelectorAll(
+    '.section-heading, .feature-card, .catalog-card, .step, .faq-heading, .faq-list, .final-cta'
+  )
+  const revealObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) {
+          entry.target.dataset.reveal = 'visible'
+          revealObserver.unobserve(entry.target)
+        }
+      }
+    },
+    { threshold: 0.08 }
+  )
+  for (const target of revealTargets) {
+    target.dataset.reveal = 'pending'
+    revealObserver.observe(target)
+    target.addEventListener(
+      'focusin',
+      () => {
+        target.dataset.reveal = 'visible'
+        revealObserver.unobserve(target)
+      },
+      { once: true }
+    )
+  }
+  reducedMotion.addEventListener('change', (event) => {
+    if (!event.matches) return
+    revealObserver.disconnect()
+    for (const target of revealTargets) target.dataset.reveal = 'visible'
+  })
+}
+
+const pointerMotion = matchMedia(
+  '(hover: hover) and (pointer: fine) and (prefers-reduced-motion: no-preference)'
+)
+const pointerLayer = document.createElement('div')
+pointerLayer.className = 'pointer-glow-layer'
+pointerLayer.setAttribute('aria-hidden', 'true')
+const pointerGlow = document.createElement('div')
+pointerGlow.className = 'pointer-glow'
+pointerLayer.append(pointerGlow)
+document.body.append(pointerLayer)
+let pointerFrame = 0
+let pointerX = 0
+let pointerY = 0
+document.addEventListener(
+  'pointermove',
+  (event) => {
+    if (!pointerMotion.matches || event.pointerType === 'touch') return
+    pointerX = event.clientX
+    pointerY = event.clientY
+    if (pointerFrame) return
+    pointerFrame = requestAnimationFrame(() => {
+      pointerGlow.style.translate = `${pointerX}px ${pointerY}px`
+      pointerLayer.classList.add('is-active')
+      pointerFrame = 0
+    })
+  },
+  { passive: true }
+)
+const hidePointerGlow = () => {
+  cancelAnimationFrame(pointerFrame)
+  pointerFrame = 0
+  pointerLayer.classList.remove('is-active')
+}
+document.documentElement.addEventListener('pointerleave', hidePointerGlow)
+addEventListener('blur', hidePointerGlow)
+addEventListener('wheel', hidePointerGlow, { passive: true })
+pointerMotion.addEventListener('change', hidePointerGlow)
