@@ -23,8 +23,14 @@ func TestTokenOpenAITierPolicyRedisHashCache(t *testing.T) {
 			assert.Positive(t, server.TTL(getTokenCacheKey(token.Key)))
 			require.NoError(t, common.RDB.HDel(context.Background(), getTokenCacheKey(token.Key), "OpenAITierPolicy").Err())
 			cached, err = cacheGetTokenByKey(token.Key)
+			require.Error(t, err, "missing signed metadata must not silently change the effective tier")
+			assert.Nil(t, cached)
+			initialized, err = cacheInitToken(token)
 			require.NoError(t, err)
-			assert.Equal(t, OpenAITierPolicyFollow, cached.OpenAITierPolicy)
+			assert.Equal(t, 2, initialized)
+			cached, err = cacheGetTokenByKey(token.Key)
+			require.NoError(t, err)
+			assert.Equal(t, token.GetOpenAITierPolicy(), cached.OpenAITierPolicy)
 		})
 	}
 }
