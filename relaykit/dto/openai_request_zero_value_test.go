@@ -10,6 +10,63 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestImageRequestPreservesGIFFrameOptions(t *testing.T) {
+	for _, fields := range []string{"", `,"frame_count":0,"frame_duration_ms":0`, `,"frame_count":64,"frame_duration_ms":205`} {
+		raw := `{"model":"gpt-image-2.6-flare","output_format":"gif"` + fields + `}`
+		var request ImageRequest
+		require.NoError(t, kitutil.Unmarshal([]byte(raw), &request))
+		encoded, err := kitutil.Marshal(request)
+		require.NoError(t, err)
+		assert.Equal(t, "gif", ojson.GetBytes(encoded, "output_format").String())
+		for _, field := range []string{"frame_count", "frame_duration_ms"} {
+			want := ojson.Get(raw, field)
+			got := ojson.GetBytes(encoded, field)
+			assert.Equal(t, want.Exists(), got.Exists(), field)
+			if want.Exists() {
+				assert.Equal(t, want.Int(), got.Int(), field)
+			}
+		}
+	}
+}
+
+func TestImageRequestGIFGuideContract(t *testing.T) {
+	for _, tc := range []struct {
+		name, fields, wantError string
+		edit                    bool
+	}{
+		{name: "defaults"},
+		{name: "minimum", fields: `,"frame_count":2,"frame_duration_ms":20`},
+		{name: "guide maximum", fields: `,"frame_count":64,"frame_duration_ms":2000`},
+		{name: "quantization left to upstream", fields: `,"frame_duration_ms":205,"stream":false`},
+		{name: "too few frames", fields: `,"frame_count":1`, wantError: "frame_count"},
+		{name: "too many frames", fields: `,"frame_count":65`, wantError: "frame_count"},
+		{name: "short frame", fields: `,"frame_duration_ms":19`, wantError: "frame_duration_ms"},
+		{name: "long frame", fields: `,"frame_duration_ms":2001`, wantError: "frame_duration_ms"},
+		{name: "edits", edit: true, wantError: "not edits"},
+		{name: "stream", fields: `,"stream":true`, wantError: "streaming"},
+		{name: "partial images", fields: `,"partial_images":0`, wantError: "partial_images"},
+		{name: "compression", fields: `,"output_compression":100`, wantError: "output_compression"},
+		{name: "prompt rewriting", fields: `,"prompt_rewriter":false`, wantError: "prompt_rewriter"},
+		{name: "mask URL", fields: `,"mask":"https://example.invalid/mask.png"`, wantError: "mask"},
+		{name: "mask object", fields: `,"mask":{}`, wantError: "mask"},
+		{name: "empty mask is still present", fields: `,"mask":""`, wantError: "mask"},
+		{name: "null optional fields", fields: `,"partial_images":null,"output_compression":null,"prompt_rewriter":null,"mask":null`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var request ImageRequest
+			require.NoError(t, kitutil.Unmarshal([]byte(`{"model":"gpt-image-2.6-sunburst","output_format":"gif"`+tc.fields+`}`), &request))
+			err := request.ValidateGIFOutput(tc.edit)
+			if tc.wantError != "" {
+				require.ErrorContains(t, err, tc.wantError)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+	request := ImageRequest{FrameCount: new(int)}
+	require.ErrorContains(t, request.ValidateGIFOutput(false), "require output_format=gif")
+}
+
 func TestGeneralOpenAIRequestPreserveExplicitZeroValues(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-4.1",

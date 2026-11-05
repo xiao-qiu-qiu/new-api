@@ -17,6 +17,11 @@ var builtinBillingExpr = map[string]string{
 	"gpt-image-2":            `tier("standard", p * 5 + cr * 1.25 + img * 8 + img_cr * 2 + c * 30)`,
 	"gpt-image-2.5-sunburst": `tier("standard", p * 5 + cr * 1.25 + img * 8 + img_cr * 2 + c * 30)`,
 	"gpt-image-2.5-flare":    `tier("standard", p * 5 + cr * 1.25 + img * 8 + img_cr * 2 + c * 30)`,
+	// https://developers.openai.com/api/docs/models/gpt-image-2.6-flare
+	// https://developers.openai.com/api/docs/models/gpt-image-2.6-sunburst
+	// GIF output uses the reported token usage, without a frame multiplier.
+	"gpt-image-2.6-flare":    `tier("standard", p * 5 + cr * 1.25 + img * 8 + img_cr * 2 + c * 30)`,
+	"gpt-image-2.6-sunburst": `tier("standard", p * 5 + cr * 1.25 + img * 8 + img_cr * 2 + c * 30)`,
 	// https://developers.openai.com/api/docs/pricing (2026-10-19).
 	// Long-context prices apply to the whole request. service_tier is the
 	// final outbound tier, superseded by an explicit upstream response tier;

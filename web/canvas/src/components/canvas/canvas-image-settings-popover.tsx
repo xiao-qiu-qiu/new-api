@@ -4,7 +4,8 @@ import { Settings2 } from "lucide-react";
 import { Button } from "antd";
 import { useTranslation } from "react-i18next";
 
-import { ImageSettingsPanel, imageQualityLabel, imageSizeLabel } from "@/components/image-settings-panel";
+import { ImageSettingsPanel } from "@/components/image-settings-panel";
+import { imageQualityLabel, imageSizeLabel } from "@/lib/image-settings-options";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { AiConfig } from "@/stores/use-config-store";
@@ -65,7 +66,7 @@ export function CanvasImageSettingsPopover({ config, onConfigChange, onOpenChang
             <span ref={buttonRef} className="inline-flex min-w-0">
                 <Button size="small" type="text" className={buttonClassName || "!h-8 !max-w-[180px] !justify-start !rounded-full !px-2.5"} style={{ background: theme.node.fill, color: theme.node.text }} icon={<Settings2 className="size-3.5" />} onClick={() => updateOpen(!open)}>
                     <span className="truncate">
-                        {imageQualityLabel(quality)} · {imageSizeLabel(activeSize)} · {t("canvas.controls.images", { count })}
+                        {config.imageOutputFormat === "gif" ? "GIF · " : ""}{imageQualityLabel(quality)} · {imageSizeLabel(activeSize)} · {t("canvas.controls.images", { count })}
                     </span>
                 </Button>
             </span>
@@ -94,7 +95,9 @@ function ImageSettingsPortal({
     const margin = 12;
     const alignRight = placement?.endsWith("Right");
     const alignCenter = placement === "top" || placement === "bottom";
-    const left = alignCenter ? buttonRect.left + buttonRect.width / 2 - width / 2 : alignRight ? buttonRect.right - width : buttonRect.left;
+    let left = buttonRect.left;
+    if (alignCenter) left += buttonRect.width / 2 - width / 2;
+    else if (alignRight) left = buttonRect.right - width;
     const topPlacement = placement?.startsWith("top");
     const style = {
         position: "fixed",

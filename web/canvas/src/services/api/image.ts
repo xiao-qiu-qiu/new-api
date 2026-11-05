@@ -51,7 +51,7 @@ const IMAGE_MIN_PIXELS = 655360;
 const IMAGE_MAX_PIXELS = 8294400;
 const IMAGE_MAX_EDGE = 3840;
 const IMAGE_MAX_RATIO = 3;
-const IMAGE_OUTPUT_FORMAT = "png";
+const IMAGE_OUTPUT_FORMATS = new Set(["png", "jpeg", "webp", "gif"]);
 
 function normalizeQuality(quality: string) {
   const value = quality.trim().toLowerCase();
@@ -139,12 +139,21 @@ function validateImageSize(width: number, height: number) {
   }
 }
 
-function resolveRequestSize(size: string) {
+function resolveRequestSize(size: string, animated = false) {
   const value = size.trim();
   if (!value || value.toLowerCase() === "auto") return undefined;
   const dimensions = parseImageDimensions(value);
   if (dimensions) {
-    validateImageSize(dimensions.width, dimensions.height);
+    if (animated) {
+      if (!Number.isInteger(dimensions.width) || !Number.isInteger(dimensions.height) || dimensions.width <= 0 || dimensions.height <= 0) {
+        throw new Error(apiText("positiveImageDimensions"));
+      }
+      if (dimensions.width % IMAGE_SIZE_STEP !== 0 || dimensions.height % IMAGE_SIZE_STEP !== 0) {
+        throw new Error(apiText("imageDimensionStep"));
+      }
+    } else {
+      validateImageSize(dimensions.width, dimensions.height);
+    }
     return `${dimensions.width}x${dimensions.height}`;
   }
   if (value.includes(":")) return resolveSize(value);
@@ -158,8 +167,12 @@ function parseImagePayload(
   const images = (Array.isArray(data) ? data : [data]).flatMap((item) => {
     if (!item || typeof item !== "object") return [];
     if (typeof item.b64_json === "string" && item.b64_json) {
+      let mimeType = "image/png";
+      if (item.b64_json.startsWith("R0lGOD")) mimeType = "image/gif";
+      else if (item.b64_json.startsWith("/9j/")) mimeType = "image/jpeg";
+      else if (item.b64_json.startsWith("UklGR")) mimeType = "image/webp";
       return [
-        { id: nanoid(), dataUrl: `data:image/png;base64,${item.b64_json}` },
+        { id: nanoid(), dataUrl: `data:${mimeType};base64,${item.b64_json}` },
       ];
     }
     if (typeof item.url === "string" && item.url) {
@@ -184,10 +197,24 @@ function imageRequestParameters(
     config.model || config.imageModel,
     "image",
   );
+  const configuredFormat = config.imageOutputFormat || "png";
+  const outputFormat = IMAGE_OUTPUT_FORMATS.has(configuredFormat) ? configuredFormat : "png";
+  const animated = outputFormat === "gif";
+  if (animated && !/^gpt-image-2\.6-(?:flare|sunburst)$/i.test(selection.model)) {
+    throw new Error(i18n.t("GIF output requires GPT Image 2.6 Flare or Sunburst."));
+  }
+  const frameCount = Number(config.imageFrameCount || "9");
+  const frameDuration = Number(config.imageFrameDurationMs || "200");
+  if (animated && (!Number.isInteger(frameCount) || frameCount < 2 || frameCount > 64)) {
+    throw new Error(i18n.t("GIF frame count must be an integer from 2 to 64."));
+  }
+  if (animated && (!Number.isInteger(frameDuration) || frameDuration < 20 || frameDuration > 2000)) {
+    throw new Error(i18n.t("GIF frame duration must be an integer from 20 to 2000 ms."));
+  }
   const size = selection.model.toLowerCase() === "wanx2.1-imageedit"
     ? undefined
-    : resolveRequestSize(config.size);
-  const background = normalizeBackground(config.background);
+    : resolveRequestSize(config.size, animated);
+  const background = animated ? undefined : normalizeBackground(config.background);
   let quality = normalizeQuality(config.quality);
   if (quality === "xhigh" || quality === "max") quality = "high";
   if (selection.model === "dall-e-3" && quality) {
@@ -203,8 +230,9 @@ function imageRequestParameters(
     ...(quality ? { quality } : {}),
     ...(size ? { size } : {}),
     ...(background ? { background } : {}),
+    ...(animated ? { frame_count: frameCount, frame_duration_ms: frameDuration } : {}),
     ...(/gpt-image/i.test(selection.model)
-      ? { output_format: IMAGE_OUTPUT_FORMAT }
+      ? { output_format: outputFormat }
       : { response_format: "b64_json" }),
   };
 }
@@ -235,6 +263,9 @@ export async function requestEdit(
   references: ReferenceImage[],
   options?: MediaRequestOptions,
 ): Promise<Array<{ id: string; dataUrl: string }>> {
+  if (config.imageOutputFormat === "gif") {
+    throw new Error(i18n.t("GIF output is only available for text-to-image generation. Remove reference images and masks."));
+  }
   const images = references.filter((image) => image.role !== "mask");
   const masks = references.filter((image) => image.role === "mask");
   if (!images.length || masks.length > 1) {

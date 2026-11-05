@@ -9,7 +9,7 @@ import { requestEdit, requestGeneration, requestImageQuestion } from "@/services
 import { requestAudioGeneration, storeGeneratedAudio } from "@/services/api/audio";
 import { createVideoGenerationTask, isVideoTaskDownloadFailed, isVideoTaskFailed, storeGeneratedVideo, VideoTaskDownloadError, waitForVideoGenerationTask } from "@/services/api/video";
 import { defaultConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
-import { ensureImagePreview, uploadImage } from "@/services/image-storage";
+import { ensureImagePreview, getImageBlob, uploadImage } from "@/services/image-storage";
 import { deleteStoredMedia, uploadMediaFile, type UploadedFile } from "@/services/file-storage";
 import { nanoid } from "nanoid";
 import { getDataUrlByteSize, readImageMeta } from "@/lib/image-utils";
@@ -47,7 +47,7 @@ import { useAgentBridge } from "@/pages/canvas/hooks/use-agent-bridge";
 import { usePluginHost } from "@/pages/canvas/hooks/use-plugin-host";
 import { buildNodeMentionReferences, getGroupResourceNodes, isCanvasReferenceNode, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
-import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
+import { applyNodeConfigPatch, audioMetadata, buildAudioGenerationMetadata, buildImageGenerationMetadata, buildImageOutputMetadata, createCanvasNode, imageMetadata, videoMetadata } from "@/lib/canvas/canvas-node-factory";
 import { applyGroupSelection, applyUngroupSelection, canGroupSelectedNodes, canUngroupSelectedNodes, collectGroupMemberNodes, findContainingGroupId, findGroupDropTarget, focusViewportForNode, getConnectionTargetAnchor, getGroupWrapRect, normalizeConnection, snapNodesIntoGroup } from "@/lib/canvas/canvas-node-geometry";
 import {
     audioExtension,
@@ -61,7 +61,7 @@ import {
     hasResumableVideoTask,
     hydrateAssistantImages,
     hydrateCanvasImages,
-    imageExtension,
+    downloadImage,
     isAudioFile,
     isGenerationCanceled,
     resetInterruptedGeneration,
@@ -657,7 +657,7 @@ function InfiniteCanvasPage() {
 
     const createConnectedNode = useCallback(
         (type: CanvasNodeType.Image | CanvasNodeType.Text | CanvasNodeType.Config | CanvasNodeType.Video | CanvasNodeType.Audio, pending: PendingConnectionCreate) => {
-            const metadata = type === CanvasNodeType.Config ? { model: effectiveConfig.imageModel || effectiveConfig.model, size: effectiveConfig.size, count: getGenerationCount(effectiveConfig.canvasImageCount || effectiveConfig.count) } : undefined;
+            const metadata = type === CanvasNodeType.Config || type === CanvasNodeType.Image ? { model: effectiveConfig.imageModel || effectiveConfig.model, size: effectiveConfig.size, count: getGenerationCount(effectiveConfig.canvasImageCount || effectiveConfig.count), ...buildImageOutputMetadata(effectiveConfig) } : undefined;
             const newNode = createCanvasNode(type, pending.position, metadata);
             const connection = normalizeConnection(pending.connection.nodeId, newNode.id, [...nodesRef.current, newNode], pending.connection.handleType);
             if (!connection) {
@@ -672,7 +672,7 @@ function InfiniteCanvasPage() {
             setPendingConnectionCreate(null);
             setConnecting(null);
         },
-        [effectiveConfig.canvasImageCount, effectiveConfig.count, effectiveConfig.imageModel, effectiveConfig.model, effectiveConfig.size, message, setConnecting, t],
+        [effectiveConfig, message, setConnecting, t],
     );
 
     const cancelPendingConnectionCreate = useCallback(() => {
@@ -867,11 +867,12 @@ function InfiniteCanvasPage() {
         (type: CanvasNodeTypeId, position?: Position) => {
             const targetPosition = position || getCanvasCenter();
             const configMetadata =
-                type === CanvasNodeType.Config
+                type === CanvasNodeType.Config || type === CanvasNodeType.Image
                     ? {
                           model: effectiveConfig.imageModel || effectiveConfig.model,
                           size: effectiveConfig.size,
                           count: getGenerationCount(effectiveConfig.canvasImageCount || effectiveConfig.count),
+                          ...buildImageOutputMetadata(effectiveConfig),
                       }
                     : undefined;
             const newNode = createCanvasNode(type, targetPosition, configMetadata);
@@ -889,7 +890,7 @@ function InfiniteCanvasPage() {
             else if (definition?.useBuiltinPanel) wantsPanel = true;
             if (wantsPanel) setDialogNodeId(newNode.id);
         },
-        [effectiveConfig.canvasImageCount, effectiveConfig.count, effectiveConfig.imageModel, effectiveConfig.model, effectiveConfig.size, getCanvasCenter],
+        [effectiveConfig, getCanvasCenter],
     );
 
     const deleteNodes = useCallback(
@@ -1821,7 +1822,11 @@ function InfiniteCanvasPage() {
                 size: node.metadata?.size,
                 quality: node.metadata?.quality,
                 background: node.metadata?.background,
+                imageOutputFormat: node.metadata?.imageOutputFormat,
+                imageFrameCount: node.metadata?.imageFrameCount,
+                imageFrameDurationMs: node.metadata?.imageFrameDurationMs,
                 references: node.metadata?.references,
+                referenceImages: node.metadata?.referenceImages,
             },
         };
         setNodes((prev) => [...prev, copy]);
@@ -1840,7 +1845,8 @@ function InfiniteCanvasPage() {
 
     const downloadNodeImage = useCallback((node: CanvasNodeData) => {
         if ((node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Video && node.type !== CanvasNodeType.Audio) || !node.metadata?.content) return;
-        let extension = imageExtension(node.metadata.content);
+        if (node.type === CanvasNodeType.Image) return downloadImage(node.metadata.content, `canvas-image-${node.id}`, node.metadata.mimeType);
+        let extension = "mp4";
         if (node.type === CanvasNodeType.Video) extension = "mp4";
         else if (node.type === CanvasNodeType.Audio) extension = audioExtension(node.metadata.mimeType);
         saveAs(node.metadata.content, `canvas-${node.type}-${node.id}.${extension}`);
@@ -1849,7 +1855,7 @@ function InfiniteCanvasPage() {
     const downloadBatchImage = useCallback((node: CanvasNodeData, imageId: string) => {
         const image = node.metadata?.images?.find((item) => item.id === imageId);
         if (!image?.content) return;
-        saveAs(image.content, `canvas-image-${node.id}-${image.id}.${imageExtension(image.content)}`);
+        downloadImage(image.content, `canvas-image-${node.id}-${image.id}`, image.mimeType);
     }, []);
 
     const captureVideoNodeFrame = useCallback(
@@ -2393,7 +2399,7 @@ function InfiniteCanvasPage() {
                         : await requestGeneration({ ...generationConfig, count: "1" }, context.prompt, { signal: controller.signal }).then((items) => items[0]);
                     const uploaded = await uploadImage(image.dataUrl, { signal: controller.signal });
                     setNodes((prev) =>
-                        prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...imageMetadata(uploaded), prompt: scene, model: generationConfig.model, status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : node)),
+                        prev.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, ...imageMetadata(uploaded), ...buildImageGenerationMetadata(refs.length ? "edit" : "generation", generationConfig, 1, refs), prompt: scene, status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : node)),
                     );
                     setDialogNodeId(null);
                 } catch (error) {
@@ -2813,7 +2819,7 @@ function InfiniteCanvasPage() {
             const generationConfig =
                 hasSavedImageMetadata && savedImageMetadata
                     ? {
-                          ...effectiveConfig,
+                          ...buildGenerationConfig(effectiveConfig, node, "image"),
                           model: savedImageMetadata.model || effectiveConfig.imageModel || effectiveConfig.model,
                           quality: savedImageMetadata.quality || effectiveConfig.quality,
                           size: savedImageMetadata.size || effectiveConfig.size,
@@ -2902,6 +2908,7 @@ function InfiniteCanvasPage() {
                           model: generationConfig.model,
                           size: generationConfig.size,
                           quality: generationConfig.quality,
+                          ...buildImageOutputMetadata(generationConfig),
                           ...(generationConfig.background ? { background: generationConfig.background } : {}),
                           count: savedImageMetadata.count || 1,
                           references: savedImageMetadata.references,
@@ -2993,6 +3000,7 @@ function InfiniteCanvasPage() {
                     model: effectiveConfig.imageModel || effectiveConfig.model,
                     size: effectiveConfig.size,
                     count: getGenerationCount(effectiveConfig.canvasImageCount || effectiveConfig.count),
+                    ...buildImageOutputMetadata(effectiveConfig),
                 },
             );
             const connection = { id: nanoid(), fromNodeId: sourceNode.id, toNodeId: configNode.id };
@@ -3006,12 +3014,13 @@ function InfiniteCanvasPage() {
             setSelectedConnectionId(null);
             setDialogNodeId(configNode.id);
         },
-        [effectiveConfig.canvasImageCount, effectiveConfig.count, effectiveConfig.imageModel, effectiveConfig.model, effectiveConfig.size, message, t],
+        [effectiveConfig, message, t],
     );
 
     const insertAssistantImage = useCallback(
         async (image: CanvasAssistantImage) => {
-            const storedImage = image.storageKey ? { url: image.dataUrl, storageKey: image.storageKey, width: 1, height: 1, bytes: 0, mimeType: "image/png" } : await uploadImage(image.dataUrl);
+            const original = image.storageKey ? await getImageBlob(image.storageKey) : null;
+            const storedImage = original ? { url: image.dataUrl, storageKey: image.storageKey, width: 1, height: 1, bytes: original.size, mimeType: original.type } : await uploadImage(image.dataUrl);
             await ensureImagePreview(storedImage.storageKey);
             const meta = storedImage.width === 1 && storedImage.height === 1 ? await readImageMeta(storedImage.url) : storedImage;
             const config = fitNodeSize(meta.width, meta.height);

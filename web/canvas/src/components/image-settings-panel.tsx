@@ -2,28 +2,16 @@ import { type ReactNode, useState } from "react";
 import { ConfigProvider, Switch } from "antd";
 import { useTranslation } from "react-i18next";
 
-import i18n from "@/i18n";
-import { type CanvasTheme } from "@/lib/canvas-theme";
+import { qualityOptions } from "@/lib/image-settings-options";
+import type { CanvasTheme } from "@/lib/canvas-theme";
 import { computeMediaSize, inferMediaRatio, inferMediaScale, mediaRatioOptions, mediaScaleOptions, readMediaDimensions } from "@/lib/media-size";
-import type { AiConfig } from "@/stores/use-config-store";
+import { modelOptionName, type AiConfig } from "@/stores/use-config-store";
 
-const qualityOptions = [
-    { value: "auto", labelKey: "auto" },
-    { value: "low", labelKey: "low" },
-    { value: "medium", labelKey: "medium" },
-    { value: "high", labelKey: "high" },
-    { value: "xhigh", labelKey: "xhigh" },
-    { value: "max", labelKey: "max" },
-];
 const DIMENSION_STEP = 16;
-
-export const imageQualityOptions = qualityOptions.map((item) => ({ value: item.value, get label() { return i18n.t(`settingsPanels.common.${item.labelKey}`); } }));
-export const imageAspectOptions = mediaRatioOptions.map((item) => ({ value: item.value, label: item.value === "auto" ? i18n.t("settingsPanels.common.auto") : item.value }));
-export const imageScaleOptions = mediaScaleOptions.map((value) => ({ value, label: value === "auto" ? i18n.t("settingsPanels.common.auto") : value }));
 
 type ImageSettingsPanelProps = {
     config: AiConfig;
-    onConfigChange: (key: "quality" | "size" | "count" | "background", value: string) => void;
+    onConfigChange: (key: "quality" | "size" | "count" | "background" | "imageOutputFormat" | "imageFrameCount" | "imageFrameDurationMs", value: string) => void;
     theme: CanvasTheme;
     showTitle?: boolean;
     className?: string;
@@ -38,6 +26,9 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const count = Math.max(1, Math.min(maxCount, Math.floor(Math.abs(Number(config.count)) || 1)));
     const activeSize = config.size || "auto";
     const transparentBackground = config.background === "transparent";
+    const outputFormat = config.imageOutputFormat || "png";
+    const animated = outputFormat === "gif";
+    const supportsGif = /^gpt-image-2\.6-(?:flare|sunburst)$/i.test(modelOptionName(config.model || config.imageModel));
     const selectedScale = inferMediaScale(activeSize);
     const selectedRatio = inferMediaRatio(activeSize);
     const dimensions = readMediaDimensions(activeSize, selectedScale, selectedRatio);
@@ -63,6 +54,32 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 }}
             >
                 {showTitle ? <div className="text-lg font-semibold">{t("settingsPanels.image.title")}</div> : null}
+                <div className="space-y-2.5">
+                    <SettingTitle color={theme.node.muted}>{t("Image output format")}</SettingTitle>
+                    <div className="grid grid-cols-4 gap-2.5">
+                        {["png", "jpeg", "webp", "gif"].map((format) => (
+                            <OptionPill key={format} selected={outputFormat === format} disabled={format === "gif" && !supportsGif} theme={theme} onClick={() => {
+                                onConfigChange("imageOutputFormat", format);
+                                if (format === "gif") {
+                                    onConfigChange("size", "auto");
+                                    onConfigChange("background", "");
+                                }
+                            }}>
+                                {format.toUpperCase()}
+                            </OptionPill>
+                        ))}
+                    </div>
+                </div>
+                {animated ? <div className="grid grid-cols-2 gap-3">
+                    <div className="space-y-2.5">
+                        <SettingTitle color={theme.node.muted}>{t("Animation frames")}</SettingTitle>
+                        <CountInput value={Number(config.imageFrameCount || "9")} min={2} max={64} theme={theme} label={t("Animation frames")} onChange={(value) => onConfigChange("imageFrameCount", String(value ?? 9))} />
+                    </div>
+                    <div className="space-y-2.5">
+                        <SettingTitle color={theme.node.muted}>{t("Frame duration (ms)")}</SettingTitle>
+                        <CountInput value={Number(config.imageFrameDurationMs || "200")} min={20} max={2000} step={10} theme={theme} label={t("Frame duration (ms)")} onChange={(value) => onConfigChange("imageFrameDurationMs", String(value ?? 200))} />
+                    </div>
+                </div> : null}
                 <div className="space-y-2.5">
                     <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.quality")}</SettingTitle>
                     <div className="grid grid-cols-3 gap-2.5">
@@ -119,7 +136,7 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         ))}
                     </div>
                 </div>
-                <div className="flex items-center justify-between gap-3">
+                {!animated ? <div className="flex items-center justify-between gap-3">
                     <div className="space-y-0.5">
                         <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.transparent")}</SettingTitle>
                         <div className="text-xs" style={{ color: theme.node.muted, opacity: 0.75 }}>
@@ -129,7 +146,7 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                     <span onMouseDown={(event) => event.stopPropagation()}>
                         <Switch size="small" checked={transparentBackground} onChange={(checked) => onConfigChange("background", checked ? "transparent" : "")} />
                     </span>
-                </div>
+                </div> : null}
                 <div className="space-y-2.5">
                     <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.count")}</SettingTitle>
                     <div className="grid grid-cols-4 gap-2.5">
@@ -162,23 +179,12 @@ export function ImageSettingsTheme({ theme, children }: { theme: CanvasTheme; ch
     );
 }
 
-export function imageQualityLabel(value: string) {
-    return qualityOptions.some((item) => item.value === value) ? i18n.t(`settingsPanels.common.${value}`) : value;
-}
-
-export function imageSizeLabel(size: string) {
-    const scale = inferMediaScale(size);
-    const ratio = inferMediaRatio(size);
-    if (ratio === "auto" || size === "auto") return i18n.t("settingsPanels.common.auto");
-    if (scale === "auto") return ratio;
-    return `${scale} · ${ratio}`;
-}
-
-function OptionPill({ selected, theme, onClick, children }: { selected: boolean; theme: CanvasTheme; onClick: () => void; children: ReactNode }) {
+function OptionPill({ selected, disabled, theme, onClick, children }: { selected: boolean; disabled?: boolean; theme: CanvasTheme; onClick: () => void; children: ReactNode }) {
     return (
         <button
             type="button"
-            className="h-9 cursor-pointer rounded-full border px-2 text-sm transition hover:opacity-80"
+            disabled={disabled}
+            className="h-9 cursor-pointer rounded-full border px-2 text-sm transition hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-35"
             style={{ background: "transparent", borderColor: selected ? theme.node.text : theme.node.stroke, color: theme.node.text }}
             onMouseDown={(event) => event.stopPropagation()}
             onClick={onClick}
@@ -217,13 +223,15 @@ function DimensionInput({ prefix, value, disabled, theme, alignToStep, onChange 
     );
 }
 
-function CountInput({ value, max, theme, onChange }: { value: number; max: number; theme: CanvasTheme; onChange: (value: number | null) => void }) {
+function CountInput({ value, min = 1, max, step = 1, label, theme, onChange }: { value: number; min?: number; max: number; step?: number; label?: string; theme: CanvasTheme; onChange: (value: number | null) => void }) {
     return (
         <label className="col-span-2 flex h-9 overflow-hidden rounded-full border text-sm" style={{ borderColor: theme.node.stroke, color: theme.node.text }}>
             <input
                 type="number"
-                min={1}
+                min={min}
                 max={max}
+                step={step}
+                aria-label={label}
                 className="min-w-0 flex-1 bg-transparent px-3 text-center outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
                 style={{ color: theme.node.text, WebkitTextFillColor: theme.node.text }}
                 value={value || ""}

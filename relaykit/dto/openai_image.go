@@ -34,6 +34,8 @@ type ImageRequest struct {
 	Background        json.RawMessage `json:"background,omitempty"`
 	Moderation        json.RawMessage `json:"moderation,omitempty"`
 	OutputFormat      json.RawMessage `json:"output_format,omitempty"`
+	FrameCount        *int            `json:"frame_count,omitempty"`
+	FrameDurationMS   *int            `json:"frame_duration_ms,omitempty"`
 	OutputCompression json.RawMessage `json:"output_compression,omitempty"`
 	PartialImages     json.RawMessage `json:"partial_images,omitempty"`
 	Stream            *bool           `json:"stream,omitempty"`
@@ -48,6 +50,45 @@ type ImageRequest struct {
 	// 用匿名参数接收额外参数
 	Extra             map[string]json.RawMessage `json:"-"`
 	BillingParameters *ImageBillingParameters    `json:"-"`
+}
+
+// ValidateGIFOutput follows the image generation guide. Keep frame duration
+// unchanged here: the upstream quantizes the encoded GIF delay to 10 ms.
+func (i *ImageRequest) ValidateGIFOutput(isEdit bool) error {
+	var format string
+	_ = kitutil.Unmarshal(i.OutputFormat, &format)
+	if format != "gif" {
+		if i.FrameCount != nil || i.FrameDurationMS != nil {
+			return fmt.Errorf("frame_count and frame_duration_ms require output_format=gif")
+		}
+		return nil
+	}
+	if isEdit {
+		return fmt.Errorf("GIF output is only supported for image generations, not edits")
+	}
+	if i.FrameCount != nil && (*i.FrameCount < 2 || *i.FrameCount > 64) {
+		return fmt.Errorf("frame_count must be an integer between 2 and 64")
+	}
+	if i.FrameDurationMS != nil && (*i.FrameDurationMS < 20 || *i.FrameDurationMS > 2000) {
+		return fmt.Errorf("frame_duration_ms must be an integer between 20 and 2000")
+	}
+	if i.Stream != nil && *i.Stream {
+		return fmt.Errorf("GIF output does not support streaming")
+	}
+	for _, field := range []struct {
+		name string
+		raw  json.RawMessage
+	}{
+		{"partial_images", i.PartialImages},
+		{"output_compression", i.OutputCompression},
+		{"prompt_rewriter", i.Extra["prompt_rewriter"]},
+		{"mask", i.Mask},
+	} {
+		if len(field.raw) > 0 && string(field.raw) != "null" {
+			return fmt.Errorf("GIF output does not support %s", field.name)
+		}
+	}
+	return nil
 }
 
 // ImageCount resolves the validated request quantity. Top-level zero retains

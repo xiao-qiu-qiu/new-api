@@ -50,6 +50,7 @@ func TestImageRequestReservesFinalQuantityBeforeUpstream(t *testing.T) {
 		name, body                                    string
 		tiered, passThrough, insufficient, retryReset bool
 		override                                      any
+		overrideField                                 string
 		count, status                                 int
 	}{
 		{name: "top-level count", body: `{"model":"gpt-image-2","n":2,"parameters":{}}`, count: 2},
@@ -59,6 +60,13 @@ func TestImageRequestReservesFinalQuantityBeforeUpstream(t *testing.T) {
 		{name: "oversized override rejected", body: `{"model":"gpt-image-2","n":1}`, override: 129, status: http.StatusBadRequest},
 		{name: "insufficient reservation blocks upstream", body: `{"model":"gpt-image-2","n":1}`, override: 4, count: 4, insufficient: true, status: http.StatusForbidden},
 		{name: "retry drops the previous attempt's quantity", body: `{"model":"gpt-image-2","n":1}`, count: 1, retryReset: true},
+		{name: "GIF frames do not multiply reservation", body: `{"model":"gpt-image-2.6-flare","output_format":"gif","frame_count":64,"frame_duration_ms":205,"n":2}`, count: 2},
+		{name: "GIF passthrough preserves frame options", body: `{"model":"gpt-image-2.6-sunburst","output_format":"gif","frame_count":64,"frame_duration_ms":205,"n":2}`, count: 2, passThrough: true},
+		{name: "GIF override revalidated before submission", body: `{"model":"gpt-image-2.6-flare","output_format":"gif","frame_count":64,"n":1}`, overrideField: "frame_count", override: 65, status: http.StatusBadRequest},
+		{name: "GIF stream override rejected before submission", body: `{"model":"gpt-image-2.6-flare","output_format":"gif","n":1}`, overrideField: "stream", override: true, status: http.StatusBadRequest},
+		{name: "GIF rewriting override rejected before submission", body: `{"model":"gpt-image-2.6-flare","output_format":"gif","n":1}`, overrideField: "prompt_rewriter", override: true, status: http.StatusBadRequest},
+		{name: "GIF mask override rejected before submission", body: `{"model":"gpt-image-2.6-flare","output_format":"gif","n":1}`, overrideField: "mask", override: map[string]any{}, status: http.StatusBadRequest},
+		{name: "GIF passthrough accepts null mask", body: `{"model":"gpt-image-2.6-flare","output_format":"gif","frame_count":64,"frame_duration_ms":205,"mask":null,"n":1}`, count: 1, passThrough: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			received := make(chan []byte, 1)
@@ -79,7 +87,11 @@ func TestImageRequestReservesFinalQuantityBeforeUpstream(t *testing.T) {
 			common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, upstream.URL)
 			common.SetContextKey(c, constant.ContextKeyChannelSetting, dto.ChannelSettings{PassThroughBodyEnabled: tc.passThrough})
 			if tc.override != nil {
-				common.SetContextKey(c, constant.ContextKeyChannelParamOverride, map[string]any{"operations": []any{map[string]any{"path": "n", "mode": "set", "value": tc.override}}})
+				field := tc.overrideField
+				if field == "" {
+					field = "n"
+				}
+				common.SetContextKey(c, constant.ContextKeyChannelParamOverride, map[string]any{"operations": []any{map[string]any{"path": field, "mode": "set", "value": tc.override}}})
 			}
 			request, err := helper.GetAndValidOpenAIImageRequest(c, relayconstant.RelayModeImagesGenerations)
 			require.NoError(t, err)
@@ -113,6 +125,11 @@ func TestImageRequestReservesFinalQuantityBeforeUpstream(t *testing.T) {
 			require.Len(t, received, 1)
 			body := <-received
 			assert.Equal(t, int64(tc.count), ojson.GetBytes(body, "n").Int())
+			if ojson.Get(tc.body, "output_format").String() == "gif" {
+				assert.Equal(t, "gif", ojson.GetBytes(body, "output_format").String())
+				assert.Equal(t, int64(64), ojson.GetBytes(body, "frame_count").Int())
+				assert.Equal(t, int64(205), ojson.GetBytes(body, "frame_duration_ms").Int())
+			}
 			assert.Equal(t, tc.count*20000, info.PriceData.QuotaToPreConsume)
 			assert.GreaterOrEqual(t, reservation.held, info.PriceData.QuotaToPreConsume)
 			assert.Nil(t, info.BillingImageCount)

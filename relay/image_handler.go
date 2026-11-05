@@ -8,10 +8,12 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -101,6 +103,18 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 		}
 	}
 	if jsonData != nil {
+		// Validate the final GIF contract after passthrough and channel overrides,
+		// before reserving quota or submitting an incompatible request.
+		if ojson.GetBytesNoCopy(jsonData, "output_format").String() == "gif" ||
+			ojson.GetBytesNoCopy(jsonData, "frame_count").Exists() || ojson.GetBytesNoCopy(jsonData, "frame_duration_ms").Exists() {
+			var outbound dto.ImageRequest
+			if err := common.Unmarshal(jsonData, &outbound); err != nil {
+				return types.NewErrorWithStatusCode(err, types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+			}
+			if err := outbound.ValidateGIFOutput(info.RelayMode == relayconstant.RelayModeImagesEdits); err != nil {
+				return types.NewErrorWithStatusCode(err, types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+			}
+		}
 		// This is a different trust boundary from ingress: channel overrides
 		// and pass-through bodies can change the quantity actually submitted.
 		var outbound struct {

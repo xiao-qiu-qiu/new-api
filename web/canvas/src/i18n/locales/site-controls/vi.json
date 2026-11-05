@@ -1,4 +1,11 @@
 {
+  "Image output format": "Định dạng ảnh đầu ra",
+  "Animation frames": "Số khung hình động",
+  "Frame duration (ms)": "Thời lượng mỗi khung hình (ms)",
+  "GIF output requires GPT Image 2.6 Flare or Sunburst.": "Đầu ra GIF yêu cầu GPT Image 2.6 Flare hoặc Sunburst.",
+  "GIF output is only available for text-to-image generation. Remove reference images and masks.": "Đầu ra GIF chỉ hỗ trợ tạo ảnh từ văn bản. Hãy xóa ảnh tham chiếu và mặt nạ.",
+  "GIF frame count must be an integer from 2 to 64.": "Số khung hình GIF phải là số nguyên từ 2 đến 64.",
+  "GIF frame duration must be an integer from 20 to 2000 ms.": "Thời lượng mỗi khung hình GIF phải là số nguyên từ 20 đến 2000 ms.",
   "agent.composer.effort.auto": "Tự động",
   "agent.composer.effort.high": "Cao",
   "agent.composer.effort.low": "Thấp",

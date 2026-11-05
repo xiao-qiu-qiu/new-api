@@ -56,6 +56,9 @@ export type AiConfig = {
     quality: string;
     size: string;
     background: string;
+    imageOutputFormat?: string;
+    imageFrameCount?: string;
+    imageFrameDurationMs?: string;
     count: string;
     canvasImageCount: string;
     proxyEnabled: boolean;
@@ -111,6 +114,9 @@ export const defaultConfig: AiConfig = {
     quality: "auto",
     size: "1:1",
     background: "",
+    imageOutputFormat: "png",
+    imageFrameCount: "9",
+    imageFrameDurationMs: "200",
     count: "1",
     canvasImageCount: "3",
     proxyEnabled: false,

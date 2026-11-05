@@ -1,6 +1,6 @@
 import { getNodeSpec, NODE_DEFAULT_SIZE } from "@/constant/canvas";
 import { nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
-import type { AiConfig } from "@/stores/use-config-store";
+import { defaultConfig, type AiConfig } from "@/stores/use-config-store";
 import type { UploadedImage } from "@/services/image-storage";
 import type { UploadedFile } from "@/services/file-storage";
 import type { ReferenceImage, SavedReferenceImage } from "@/types/image";
@@ -20,7 +20,11 @@ export function createCanvasNode(type: CanvasNodeTypeId, position: Position, met
         },
         width: spec.width,
         height: spec.height,
-        metadata: { ...spec.metadata, ...metadata },
+        metadata: {
+            ...spec.metadata,
+            ...(type === CanvasNodeType.Image || type === CanvasNodeType.Config ? buildImageOutputMetadata(defaultConfig) : {}),
+            ...metadata,
+        },
     };
 }
 
@@ -40,6 +44,14 @@ export function referenceUrl(image: ReferenceImage) {
     return image.storageKey || image.url || (!image.dataUrl.startsWith("data:") ? image.dataUrl : undefined);
 }
 
+export function buildImageOutputMetadata(config: AiConfig): Pick<CanvasNodeMetadata, "imageOutputFormat" | "imageFrameCount" | "imageFrameDurationMs"> {
+    return {
+        imageOutputFormat: config.imageOutputFormat ?? defaultConfig.imageOutputFormat,
+        imageFrameCount: config.imageFrameCount ?? defaultConfig.imageFrameCount,
+        imageFrameDurationMs: config.imageFrameDurationMs ?? defaultConfig.imageFrameDurationMs,
+    };
+}
+
 export function buildImageGenerationMetadata(type: CanvasImageGenerationType, config: AiConfig, count: number, references: ReferenceImage[]): CanvasNodeMetadata {
     const referenceImages = references.flatMap((image): SavedReferenceImage[] => {
         const url = referenceUrl(image) || image.dataUrl;
@@ -51,6 +63,7 @@ export function buildImageGenerationMetadata(type: CanvasImageGenerationType, co
         model: config.model,
         size: config.size,
         quality: config.quality,
+        ...buildImageOutputMetadata(config),
         ...(config.background ? { background: config.background } : {}),
         count,
         references: referenceImages.map((image) => image.storageKey || image.url || ""),

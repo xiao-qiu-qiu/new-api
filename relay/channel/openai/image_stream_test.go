@@ -15,10 +15,57 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestGIFImageResponsesPreservePayloadFormatAndTokenBilling(t *testing.T) {
+	for _, model := range []string{"gpt-image-2.6-flare", "gpt-image-2.6-sunburst"} {
+		expression, ok := billing_setting.GetBuiltinBillingExpr(model)
+		require.True(t, ok)
+		assert.Contains(t, ModelList, model)
+		for _, data := range []string{
+			`[{"b64_json":"R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="}]`,
+			`{"b64_json":"data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw=="}`,
+			`[{"url":"https://example.invalid/animation.gif?signature=fixture"}]`,
+			`[{"url":"blob:https://example.invalid/animation"}]`,
+		} {
+			for _, stream := range []bool{false, true} {
+				body := `{"output_format":"gif","frame_count":64,"frame_duration_ms":200,"data":` + data + `,"usage":{"input_tokens":100,"output_tokens":200,"total_tokens":300}}`
+				c, recorder, response, info := newImageTestContext(t, body, "application/json", stream)
+				info.TieredBillingSnapshot = &billingexpr.BillingSnapshot{BillingMode: "tiered_expr", ExprString: expression,
+					ExprHash: billingexpr.ExprHashString(expression), GroupRatio: 1, QuotaPerUnit: 500000}
+				info.ImageRequestCount = 2
+				info.BillingRequestInput = &billingexpr.RequestInput{Body: []byte(`{"output_format":"gif","frame_count":64,"n":2}`)}
+				var usage *dto.Usage
+				if stream {
+					// A compatible upstream may return JSON to a streaming client.
+					// Its completed event must retain the GIF metadata and payload.
+					result, err := OpenaiImageStreamHandler(c, info, response)
+					require.Nil(t, err)
+					usage = result
+					assert.Contains(t, recorder.Body.String(), `"output_format":"gif"`)
+					assert.Contains(t, recorder.Body.String(), `"frame_count":64`)
+					assert.Contains(t, recorder.Body.String(), `"frame_duration_ms":200`)
+					assert.Contains(t, recorder.Body.String(), strings.Trim(data, "[]{}"))
+				} else {
+					result, err := OpenaiImageHandler(c, info, response)
+					require.Nil(t, err)
+					usage = result
+					assert.Equal(t, body, recorder.Body.String())
+				}
+				assert.Nil(t, info.BillingImageCount, "token-only pricing must not acquire an image count multiplier")
+				assert.Empty(t, info.PriceData.OtherRatios())
+				applies, quota, _ := service.TryTieredSettle(info, service.BuildTieredTokenParams(usage, false, billingexpr.UsedVars(expression)))
+				require.True(t, applies)
+				assert.Equal(t, 3250, quota, "100 input and 200 output tokens, without n or frame multipliers")
+			}
+		}
+	}
+}
 
 func newImageTestContext(t *testing.T, body, contentType string, isStream bool) (*gin.Context, *httptest.ResponseRecorder, *http.Response, *relaycommon.RelayInfo) {
 	t.Helper()
@@ -53,6 +100,7 @@ func TestImageExpressionUsesCompletedCountAndProtectsAbortedStreams(t *testing.T
 		{"empty response retains request", `{"data":[]}`, false, false, 3, 3},
 		{"JSON object data counts one image", `{"data":{"url":"https://example.com/a.png","b64_json":"first"}}`, false, false, 3, 1},
 		{"JSON wrapped as SSE counts object data once", `{"data":{"b64_json":"first"}}`, true, false, 3, 1},
+		{"GIF frames count as one animation", `{"output_format":"gif","frame_count":64,"data":[{"b64_json":"animation"}]}`, false, false, 3, 1},
 		{"completed stream refunds missing images", "data: {\"type\":\"image_generation.completed\",\"b64_json\":\"first\"}\n\ndata: [DONE]\n\n", true, false, 3, 1},
 		{"client abort cannot reduce count", "data: {\"type\":\"image_generation.completed\",\"b64_json\":\"first\"}\n\n", true, true, 3, 3},
 	} {
@@ -447,6 +495,12 @@ func TestOpenaiImageHandlerUsesPositiveActualCountForFixedPrice(t *testing.T) {
 			body:      `{"data":[]}`,
 			usePrice:  true,
 			wantCount: 3,
+		},
+		{
+			name:      "fixed price counts GIF payloads without multiplying frames",
+			body:      `{"output_format":"gif","frame_count":64,"data":[{"b64_json":"animation"}]}`,
+			usePrice:  true,
+			wantCount: 1,
 		},
 		{
 			name:      "ratio billing ignores data length",

@@ -247,6 +247,11 @@ func writeToDiskCache(base64Data string) (string, error) {
 
 // smartDetectMimeType 智能检测 MIME 类型
 func smartDetectMimeType(resp *http.Response, url string, fileBytes []byte) string {
+	// Compatible image servers may retain a PNG content type or filename for
+	// GIF output. Keep the animation bytes and label them by their signature.
+	if http.DetectContentType(fileBytes) == "image/gif" {
+		return "image/gif"
+	}
 	// 1. 尝试从 Content-Type header 获取
 	mimeType := resp.Header.Get("Content-Type")
 	if idx := strings.Index(mimeType, ";"); idx != -1 {
@@ -348,6 +353,9 @@ func loadFromBase64(base64String string, providedMimeType string) (*types.Cached
 	decodedData, err := base64.StdEncoding.DecodeString(cleanBase64)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode base64 data: %w", err)
+	}
+	if http.DetectContentType(decodedData) == "image/gif" {
+		mimeType = "image/gif"
 	}
 
 	base64Size := int64(len(cleanBase64))

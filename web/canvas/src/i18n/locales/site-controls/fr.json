@@ -1,4 +1,11 @@
 {
+  "Image output format": "Format de sortie de l’image",
+  "Animation frames": "Nombre d’images de l’animation",
+  "Frame duration (ms)": "Durée par image (ms)",
+  "GIF output requires GPT Image 2.6 Flare or Sunburst.": "La sortie GIF nécessite GPT Image 2.6 Flare ou Sunburst.",
+  "GIF output is only available for text-to-image generation. Remove reference images and masks.": "La sortie GIF est uniquement disponible pour la génération d’images à partir de texte. Retirez les images de référence et les masques.",
+  "GIF frame count must be an integer from 2 to 64.": "Le nombre d’images du GIF doit être un entier compris entre 2 et 64.",
+  "GIF frame duration must be an integer from 20 to 2000 ms.": "La durée de chaque image du GIF doit être un entier compris entre 20 et 2000 ms.",
   "agent.composer.effort.auto": "Auto",
   "agent.composer.effort.high": "Élevé",
   "agent.composer.effort.low": "Faible",

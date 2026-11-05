@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -20,6 +21,48 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestGIFImageGenerationRequestValidation(t *testing.T) {
+	for _, name := range []string{"gpt-image-2.6-flare", "gpt-image-2.6-sunburst"} {
+		body := fmt.Sprintf(`{"model":%q,"prompt":"loop","output_format":"gif","frame_count":64,"frame_duration_ms":205,"n":2}`, name)
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", strings.NewReader(body))
+		c.Request.Header.Set("Content-Type", "application/json")
+		request, err := GetAndValidOpenAIImageRequest(c, relayconstant.RelayModeImagesGenerations)
+		require.NoError(t, err)
+		copy, err := common.DeepCopy(request)
+		require.NoError(t, err)
+		encoded, err := common.Marshal(copy)
+		require.NoError(t, err)
+		var forwarded map[string]any
+		require.NoError(t, common.Unmarshal(encoded, &forwarded))
+		assert.Equal(t, "gif", forwarded["output_format"])
+		assert.Equal(t, float64(64), forwarded["frame_count"])
+		assert.Equal(t, float64(205), forwarded["frame_duration_ms"])
+		count, err := copy.ImageCount(false)
+		require.NoError(t, err)
+		assert.Equal(t, 2, count)
+		assert.Equal(t, map[string]float64{"n": 2}, copy.GetTokenCountMeta().BillingRatios)
+	}
+	for _, multipartBody := range []bool{false, true} {
+		var body bytes.Buffer
+		contentType := "application/json"
+		if multipartBody {
+			writer := multipart.NewWriter(&body)
+			require.NoError(t, writer.WriteField("model", "gpt-image-2.6-flare"))
+			require.NoError(t, writer.WriteField("output_format", "gif"))
+			require.NoError(t, writer.Close())
+			contentType = writer.FormDataContentType()
+		} else {
+			body.WriteString(`{"model":"gpt-image-2.6-flare","output_format":"gif"}`)
+		}
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/edits", &body)
+		c.Request.Header.Set("Content-Type", contentType)
+		_, err := GetAndValidOpenAIImageRequest(c, relayconstant.RelayModeImagesEdits)
+		require.ErrorContains(t, err, "not edits")
+	}
+}
 
 func TestLegacyDalleValidationAndPricesRemainCompatible(t *testing.T) {
 	for _, tc := range []struct {

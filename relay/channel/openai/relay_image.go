@@ -318,6 +318,19 @@ func openaiImageJSONAsStreamHandler(c *gin.Context, info *relaycommon.RelayInfo,
 				return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 			}
 		}
+		// Preserve the output format when wrapping compatible JSON responses.
+		// Otherwise clients fall back to PNG even when the payload is a GIF.
+		for _, field := range []string{"output_format", "background", "quality", "size", "frame_count", "frame_duration_ms"} {
+			value := image.Get(field)
+			if !value.Exists() {
+				value = ojson.GetBytesNoCopy(responseBody, field)
+			}
+			if value.Exists() {
+				if err := payload.SetRaw(field, value.Raw); err != nil {
+					return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
+				}
+			}
+		}
 		// The event keeps its field order with b64_json last. The Doc writes
 		// the event once, so the large blob is copied only into the output.
 		for _, field := range []string{"url", "revised_prompt", "b64_json"} {

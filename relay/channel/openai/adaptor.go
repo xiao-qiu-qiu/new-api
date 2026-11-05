@@ -668,6 +668,8 @@ func detectImageMimeType(filename string) string {
 		return "image/png"
 	case ".webp":
 		return "image/webp"
+	case ".gif":
+		return "image/gif"
 	default:
 		// Try to detect from extension if possible
 		if strings.HasPrefix(ext, ".jp") {

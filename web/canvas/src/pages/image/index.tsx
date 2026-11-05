@@ -2,7 +2,6 @@ import { ArrowLeft, ArrowRight, BookOpen, CheckSquare, ClipboardPaste, Download,
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { App, Button, Checkbox, Drawer, Empty, Image, Input, Modal, Tag, Tooltip, Typography } from "antd";
 import { createUserLocalForage } from "@/lib/site-storage";
-import { saveAs } from "file-saver";
 import { useTranslation } from "react-i18next";
 
 import { ImageSettingsPanel } from "@/components/image-settings-panel";
@@ -11,7 +10,8 @@ import { PromptSelectDialog } from "@/components/prompts/prompt-select-dialog";
 import { AssetPickerModal, type InsertAssetPayload } from "@/components/canvas/asset-picker-modal";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
-import { modelOptionLabel, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { defaultConfig, modelOptionLabel, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { downloadImage as downloadOriginalImage, imageExtension } from "@/lib/canvas/canvas-generation-helpers";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { nanoid } from "nanoid";
 import { formatBytes, formatDuration } from "@/lib/image-utils";
@@ -60,7 +60,7 @@ type GenerationLog = {
     images: GeneratedImage[];
 };
 
-type GenerationLogConfig = Pick<AiConfig, "model" | "imageModel" | "quality" | "size" | "count">;
+type GenerationLogConfig = Pick<AiConfig, "model" | "imageModel" | "quality" | "size" | "count" | "imageOutputFormat" | "imageFrameCount" | "imageFrameDurationMs">;
 
 type UpdateAiConfig = <K extends keyof AiConfig>(key: K, value: AiConfig[K]) => void;
 
@@ -233,12 +233,12 @@ export default function ImagePage() {
     }, [autoRunToken]);
 
     const downloadImage = (image: GeneratedImage, index: number) => {
-        saveAs(image.dataUrl, `image-${index + 1}.png`);
+        downloadOriginalImage(image.dataUrl, `image-${index + 1}`, image.mimeType);
     };
 
     const addResultToReferences = async (image: GeneratedImage, index: number) => {
         const stored = await uploadImage(image.dataUrl);
-        setReferences((value) => [...value, { id: nanoid(), name: `result-${index + 1}.png`, type: stored.mimeType, dataUrl: stored.url, storageKey: stored.storageKey }]);
+        setReferences((value) => [...value, { id: nanoid(), name: `result-${index + 1}.${imageExtension(stored.url, stored.mimeType)}`, type: stored.mimeType, dataUrl: stored.url, storageKey: stored.storageKey }]);
         message.success(t("imageWorkbench.addedReference"));
     };
 
@@ -304,6 +304,9 @@ export default function ImagePage() {
         if (log.config.quality) updateConfig("quality", log.config.quality);
         if (log.config.size) updateConfig("size", log.config.size);
         if (log.config.count) updateConfig("count", log.config.count);
+        updateConfig("imageOutputFormat", log.config.imageOutputFormat ?? defaultConfig.imageOutputFormat);
+        updateConfig("imageFrameCount", log.config.imageFrameCount ?? defaultConfig.imageFrameCount);
+        updateConfig("imageFrameDurationMs", log.config.imageFrameDurationMs ?? defaultConfig.imageFrameDurationMs);
         setResults(log.images.map((image) => ({ id: image.id, status: "success", image })));
     };
 
@@ -831,6 +834,9 @@ function normalizeLogConfig(log: Partial<GenerationLog>): GenerationLogConfig {
         quality: log.config?.quality || log.quality || "",
         size: log.config?.size || log.size || "",
         count: log.config?.count || String(log.imageCount || log.successCount || 1),
+        imageOutputFormat: log.config?.imageOutputFormat ?? defaultConfig.imageOutputFormat,
+        imageFrameCount: log.config?.imageFrameCount ?? defaultConfig.imageFrameCount,
+        imageFrameDurationMs: log.config?.imageFrameDurationMs ?? defaultConfig.imageFrameDurationMs,
     };
 }
 
@@ -879,6 +885,9 @@ function buildLog({
         quality: config.quality,
         size: config.size,
         count: config.count,
+        imageOutputFormat: config.imageOutputFormat ?? defaultConfig.imageOutputFormat,
+        imageFrameCount: config.imageFrameCount ?? defaultConfig.imageFrameCount,
+        imageFrameDurationMs: config.imageFrameDurationMs ?? defaultConfig.imageFrameDurationMs,
     };
     return {
         id: nanoid(),

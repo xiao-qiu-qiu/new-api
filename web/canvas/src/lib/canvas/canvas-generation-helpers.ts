@@ -1,7 +1,8 @@
 import { defaultConfig, resolveModelForCapability, type AiConfig } from "@/stores/use-config-store";
+import { saveAs } from "file-saver";
 import { normalizeVideoConfig } from "@/lib/video-model-constraints";
 import i18n from "@/i18n";
-import { ensureImagePreview, resolveImageUrl, uploadImage } from "@/services/image-storage";
+import { ensureImagePreview, getImageBlob, resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { resolveMediaUrl } from "@/services/file-storage";
 import { imageMetadata, referenceUrl } from "@/lib/canvas/canvas-node-factory";
 import type { NodeGenerationInput } from "@/components/canvas/canvas-node-generation";
@@ -10,8 +11,15 @@ import type { CanvasImageAngleParams } from "@/components/canvas/canvas-node-ang
 import type { ReferenceImage, SavedReferenceImage } from "@/types/image";
 import { CanvasNodeType, type CanvasAssistantSession, type CanvasConnection, type CanvasNodeData, type CanvasNodeMetadata } from "@/types/canvas";
 
-export function imageExtension(dataUrl: string) {
-    return dataUrl.match(/^data:image[/]([^;]+)/)?.[1] || dataUrl.match(/image[/]([^;]+)/)?.[1] || "png";
+export function imageExtension(dataUrl: string, mimeType?: string): string {
+    const mimeFormat = mimeType?.trim().toLowerCase().match(/^image[/]([^;\s]+)/)?.[1];
+    return mimeFormat || dataUrl.match(/^data:image[/]([^;,]+)/i)?.[1].toLowerCase() || dataUrl.match(/\.(png|jpe?g|webp|gif)(?:[?#]|$)/i)?.[1].toLowerCase() || "png";
+}
+
+export function downloadImage(dataUrl: string, fileName: string, mimeType?: string): void {
+    // Save the original URL directly. Encoding it through a canvas would
+    // flatten an animated GIF to a single frame.
+    saveAs(dataUrl, `${fileName}.${imageExtension(dataUrl, mimeType)}`);
 }
 
 export function audioExtension(mimeType?: string) {
@@ -38,7 +46,11 @@ export async function resolveMetadataReferences(metadata: CanvasNodeMetadata) {
     const references = await Promise.all(
         savedReferences.map(async (image, index) => {
             const dataUrl = image.storageKey ? await resolveImageUrl(image.storageKey, "") : image.url;
-            return dataUrl ? { id: `${index}`, name: `reference-${index}.png`, type: "image/png", dataUrl, storageKey: image.storageKey, role: image.role } : null;
+            if (!dataUrl) return null;
+            const original = image.storageKey ? await getImageBlob(image.storageKey) : null;
+            const extension = imageExtension(dataUrl, original?.type);
+            const mimeType = original?.type || `image/${extension === "jpg" ? "jpeg" : extension}`;
+            return { id: `${index}`, name: `reference-${index}.${extension}`, type: mimeType, dataUrl, storageKey: image.storageKey, role: image.role };
         }),
     );
     return references.every(Boolean) ? (references as ReferenceImage[]) : null;
@@ -112,6 +124,9 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
         quality: node?.metadata?.quality || config.quality || defaultConfig.quality,
         size: node?.metadata?.size || config.size || defaultConfig.size,
         background: node?.metadata?.background ?? config.background ?? defaultConfig.background,
+        imageOutputFormat: node?.metadata?.imageOutputFormat ?? config.imageOutputFormat ?? defaultConfig.imageOutputFormat,
+        imageFrameCount: node?.metadata?.imageFrameCount ?? config.imageFrameCount ?? defaultConfig.imageFrameCount,
+        imageFrameDurationMs: node?.metadata?.imageFrameDurationMs ?? config.imageFrameDurationMs ?? defaultConfig.imageFrameDurationMs,
         videoSeconds: node?.metadata?.seconds || config.videoSeconds || defaultConfig.videoSeconds,
         vquality: node?.metadata?.vquality || config.vquality || defaultConfig.vquality,
         videoGenerateAudio: node?.metadata?.generateAudio || config.videoGenerateAudio || defaultConfig.videoGenerateAudio,
@@ -171,7 +186,7 @@ export function sourceNodeReferenceImages(node: CanvasNodeData | null) {
     return [
         {
             id: node.id,
-            name: `${node.title || node.id}.png`,
+            name: `${node.title || node.id}.${mask ? "png" : imageExtension(node.metadata.content, node.metadata.mimeType)}`,
             type: node.metadata.mimeType || "image/png",
             dataUrl: mask ? mask.url || "" : node.metadata.content,
             storageKey: mask ? mask.storageKey : node.metadata.storageKey,

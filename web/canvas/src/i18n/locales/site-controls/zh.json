@@ -1,4 +1,11 @@
 {
+  "Image output format": "图片输出格式",
+  "Animation frames": "动画帧数",
+  "Frame duration (ms)": "每帧时长（毫秒）",
+  "GIF output requires GPT Image 2.6 Flare or Sunburst.": "GIF 输出需要使用 GPT Image 2.6 Flare 或 Sunburst。",
+  "GIF output is only available for text-to-image generation. Remove reference images and masks.": "GIF 输出仅支持文生图。请移除参考图片和蒙版。",
+  "GIF frame count must be an integer from 2 to 64.": "GIF 帧数必须是 2 到 64 之间的整数。",
+  "GIF frame duration must be an integer from 20 to 2000 ms.": "GIF 每帧时长必须是 20 到 2000 毫秒之间的整数。",
   "agent.composer.effort.auto": "自动",
   "agent.composer.effort.high": "高",
   "agent.composer.effort.low": "低",

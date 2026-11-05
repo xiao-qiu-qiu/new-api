@@ -13,8 +13,30 @@ import (
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestConvertImageEditRequestPreservesGIFFileMIME(t *testing.T) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("image", "animation.GIF")
+	require.NoError(t, err)
+	_, err = part.Write([]byte("GIF89a fixture"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/edits", &body)
+	c.Request.Header.Set("Content-Type", writer.FormDataContentType())
+	converted, err := (&Adaptor{}).ConvertImageRequest(c, &relaycommon.RelayInfo{RelayMode: relayconstant.RelayModeImagesEdits}, dto.ImageRequest{Model: "gpt-image-2.6-flare"})
+	require.NoError(t, err)
+	replayed := httptest.NewRequest(http.MethodPost, "/v1/images/edits", converted.(*bytes.Buffer))
+	replayed.Header.Set("Content-Type", c.Request.Header.Get("Content-Type"))
+	require.NoError(t, replayed.ParseMultipartForm(32<<20))
+	file := replayed.MultipartForm.File["image"][0]
+	assert.Equal(t, "animation.GIF", file.Filename)
+	assert.Equal(t, "image/gif", file.Header.Get("Content-Type"))
+}
 
 // TestConvertImageEditRequestMultipart verifies that ConvertImageRequest
 // re-serializes multipart image edit requests with all fields (including

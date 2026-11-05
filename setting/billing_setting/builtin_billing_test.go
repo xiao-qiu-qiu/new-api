@@ -541,7 +541,7 @@ func TestImageModelBuiltinPricesAndOverrides(t *testing.T) {
 		require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(savedRatios))
 		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(savedPrices))
 	})
-	for _, name := range []string{"gpt-image-2", "gpt-image-2.5-sunburst", "gpt-image-2.5-flare"} {
+	for _, name := range []string{"gpt-image-2", "gpt-image-2.5-sunburst", "gpt-image-2.5-flare", "gpt-image-2.6-flare", "gpt-image-2.6-sunburst"} {
 		t.Run(name, func(t *testing.T) {
 			*settings = billing_setting.BillingSetting{BillingMode: map[string]string{}, BillingExpr: map[string]string{}}
 			require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{}`))

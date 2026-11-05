@@ -1,4 +1,11 @@
 {
+  "Image output format": "Image output format",
+  "Animation frames": "Animation frames",
+  "Frame duration (ms)": "Frame duration (ms)",
+  "GIF output requires GPT Image 2.6 Flare or Sunburst.": "GIF output requires GPT Image 2.6 Flare or Sunburst.",
+  "GIF output is only available for text-to-image generation. Remove reference images and masks.": "GIF output is only available for text-to-image generation. Remove reference images and masks.",
+  "GIF frame count must be an integer from 2 to 64.": "GIF frame count must be an integer from 2 to 64.",
+  "GIF frame duration must be an integer from 20 to 2000 ms.": "GIF frame duration must be an integer from 20 to 2000 ms.",
   "agent.composer.effort.auto": "Auto",
   "agent.composer.effort.high": "High",
   "agent.composer.effort.low": "Low",

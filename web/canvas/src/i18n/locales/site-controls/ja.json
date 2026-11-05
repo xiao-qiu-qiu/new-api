@@ -1,4 +1,11 @@
 {
+  "Image output format": "画像の出力形式",
+  "Animation frames": "アニメーションのフレーム数",
+  "Frame duration (ms)": "フレームの表示時間（ミリ秒）",
+  "GIF output requires GPT Image 2.6 Flare or Sunburst.": "GIF 出力には GPT Image 2.6 Flare または Sunburst が必要です。",
+  "GIF output is only available for text-to-image generation. Remove reference images and masks.": "GIF 出力はテキストからの画像生成でのみ利用できます。参照画像とマスクを削除してください。",
+  "GIF frame count must be an integer from 2 to 64.": "GIF のフレーム数は 2～64 の整数で指定してください。",
+  "GIF frame duration must be an integer from 20 to 2000 ms.": "GIF のフレームの表示時間は 20～2000 ミリ秒の整数で指定してください。",
   "agent.composer.effort.auto": "自動",
   "agent.composer.effort.high": "高",
   "agent.composer.effort.low": "低",

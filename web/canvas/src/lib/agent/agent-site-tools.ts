@@ -3,7 +3,7 @@ import type { NavigateFunction } from "react-router-dom";
 import i18n from "@/i18n";
 import { fetchPrompts } from "@/services/api/prompts";
 import { uploadImage } from "@/services/image-storage";
-import { imageAspectOptions, imageQualityOptions, imageScaleOptions } from "@/components/image-settings-panel";
+import { imageAspectOptions, imageQualityOptions, imageScaleOptions } from "@/lib/image-settings-options";
 import { videoResolutionOptions, videoSecondsRange, videoSizeOptions } from "@/lib/video-settings";
 import type { CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
 import { clampVideoSeconds } from "@/lib/media-size";

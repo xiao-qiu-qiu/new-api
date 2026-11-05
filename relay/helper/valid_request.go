@@ -229,6 +229,9 @@ func GetAndValidOpenAIImageRequest(c *gin.Context, relayMode int) (*dto.ImageReq
 			}
 			imageRequest.Quality = formData.Get("quality")
 			imageRequest.Size = formData.Get("size")
+			if format := formData.Get("output_format"); format != "" {
+				imageRequest.OutputFormat, _ = common.Marshal(format)
+			}
 			if parameters := formData.Get("parameters"); parameters != "" {
 				imageRequest.Extra = map[string]json.RawMessage{"parameters": json.RawMessage(parameters)}
 			}
@@ -296,6 +299,9 @@ func GetAndValidOpenAIImageRequest(c *gin.Context, relayMode int) (*dto.ImageReq
 		}
 	}
 
+	if err := imageRequest.ValidateGIFOutput(relayMode == relayconstant.RelayModeImagesEdits); err != nil {
+		return nil, err
+	}
 	// Provider parameters can override the top-level count. Validate before
 	// pricing so malformed multipliers return a client error, not a pricing
 	// failure after reservation has started.
