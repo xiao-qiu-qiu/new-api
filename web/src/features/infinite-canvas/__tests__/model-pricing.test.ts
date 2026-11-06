@@ -157,6 +157,43 @@ it('displays image-count expression prices per image without inventing a request
   expect(price.summary).toBe('Per image $0.04/image')
 })
 
+it.each([0, 0.03])(
+  'shows the final special image price %s for explicit and automatic billing groups',
+  (price) => {
+    const metadata = model({
+      model_name: 'gpt-image-1',
+      model_ratio: 0,
+      completion_ratio: 0,
+      billing_mode: 'tiered_expr',
+      billing_expr: `tier("special", fixed(${price})) * image_count`,
+      ignore_group_ratio: true,
+      enable_groups: ['default', 'premium', 'free'],
+      supported_endpoint_types: ['image-generation'],
+    })
+    const before = structuredClone(metadata)
+    const catalog = {
+      data: [metadata],
+      group_ratio: { default: 1, premium: 4, free: 0 },
+      auto_groups: ['default', 'premium', 'free'],
+    }
+    for (const selected of ['default', 'premium', 'free', 'auto']) {
+      const display = buildCanvasModelPricing(
+        [metadata],
+        { value: selected, label: selected, ratio: 'auto' },
+        catalog,
+        options
+      )
+      expect(display.summary).toBe(`Per image $${price}/image`)
+      expect(display.details).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining(`Per image $${price}/image`),
+        ])
+      )
+    }
+    expect(metadata).toEqual(before)
+  }
+)
+
 it('uses seconds for legacy Sora/xAI video task prices while preserving HTTP fixed request prices', () => {
   const metadata = model({
     model_name: 'sora-2',

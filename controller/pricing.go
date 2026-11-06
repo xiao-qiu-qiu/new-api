@@ -2,10 +2,12 @@ package controller
 
 import (
 	"maps"
+	"slices"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting"
+	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
 
 	"github.com/gin-gonic/gin"
@@ -35,6 +37,30 @@ func filterPricingByUsableGroups(pricing []model.Pricing, usableGroup map[string
 	return filtered
 }
 
+func pricingForUser(pricing []model.Pricing, groupSettings *setting.GroupSettingsSnapshot, userGroup string) []model.Pricing {
+	// GetPricing returns shared cached entries. Replace billing fields only on
+	// a request-owned slice; capability metadata stays intact and read-only.
+	pricing = slices.Clone(pricing)
+	for i := range pricing {
+		rule, matched := groupSettings.ResolveSpecialPricing(userGroup, pricing[i].ModelName)
+		if !matched {
+			continue
+		}
+		item := &pricing[i]
+		item.BillingMode = billing_setting.BillingModeTieredExpr
+		item.BillingExpr = rule.BillingExpression()
+		item.IgnoreGroupRatio = true
+		item.QuotaType = 0
+		item.ModelRatio, item.ModelPrice, item.CompletionRatio = 0, 0, 0
+		item.CacheRatio, item.CreateCacheRatio, item.ImageRatio = nil, nil, nil
+		item.AudioRatio, item.AudioCompletionRatio = nil, nil
+		item.BillingUsageSchema = nil
+		item.BillingUsageExamples = nil
+		item.BillingPluginVariants = nil
+	}
+	return pricing
+}
+
 func GetPricing(c *gin.Context) {
 	pricing := model.GetPricing()
 	userId, exists := c.Get("id")
@@ -58,6 +84,7 @@ func GetPricing(c *gin.Context) {
 
 	usableGroup = groupSettings.Usable(group)
 	pricing = filterPricingByUsableGroups(pricing, usableGroup)
+	pricing = pricingForUser(pricing, groupSettings, group)
 	// check groupRatio contains usableGroup
 	for group := range groupSettings.Ratios {
 		if _, ok := usableGroup[group]; !ok {

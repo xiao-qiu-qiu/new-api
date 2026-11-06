@@ -89,6 +89,51 @@ afterEach(() => {
 })
 
 describe('model cards', () => {
+  it.each([0, 0.03])(
+    'shows the final special image price %s in cards and lists for every billing group',
+    (price) => {
+      const model = pricingModel({
+        model_name: 'gpt-image-1',
+        model_ratio: 0,
+        completion_ratio: 0,
+        billing_mode: 'tiered_expr',
+        billing_expr: `tier("special", fixed(${price})) * image_count`,
+        ignore_group_ratio: true,
+        enable_groups: ['default', 'premium', 'free'],
+        group_ratio: { default: 1, premium: 4, free: 0 },
+      })
+      const before = structuredClone(model)
+      const view = (selectedGroup: string) => (
+        <>
+          <section aria-label='special card price'>
+            <ModelCard
+              model={model}
+              onClick={vi.fn()}
+              selectedGroup={selectedGroup}
+              tokenUnit='K'
+            />
+          </section>
+          <section aria-label='special list price'>
+            <ModelPriceCell model={model} options={{ selectedGroup }} />
+          </section>
+        </>
+      )
+      const { rerender } = render(view('default'))
+      for (const selectedGroup of ['default', 'premium', 'free', 'all']) {
+        rerender(view(selectedGroup))
+        const card = within(screen.getByLabelText('special card price'))
+        expect(card.getByText(`$${price}`)).toBeVisible()
+        expect(card.getByText('/ image')).toBeVisible()
+        expect(
+          within(screen.getByLabelText('special list price')).getByTitle(
+            `${price}/image`
+          )
+        ).toBeVisible()
+      }
+      expect(model).toEqual(before)
+    }
+  )
+
   it.each<{
     name: string
     pricing: Partial<PricingModel>

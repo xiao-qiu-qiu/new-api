@@ -21,6 +21,7 @@ type GroupSettingsSnapshot struct {
 	Configured          bool
 	Ratios              map[string]float64
 	SpecialRatios       map[string]map[string]float64
+	SpecialPricingRules []SpecialPricingRule
 	UsableGroups        map[string]string
 	SpecialUsableGroups map[string]map[string]string
 	AutoGroups          []string
@@ -51,6 +52,7 @@ func captureGroupSettings() *GroupSettingsSnapshot {
 		UserGroups: GetUserGroupsCopy(), Configured: UserGroupsConfigured(),
 		Ratios:              ratio_setting.GetGroupRatioCopy(),
 		SpecialRatios:       ratio_setting.GetGroupRatioSetting().GroupGroupRatio.ReadAll(),
+		SpecialPricingRules: GetSpecialPricingRulesCopy(),
 		UsableGroups:        GetUserUsableGroupsCopy(),
 		SpecialUsableGroups: ratio_setting.GetGroupRatioSetting().GroupSpecialUsableGroup.ReadAll(),
 		AutoGroups:          slices.Clone(GetAutoGroups()), MaxTokenAutoGroups: GetMaxTokenAutoGroups(),
@@ -165,6 +167,9 @@ func (s *GroupSettingsSnapshot) GroupRatio(userGroup, group string) float64 {
 // decoding so explicit numeric zero remains distinguishable from missing data.
 func ValidateGroupSettingsJSON(key, value string) error {
 	switch key {
+	case "SpecialPricingRules":
+		_, err := ParseSpecialPricingRules(value)
+		return err
 	case "UserGroups", "GroupRatio", "GroupGroupRatio", "TopupGroupRatio", "UserUsableGroups",
 		"group_ratio_setting.group_special_usable_group", "group_ratio_setting.group_ratio", "group_ratio_setting.group_group_ratio", "AutoGroups":
 	default:

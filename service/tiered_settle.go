@@ -225,6 +225,9 @@ func PrepareTieredBillingForSelectedGroup(c *gin.Context, relayInfo *relaycommon
 		// already yields 0 for a zero group ratio.
 		return nil
 	}
+	if relayInfo.PriceData.FreeModel && relayInfo.PriceData.GroupRatioInfo.IgnoreGroupRatio && relayInfo.Billing == nil && snap.EstimatedQuotaAfterGroup == 0 {
+		return nil
+	}
 
 	// The selected group is paid; clear a FreeModel flag frozen when the
 	// initial group was free so downstream state stays consistent.

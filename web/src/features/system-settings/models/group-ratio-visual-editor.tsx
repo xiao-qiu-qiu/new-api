@@ -84,12 +84,14 @@ import { formatNumber } from '@/lib/format'
 
 import { safeJsonParse } from '../utils/json-parser'
 import { GroupSpecialUsableRulesEditor } from './group-special-usable-editor'
+import { SpecialPricingRulesEditor } from './special-pricing-rules-editor'
 import { UserGroupsEditor } from './user-groups-editor'
 
 export type GroupSettingsSection =
   | 'pricing'
   | 'users'
   | 'overrides'
+  | 'special-pricing'
   | 'visibility'
   | 'auto'
 
@@ -102,6 +104,7 @@ type GroupRatioVisualEditorProps = {
   topupGroupRatio: string
   userUsableGroups: string
   groupGroupRatio: string
+  specialPricingRules?: string
   autoGroups: string
   maxTokenAutoGroupsField: ReactNode
   groupSpecialUsableGroup: string
@@ -268,6 +271,7 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
   topupGroupRatio,
   userUsableGroups,
   groupGroupRatio,
+  specialPricingRules = '[]',
   autoGroups,
   maxTokenAutoGroupsField,
   groupSpecialUsableGroup,
@@ -363,6 +367,18 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
                 (name) => !Object.hasOwn(nextGroups, name)
               )
               if (removed.length) {
+                const rules = safeJsonParse<{ user_group: string }[]>(
+                  specialPricingRules,
+                  { fallback: [], silent: true }
+                )
+                onChange(
+                  'SpecialPricingRules',
+                  JSON.stringify(
+                    rules.filter((rule) => !removed.includes(rule.user_group)),
+                    null,
+                    2
+                  )
+                )
                 for (const [ruleField, raw] of [
                   ['GroupGroupRatio', groupGroupRatio],
                   ['GroupSpecialUsableGroup', groupSpecialUsableGroup],
@@ -394,6 +410,13 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
           groupOptions={registryNames}
           userGroupOptions={userGroupNames}
           onChange={(value) => onChange('GroupSpecialUsableGroup', value)}
+        />
+      </TabsContent>
+      <TabsContent value='special-pricing' keepMounted>
+        <SpecialPricingRulesEditor
+          value={specialPricingRules}
+          userGroupOptions={userGroupNames}
+          onChange={(value) => onChange('SpecialPricingRules', value)}
         />
       </TabsContent>
       <TabsContent value='auto' keepMounted>
@@ -491,6 +514,9 @@ export function GroupSettingsNavigation() {
         </TabsTrigger>
         <TabsTrigger value='overrides' className='px-3'>
           {t('Special ratio rules')}
+        </TabsTrigger>
+        <TabsTrigger value='special-pricing' className='px-3'>
+          {t('Special pricing rules')}
         </TabsTrigger>
         <TabsTrigger value='visibility' className='px-3'>
           {t('Group visibility')}

@@ -13,12 +13,188 @@ import (
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestPricingForUserOverridesBillingWithoutChangingCachedMetadata(t *testing.T) {
+	metadata := model.Pricing{
+		ModelName: "gpt-image-1", Description: "Image model", Icon: "OpenAI",
+		Tags: "image", VendorID: 7, OwnerBy: "openai", EnableGroup: []string{"default", "premium"},
+		SupportedEndpointTypes: []constant.EndpointType{"image-generation"},
+		VideoCapabilities:      &model.VideoModelCapabilities{},
+		PricingVersion:         "catalog-version",
+	}
+	ratio := 4.0
+	legacy := metadata
+	legacy.QuotaType, legacy.ModelRatio, legacy.ModelPrice, legacy.CompletionRatio = 1, 2, 0.8, 3
+	legacy.CacheRatio, legacy.CreateCacheRatio, legacy.ImageRatio = &ratio, &ratio, &ratio
+	legacy.AudioRatio, legacy.AudioCompletionRatio = &ratio, &ratio
+	legacy.BillingMode, legacy.BillingExpr = "tiered_expr", `tier("old", u("images") * 0.8)`
+	legacy.BillingUsageSchema = map[string]jsplugin.UsageFieldSchema{"images": {Type: "number", Unit: "count"}}
+	legacy.BillingUsageExamples = []jsplugin.UsageExample{{Label: "one image", Facts: map[string]any{"images": float64(1)}}}
+	legacy.BillingPluginVariants = []model.PricingPluginVariant{{PluginKey: "old-provider", BillingExpr: legacy.BillingExpr, BillingUsageSchema: legacy.BillingUsageSchema}}
+	cached := []model.Pricing{legacy, {ModelName: "unchanged", ModelPrice: 0.5, QuotaType: 1}}
+	before, err := common.Marshal(cached)
+	require.NoError(t, err)
+	snapshot := &setting.GroupSettingsSnapshot{SpecialPricingRules: []setting.SpecialPricingRule{
+		{UserGroup: "vip", Model: "gpt-image-*", Price: 0, BillingUnit: "image"},
+		{UserGroup: "*", Model: "gpt-image-*", Price: 0.03, BillingUnit: "image"},
+		{UserGroup: "per-call", Model: "gpt-image-*", Price: 0.02, BillingUnit: "request"},
+	}}
+	for _, tc := range []struct{ userGroup, expression string }{
+		{"vip", `tier("special", fixed(0)) * image_count`},
+		{"default", `tier("special", fixed(0.03)) * image_count`},
+		{"", `tier("special", fixed(0.03)) * image_count`},
+		{"per-call", `tier("special", fixed(0.02))`},
+	} {
+		t.Run(tc.userGroup, func(t *testing.T) {
+			prices := pricingForUser(cached, snapshot, tc.userGroup)
+			want := metadata
+			want.BillingMode, want.BillingExpr, want.IgnoreGroupRatio = "tiered_expr", tc.expression, true
+			assert.Equal(t, want, prices[0], "replace every conflicting price field and retain capabilities")
+			assert.Equal(t, cached[1], prices[1], "unmatched models keep their original pricing")
+			after, err := common.Marshal(cached)
+			require.NoError(t, err)
+			assert.Equal(t, string(before), string(after), "one viewer's price must not leak into the shared cache")
+		})
+	}
+	assert.Equal(t, cached, pricingForUser(cached, &setting.GroupSettingsSnapshot{}, "vip"))
+}
+
+func TestGetPricingSpecialPricesUseAccountGroupAndPublicFallback(t *testing.T) {
+	db := modelManagementDB(t, "sqlite", "")
+	withTieredBillingConfig(t, map[string]string{"gpt-image-public": "tiered_expr"}, map[string]string{"gpt-image-public": `tier("old", p * 5 + c * 10)`})
+	require.NoError(t, db.Create(&[]model.User{
+		{Id: 101, Username: "pricing-vip", Group: "vip", AffCode: "pricing-vip"},
+		{Id: 102, Username: "pricing-default", Group: "default", AffCode: "pricing-default"},
+	}).Error)
+	require.NoError(t, db.Create(&[]model.Ability{
+		{Group: "default", Model: "gpt-image-public", ChannelId: 1, Enabled: true},
+		{Group: "premium", Model: "gpt-image-public", ChannelId: 1, Enabled: true},
+	}).Error)
+	snapshot := &setting.GroupSettingsSnapshot{
+		Ratios:       map[string]float64{"default": 1, "premium": 4},
+		UsableGroups: map[string]string{"default": "Default", "premium": "Premium"},
+		SpecialPricingRules: []setting.SpecialPricingRule{
+			{UserGroup: "vip", Model: "gpt-image-*", Price: 0, BillingUnit: "image"},
+			{UserGroup: "default", Model: "gpt-image-*", Price: 0.01, BillingUnit: "image"},
+			{UserGroup: "*", Model: "gpt-image-*", Price: 0.03, BillingUnit: "image"},
+		},
+	}
+	cached, err := common.Marshal(model.GetPricing())
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name       string
+		userID     int
+		expression string
+	}{
+		{"vip", 101, `tier("special", fixed(0)) * image_count`},
+		{"default", 102, `tier("special", fixed(0.01)) * image_count`},
+		{"anonymous", 0, `tier("special", fixed(0.03)) * image_count`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/api/pricing", nil)
+			ctx.Set("group_settings_snapshot", snapshot)
+			ctx.Set("group", "vip") // Routing context must not grant account-specific prices.
+			if tc.userID != 0 {
+				ctx.Set("id", tc.userID)
+			}
+			GetPricing(ctx)
+			require.Equal(t, http.StatusOK, recorder.Code)
+			var response struct {
+				Success    bool               `json:"success"`
+				Data       []model.Pricing    `json:"data"`
+				GroupRatio map[string]float64 `json:"group_ratio"`
+			}
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+			require.True(t, response.Success)
+			prices := pricingByModelName(response.Data)
+			require.Contains(t, prices, "gpt-image-public")
+			assert.Equal(t, tc.expression, prices["gpt-image-public"].BillingExpr)
+			assert.Equal(t, "tiered_expr", prices["gpt-image-public"].BillingMode)
+			assert.True(t, prices["gpt-image-public"].IgnoreGroupRatio)
+			assert.ElementsMatch(t, []string{"default", "premium"}, prices["gpt-image-public"].EnableGroup)
+			assert.Equal(t, snapshot.Ratios, response.GroupRatio)
+			after, err := common.Marshal(model.GetPricing())
+			require.NoError(t, err)
+			assert.Equal(t, string(cached), string(after))
+		})
+	}
+}
+
+func TestListModelsIncludesOnlySpecialPricesAvailableToCurrentUser(t *testing.T) {
+	db := modelManagementDB(t, "sqlite", "")
+	withSelfUseModeDisabled(t)
+	withTieredBillingConfig(t, map[string]string{"zz-special-global": "tiered_expr"},
+		map[string]string{"zz-special-global": `tier("base", fixed(0.1))`})
+	require.NoError(t, db.Create(&[]model.User{
+		{Id: 101, Username: "discovery-vip", Group: "vip", AffCode: "discovery-vip"},
+		{Id: 102, Username: "discovery-default", Group: "default", AffCode: "discovery-default"},
+		{Id: 103, Username: "discovery-other", Group: "other", AffCode: "discovery-other"},
+	}).Error)
+	require.NoError(t, db.Create(&[]model.Ability{
+		{Group: "default", Model: "zz-special-vip-only", ChannelId: 1, Enabled: true},
+		{Group: "default", Model: "zz-special-public", ChannelId: 1, Enabled: true},
+		{Group: "default", Model: "zz-special-other-only", ChannelId: 1, Enabled: true},
+		{Group: "default", Model: "zz-special-global", ChannelId: 1, Enabled: true},
+		{Group: "default", Model: "zz-special-unpriced", ChannelId: 1, Enabled: true},
+		{Group: "default", Model: "zz-special-disabled", ChannelId: 1, Enabled: false},
+		{Group: "restricted", Model: "zz-special-route-only", ChannelId: 2, Enabled: true},
+	}).Error)
+	snapshot := &setting.GroupSettingsSnapshot{
+		UserGroups: map[string]string{"vip": "default", "default": "default", "other": "default"},
+		Ratios:     map[string]float64{"default": 1, "restricted": 2},
+		SpecialPricingRules: []setting.SpecialPricingRule{
+			{UserGroup: "vip", Model: "zz-special-vip-only", Price: 0, BillingUnit: "image"},
+			{UserGroup: "other", Model: "zz-special-other-only", Price: 0.01, BillingUnit: "request"},
+			{UserGroup: "*", Model: "zz-special-public", Price: 0.03, BillingUnit: "image"},
+			{UserGroup: "*", Model: "zz-special-disabled", Price: 0.03, BillingUnit: "image"},
+			{UserGroup: "*", Model: "zz-special-route-only", Price: 0.03, BillingUnit: "image"},
+			{UserGroup: "*", Model: "zz-special-no-channel", Price: 0.03, BillingUnit: "image"},
+		},
+	}
+	for _, tc := range []struct {
+		name, userGroup string
+		userID          int
+		limitModels     bool
+		want            []string
+	}{
+		{"vip", "vip", 101, false, []string{"zz-special-global", "zz-special-public", "zz-special-vip-only"}},
+		{"vip with routing group and no cached user group", "", 101, false, []string{"zz-special-global", "zz-special-public", "zz-special-vip-only"}},
+		{"default uses fallback", "default", 102, false, []string{"zz-special-global", "zz-special-public"}},
+		{"other cannot see vip model", "other", 103, false, []string{"zz-special-global", "zz-special-public", "zz-special-other-only"}},
+		{"anonymous uses only fallback", "vip", 0, false, []string{"zz-special-global", "zz-special-public"}},
+		{"token permissions still apply", "vip", 101, true, []string{"zz-special-global", "zz-special-public"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+			ctx.Set("id", tc.userID)
+			ctx.Set("group_settings_snapshot", snapshot)
+			common.SetContextKey(ctx, constant.ContextKeyUserGroup, tc.userGroup)
+			common.SetContextKey(ctx, constant.ContextKeyTokenGroup, "default")
+			if tc.limitModels {
+				common.SetContextKey(ctx, constant.ContextKeyTokenModelLimitEnabled, true)
+				common.SetContextKey(ctx, constant.ContextKeyTokenModelLimit, map[string]bool{"zz-special-global": true, "zz-special-public": true})
+			}
+			ListModels(ctx, constant.ChannelTypeOpenAI)
+			payload := decodeListModelsPayload(t, recorder)
+			names := make([]string, 0, len(payload.Data))
+			for _, item := range payload.Data {
+				names = append(names, item.Id)
+			}
+			assert.ElementsMatch(t, tc.want, names)
+		})
+	}
+}
 
 // Model metadata may declare endpoints either as a type array or as a path map.
 // Conversion must understand both; reading only the map form made every model

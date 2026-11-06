@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,8 +16,10 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
@@ -41,6 +44,110 @@ func TestGroupSettingsLifecycle(t *testing.T) {
 	}
 }
 
+func TestSpecialPricingResolution(t *testing.T) {
+	rules, err := setting.ParseSpecialPricingRules(`[
+		{"user_group":"*","model":"gpt-image-2","price":0.1,"billing_unit":"request"},
+		{"user_group":"*","model":"gpt-image-*","price":0.03,"billing_unit":"image"},
+		{"user_group":"student","model":"*","price":0.02,"billing_unit":"request"},
+		{"user_group":"student","model":"gpt-image-*","price":0,"billing_unit":"image"},
+		{"user_group":"student","model":"gpt-image-2*","price":0.01,"billing_unit":"image"},
+		{"user_group":"student","model":"gpt-image-2","price":0.012,"billing_unit":"request"},
+		{"user_group":"student","model":"ab*cd","price":0.04,"billing_unit":"request"},
+		{"user_group":"student","model":"abc*d","price":0.05,"billing_unit":"request"},
+		{"user_group":"student","model":"provider/*image-*","price":0.06,"billing_unit":"image"},
+		{"user_group":"student","model":"q?[*","price":0.07,"billing_unit":"request"},
+		{"user_group":"student","model":"prefix**suffix","price":0.08,"billing_unit":"request"},
+		{"user_group":"student","model":"汉字*","price":0.09,"billing_unit":"request"},
+		{"user_group":"student","model":"*abc","price":0.11,"billing_unit":"request"}
+	]`)
+	require.NoError(t, err)
+	snapshot := &setting.GroupSettingsSnapshot{SpecialPricingRules: rules}
+	for _, tc := range []struct {
+		name, userGroup, model string
+		index                  int
+	}{
+		{"specific group beats fallback exact", "student", "gpt-image-3", 3},
+		{"group wildcard beats fallback exact", "student", "not-an-image", 2},
+		{"exact model beats earlier wildcard", "student", "gpt-image-2", 5},
+		{"more literal characters win", "student", "gpt-image-2-preview", 4},
+		{"same specificity keeps configuration order", "student", "abcd", 6},
+		{"fallback exact wins", "default", "gpt-image-2", 0},
+		{"fallback wildcard wins", "default", "gpt-image-3", 1},
+		{"wildcard crosses slashes", "student", "provider/nested/gpt-image-2", 8},
+		{"other glob syntax is literal", "student", "q?[anything", 9},
+		{"question mark is not a wildcard", "student", "qa[anything", 2},
+		{"consecutive stars match empty sequences", "student", "prefixsuffix", 10},
+		{"suffix remains anchored", "student", "prefixsuffix-extra", 2},
+		{"specificity counts characters not UTF8 bytes", "student", "汉字abc", 12},
+		{"case remains unchanged", "default", "GPT-IMAGE-2", -1},
+		{"no model normalization", "default", "alias/gpt-image-2", -1},
+		{"no match", "default", "other-model", -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rule, matched := snapshot.ResolveSpecialPricing(tc.userGroup, tc.model)
+			assert.Equal(t, tc.index >= 0, matched)
+			if tc.index >= 0 {
+				assert.Equal(t, rules[tc.index], rule)
+			}
+		})
+	}
+	// A group-specific broad rule must beat even an exact all-user rule.
+	groupFirst := &setting.GroupSettingsSnapshot{SpecialPricingRules: []setting.SpecialPricingRule{rules[0], rules[3]}}
+	rule, matched := groupFirst.ResolveSpecialPricing("student", "gpt-image-2")
+	require.True(t, matched)
+	assert.Zero(t, rule.Price)
+}
+
+func TestSpecialPricingBillingExpressionAndBounds(t *testing.T) {
+	previousQuotaPerUnit := common.QuotaPerUnit
+	common.QuotaPerUnit = 500000
+	t.Cleanup(func() { common.QuotaPerUnit = previousQuotaPerUnit })
+	for _, tc := range []struct {
+		name, unit, expression string
+		price                  float64
+		count, quota           int
+	}{
+		{"free images", "image", `tier("special", fixed(0)) * image_count`, 0, 128, 0},
+		{"per image", "image", `tier("special", fixed(0.03)) * image_count`, 0.03, 3, 45000},
+		{"per request", "request", `tier("special", fixed(0.05))`, 0.05, 128, 25000},
+		{"scientific notation", "image", `tier("special", fixed(1e-07)) * image_count`, 1e-7, 128, 6},
+		{"request price uses quota not million scaling", "request", `tier("special", fixed(1000))`, 1000, 1, 500000000},
+		{"large safe image price", "image", `tier("special", fixed(30)) * image_count`, 30, 128, 1920000000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rule := setting.SpecialPricingRule{UserGroup: "*", Model: "model", Price: tc.price, BillingUnit: tc.unit}
+			require.NoError(t, rule.Validate())
+			expression := rule.BillingExpression()
+			assert.Equal(t, tc.expression, expression)
+			result, err := billingexpr.ComputeTieredQuotaWithRequest(&billingexpr.BillingSnapshot{
+				ExprString: expression, ExprHash: billingexpr.ExprHashString(expression), GroupRatio: 1, QuotaPerUnit: common.QuotaPerUnit,
+			}, billingexpr.TokenParams{}, billingexpr.RequestInput{ImageCount: &tc.count})
+			require.NoError(t, err)
+			assert.Equal(t, tc.quota, result.ActualQuotaAfterGroup)
+			assert.Equal(t, "special", result.MatchedTier)
+			assert.Nil(t, result.Clamp)
+		})
+	}
+	for _, price := range []float64{-1, math.NaN(), math.Inf(1), math.Inf(-1), math.MaxFloat64} {
+		rule := setting.SpecialPricingRule{UserGroup: "*", Model: "model", Price: price, BillingUnit: "image"}
+		assert.Error(t, rule.Validate())
+	}
+	imageLimit := float64(common.MaxQuota) / float64(dto.MaxImageN) / common.QuotaPerUnit
+	for _, tc := range []struct {
+		unit  string
+		price float64
+		valid bool
+	}{
+		{"image", imageLimit - 0.000001, true},
+		{"image", imageLimit + 0.000001, false},
+		{"request", imageLimit + 0.000001, true},
+		{"request", float64(common.MaxQuota)/common.QuotaPerUnit + 1, false},
+	} {
+		rule := setting.SpecialPricingRule{UserGroup: "*", Model: "model", Price: tc.price, BillingUnit: tc.unit}
+		assert.Equal(t, tc.valid, rule.Validate() == nil, "%s price %g", tc.unit, tc.price)
+	}
+}
+
 func runGroupSettingsLifecycle(t *testing.T) {
 	t.Helper()
 	db := setupManageUserTestDB(t)
@@ -51,11 +158,13 @@ func runGroupSettingsLifecycle(t *testing.T) {
 	oldRatios := ratio_setting.GroupRatio2JSONString()
 	oldTopup := common.TopupGroupRatio2JSONString()
 	oldSpecial := ratio_setting.GroupGroupRatio2JSONString()
+	oldSpecialPricing := setting.SpecialPricingRules2JSONString()
 	oldUsable := setting.UserUsableGroups2JSONString()
 	oldSpecialUsable := ratio_setting.GetGroupRatioSetting().GroupSpecialUsableGroup.MarshalJSONString()
 	oldOptions := maps.Clone(common.OptionMap)
 	common.OptionMap = make(map[string]string)
 	setting.ResetUserGroups()
+	setting.ResetSpecialPricingRules()
 	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1,"legacy":2,"route_only":3}`))
 	require.NoError(t, common.UpdateTopupGroupRatioByJSONString(`{"default":1,"topup_only":1}`))
 	require.NoError(t, ratio_setting.UpdateGroupGroupRatioByJSONString(`{"special_source":{"legacy":0.7}}`))
@@ -69,6 +178,7 @@ func runGroupSettingsLifecycle(t *testing.T) {
 		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(oldRatios))
 		require.NoError(t, common.UpdateTopupGroupRatioByJSONString(oldTopup))
 		require.NoError(t, ratio_setting.UpdateGroupGroupRatioByJSONString(oldSpecial))
+		require.NoError(t, setting.UpdateSpecialPricingRulesByJSONString(oldSpecialPricing))
 		require.NoError(t, ratio_setting.GetGroupRatioSetting().GroupSpecialUsableGroup.UnmarshalJSON([]byte(oldSpecialUsable)))
 		require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(oldUsable))
 		common.OptionMap = oldOptions
@@ -135,6 +245,109 @@ func runGroupSettingsLifecycle(t *testing.T) {
 	assert.Zero(t, ratio_setting.GetGroupRatio("standard"))
 	assert.Zero(t, service.GetUserGroupRatio("student", "standard"))
 	require.NoError(t, model.UpdateGroupSettingsOptions(map[string]string{"GroupRatio": `{"default":1,"legacy":2,"standard":3,"route_only":4}`, "GroupGroupRatio": `{"student":{"standard":0.5}}`}))
+	t.Run("special pricing persistence validation and references", func(t *testing.T) {
+		model.InitOptionMap()
+		assert.JSONEq(t, `[]`, common.OptionMap["SpecialPricingRules"])
+		assert.NotNil(t, setting.CaptureGroupSettings().SpecialPricingRules)
+		rules := `[{"user_group":"*","model":"gpt-image-*","price":0.03,"billing_unit":"image"},{"user_group":"student","model":"gpt-image-*","price":0,"billing_unit":"image"},{"user_group":"student","model":"request-model","price":0.05,"billing_unit":"request"}]`
+		ctx, recorder := newAuthenticatedContext(t, http.MethodPut, "/api/group/settings", map[string]any{"options": map[string]string{"SpecialPricingRules": rules}}, 1)
+		UpdateGroupSettings(ctx)
+		require.True(t, decodeAPIResponse(t, recorder).Success, recorder.Body.String())
+		var persisted model.Option
+		require.NoError(t, db.Where(&model.Option{Key: "SpecialPricingRules"}).First(&persisted).Error)
+		assert.JSONEq(t, rules, persisted.Value)
+		for range 2 {
+			model.InitOptionMap()
+			assert.JSONEq(t, rules, common.OptionMap["SpecialPricingRules"])
+			assert.JSONEq(t, rules, setting.SpecialPricingRules2JSONString())
+			free, matched := setting.CaptureGroupSettings().ResolveSpecialPricing("student", "gpt-image-2")
+			require.True(t, matched)
+			assert.Zero(t, free.Price)
+			fallback, matched := setting.CaptureGroupSettings().ResolveSpecialPricing("default", "gpt-image-2")
+			require.True(t, matched)
+			assert.Equal(t, 0.03, fallback.Price)
+		}
+		ctx, recorder = newAuthenticatedContext(t, http.MethodGet, "/api/option/", nil, 1)
+		GetOptions(ctx)
+		var response struct {
+			Data []model.Option `json:"data"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+		found := false
+		for _, option := range response.Data {
+			if option.Key == "SpecialPricingRules" {
+				found = true
+				assert.JSONEq(t, rules, option.Value)
+			}
+		}
+		assert.True(t, found, "the settings endpoint must expose special pricing")
+		for _, invalid := range []string{
+			`null`, `{}`, `[null]`, `[{}]`,
+			`[{"user_group":"student","model":"gpt-image-*","billing_unit":"image"}]`,
+			`[{"user_group":"student","model":"gpt-image-*","price":null,"billing_unit":"image"}]`,
+			`[{"user_group":"student","model":"gpt-image-*","price":"0","billing_unit":"image"}]`,
+			`[{"user_group":"student","model":"gpt-image-*","price":-0.01,"billing_unit":"image"}]`,
+			`[{"user_group":"student","model":"gpt-image-*","price":1e309,"billing_unit":"image"}]`,
+			`[{"user_group":"student","model":"gpt-image-*","price":1e20,"billing_unit":"image"}]`,
+			`[{"user_group":"student","model":"gpt-image-*","price":0,"billing_unit":"token"}]`,
+			`[{"user_group":"student","model":"gpt-image-*","price":0}]`,
+			`[{"user_group":"student","model":"","price":0,"billing_unit":"image"}]`,
+			`[{"user_group":"student","model":" gpt-image-*","price":0,"billing_unit":"image"}]`,
+			`[{"user_group":"","model":"gpt-image-*","price":0,"billing_unit":"image"}]`,
+			`[{"user_group":"auto","model":"gpt-image-*","price":0,"billing_unit":"image"}]`,
+			`[{"user_group":" student","model":"gpt-image-*","price":0,"billing_unit":"image"}]`,
+			`[{"user_group":"route_only","model":"gpt-image-*","price":0,"billing_unit":"image"}]`,
+			`[{"user_group":"missing","model":"gpt-image-*","price":0,"billing_unit":"image"}]`,
+			`[{"user_group":"student","model":"gpt-image-*","price":0,"billing_unit":"image"},{"user_group":"student","model":"gpt-image-*","price":0.02,"billing_unit":"request"}]`,
+		} {
+			assert.Error(t, model.UpdateOption("SpecialPricingRules", invalid), invalid)
+			assert.JSONEq(t, rules, setting.SpecialPricingRules2JSONString())
+			persisted = model.Option{}
+			require.NoError(t, db.Where(&model.Option{Key: "SpecialPricingRules"}).First(&persisted).Error)
+			assert.JSONEq(t, rules, persisted.Value)
+		}
+		assert.Error(t, model.UpdateGroupSettingsOptions(map[string]string{"UserGroups": `{"default":"default","*":"default"}`}))
+		copy := setting.CaptureGroupSettings()
+		copy.SpecialPricingRules[0].Price = 99
+		assert.JSONEq(t, rules, setting.SpecialPricingRules2JSONString(), "a captured rule list must not alias the live configuration")
+
+		withPricingGroup := maps.Clone(groups)
+		withPricingGroup["pricing_only"] = "standard"
+		encoded, err := common.Marshal(withPricingGroup)
+		require.NoError(t, err)
+		pricingOnly := `[{"user_group":"pricing_only","model":"gpt-image-*","price":0,"billing_unit":"image"}]`
+		require.NoError(t, model.UpdateGroupSettingsOptions(map[string]string{"UserGroups": string(encoded), "SpecialPricingRules": pricingOnly}))
+		encoded, err = common.Marshal(groups)
+		require.NoError(t, err)
+		assert.ErrorContains(t, model.UpdateGroupSettingsOptions(map[string]string{"UserGroups": string(encoded)}), "User group is still referenced")
+		assert.Contains(t, setting.GetUserGroupsCopy(), "pricing_only")
+		require.NoError(t, model.UpdateGroupSettingsOptions(map[string]string{"UserGroups": string(encoded), "SpecialPricingRules": rules}))
+		assert.NotContains(t, setting.GetUserGroupsCopy(), "pricing_only")
+
+		require.NoError(t, db.Callback().Update().Before("gorm:update").Register("special_pricing_write_failure", func(tx *gorm.DB) {
+			if option, ok := tx.Statement.Dest.(*model.Option); ok && option.Key == "SpecialPricingRules" {
+				tx.AddError(errors.New("injected special pricing write failure"))
+			}
+		}))
+		assert.Error(t, model.UpdateGroupSettingsOptions(map[string]string{"SpecialPricingRules": `[]`, "TopupGroupRatio": `{"student":0.4}`}))
+		require.NoError(t, db.Callback().Update().Remove("special_pricing_write_failure"))
+		assert.JSONEq(t, rules, setting.SpecialPricingRules2JSONString())
+		assert.Equal(t, 0.8, common.GetTopupGroupRatio("student"))
+		persisted = model.Option{}
+		require.NoError(t, db.Where(&model.Option{Key: "TopupGroupRatio"}).First(&persisted).Error)
+		assert.JSONEq(t, `{"default":1,"topup_only":1,"student":0.8}`, persisted.Value)
+		model.InitOptionMap()
+		assert.JSONEq(t, rules, setting.SpecialPricingRules2JSONString())
+
+		require.NoError(t, model.UpdateOption("SpecialPricingRules", `[]`))
+		model.InitOptionMap()
+		assert.JSONEq(t, `[]`, setting.SpecialPricingRules2JSONString())
+		require.NoError(t, model.UpdateOption("SpecialPricingRules", rules))
+		require.NoError(t, db.Where(&model.Option{Key: "SpecialPricingRules"}).Delete(&model.Option{}).Error)
+		model.InitOptionMap()
+		assert.JSONEq(t, `[]`, common.OptionMap["SpecialPricingRules"], "an absent persisted option resets to the default")
+		require.NoError(t, model.UpdateOption("SpecialPricingRules", rules))
+	})
 	withoutRouteOnly := `{"default":1,"legacy":2,"standard":3}`
 	assert.Error(t, model.UpdateGroupSettingsOptions(map[string]string{"GroupRatio": withoutRouteOnly}), "visible routing groups cannot be orphaned")
 	channel := model.Channel{Name: "group-channel", Group: "default,route_only"}
@@ -266,11 +479,18 @@ func runGroupSettingsLifecycle(t *testing.T) {
 			require.NoError(t, model.UpdateGroupSettingsOptions(map[string]string{
 				"UserGroups": string(encoded), "GroupRatio": `{"default":1,"legacy":2,"replacement":7,"route_only":4}`,
 				"GroupGroupRatio": `{"student":{"replacement":0.75}}`, "TopupGroupRatio": `{"default":1,"student":0.8}`,
+				"SpecialPricingRules": `[{"user_group":"student","model":"gpt-image-*","price":0.09,"billing_unit":"image"}]`,
 			}))
 			live := setting.CaptureGroupSettings()
 			assert.Equal(t, "replacement", live.DefaultGroup("student"))
 			assert.False(t, live.ContainsRatio("standard"))
+			livePrice, matched := live.ResolveSpecialPricing("student", "gpt-image-2")
+			require.True(t, matched)
+			assert.Equal(t, 0.09, livePrice.Price)
 			requestSnapshot := setting.RequestGroupSettings(c)
+			requestPrice, matched := requestSnapshot.ResolveSpecialPricing("student", "gpt-image-2")
+			require.True(t, matched)
+			assert.Zero(t, requestPrice.Price, "an in-flight request retains the price captured at authentication")
 			assert.Equal(t, "standard", requestSnapshot.DefaultGroup("student"))
 			assert.True(t, requestSnapshot.ContainsRatio("standard"))
 			assert.Equal(t, []string{"standard"}, requestSnapshot.FilterAutoGroups("student", []string{"standard"}, 1))

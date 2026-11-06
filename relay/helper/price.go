@@ -50,6 +50,10 @@ func HandleGroupRatio(ctx *gin.Context, relayInfo *relaycommon.RelayInfo) hostty
 	billingModelName := relayInfo.GetBillingModelName()
 	previous := relayInfo.PriceData.GroupRatioInfo
 	groupRatioInfo.BillingModelName = billingModelName
+	if _, matched := setting.RequestGroupSettings(ctx).ResolveSpecialPricing(relayInfo.UserGroup, relayInfo.GetOriginModelName()); matched {
+		groupRatioInfo.IgnoreGroupRatio = true
+		return groupRatioInfo
+	}
 	if billingModelName != "" && previous.BillingModelName == billingModelName {
 		groupRatioInfo.IgnoreGroupRatio = previous.IgnoreGroupRatio
 	} else {
@@ -85,10 +89,27 @@ func ModelPriceHelper(c *gin.Context, info *relaycommon.RelayInfo, promptTokens 
 	modelPrice, usePrice := ratio_setting.GetModelPrice(billingModelName, false)
 
 	groupRatioInfo := HandleGroupRatio(c, info)
+	if rule, matched := setting.RequestGroupSettings(c).ResolveSpecialPricing(info.UserGroup, info.GetOriginModelName()); matched {
+		if rule.BillingUnit == "image" {
+			if _, image := info.Request.(*dto.ImageRequest); !image {
+				return hosttypes.PriceData{}, errors.New(i18n.T(c, i18n.MsgRelaySpecialPriceNeedsImageRequest))
+			}
+		}
+		price, err := modelPriceHelperTiered(c, info, billingModelName, promptTokens, groupRatioInfo, rule.BillingExpression())
+		if err == nil && rule.Price == 0 && !operation_setting.GetQuotaSetting().EnableFreeModelPreConsume {
+			price.FreeModel = true
+			info.PriceData = price
+		}
+		return price, err
+	}
 
 	// Check if this model uses tiered_expr billing
 	if billing_setting.GetBillingMode(billingModelName) == billing_setting.BillingModeTieredExpr {
-		return modelPriceHelperTiered(c, info, billingModelName, promptTokens, groupRatioInfo)
+		exprStr, ok := billing_setting.GetBillingExpr(billingModelName)
+		if !ok {
+			return hosttypes.PriceData{}, fmt.Errorf("model %s is configured as tiered_expr but has no billing expression", billingModelName)
+		}
+		return modelPriceHelperTiered(c, info, billingModelName, promptTokens, groupRatioInfo, exprStr)
 	}
 
 	var preConsumedQuota int
@@ -228,6 +249,12 @@ func ModelPriceHelperPerCall(c *gin.Context, info *relaycommon.RelayInfo) (hostt
 	billingModelName := info.GetBillingModelName()
 
 	modelPrice, success := ratio_setting.GetModelPrice(billingModelName, true)
+	if rule, matched := setting.RequestGroupSettings(c).ResolveSpecialPricing(info.UserGroup, info.GetOriginModelName()); matched {
+		if rule.BillingUnit != "request" {
+			return hosttypes.PriceData{}, errors.New(i18n.T(c, i18n.MsgRelaySpecialPriceNeedsImageMeter))
+		}
+		modelPrice, success = rule.Price, true
+	}
 	usePrice := success
 	var modelRatio float64
 
@@ -355,11 +382,7 @@ func resolveBillingModelName(origin string) string {
 	return matched
 }
 
-func modelPriceHelperTiered(c *gin.Context, info *relaycommon.RelayInfo, billingModelName string, promptTokens int, groupRatioInfo hosttypes.GroupRatioInfo) (hosttypes.PriceData, error) {
-	exprStr, ok := billing_setting.GetBillingExpr(billingModelName)
-	if !ok {
-		return hosttypes.PriceData{}, fmt.Errorf("model %s is configured as tiered_expr but has no billing expression", billingModelName)
-	}
+func modelPriceHelperTiered(c *gin.Context, info *relaycommon.RelayInfo, billingModelName string, promptTokens int, groupRatioInfo hosttypes.GroupRatioInfo, exprStr string) (hosttypes.PriceData, error) {
 	exprHash := billingexpr.ExprHashString(exprStr)
 	usedVars := billingexpr.UsedVarsByHash(exprStr, exprHash)
 	if usedVars["u"] {

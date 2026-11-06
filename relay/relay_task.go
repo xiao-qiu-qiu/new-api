@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
@@ -22,8 +24,11 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/types"
 	"github.com/gin-gonic/gin"
 )
@@ -256,13 +261,45 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 	pluginKey := c.GetString("task_plugin_key")
 	pinnedValue, _ := c.Get(jsplugin.ContextKeyPinnedPlugin)
 	pinnedPlugin, _ := pinnedValue.(jsplugin.PinnedPlugin)
+	if pinnedPlugin.Plugin == nil {
+		if value, ok := c.Get(jsplugin.ContextKeyPinnedEndpoint); ok {
+			if endpoint, ok := value.(jsplugin.PinnedEndpoint); ok {
+				pinnedPlugin = jsplugin.PinnedPlugin{Generation: endpoint.Generation, Plugin: endpoint.Plugin}
+			}
+		}
+	}
+	if pinnedPlugin.Plugin == nil {
+		if value, ok := c.Get(jsplugin.ContextKeyPinnedRoute); ok {
+			if route, ok := value.(jsplugin.PinnedRoute); ok {
+				pinnedPlugin = jsplugin.PinnedPlugin{Generation: route.Generation, Plugin: route.Plugin}
+			}
+		}
+	}
 	if pinnedPlugin.Plugin != nil {
 		pluginKey = pinnedPlugin.Plugin.Meta.Key
 	}
 	exprStr, exists := billing_setting.ResolveTaskBillingExpr(pluginKey, modelName, info.UpstreamModelName)
+	specialRule, specialPricing := setting.RequestGroupSettings(c).ResolveSpecialPricing(info.UserGroup, info.GetOriginModelName())
+	specialPerRequest := specialPricing && specialRule.BillingUnit == "request"
+	if specialPricing {
+		price := strconv.FormatFloat(specialRule.Price, 'g', -1, 64)
+		exprStr = `tier("special", ` + price + `)`
+		if !specialPerRequest {
+			if pinnedPlugin.Plugin == nil {
+				return nil, service.TaskErrorWrapperLocal(errors.New(i18n.T(c, i18n.MsgRelaySpecialPriceNeedsImageMeter)), "model_price_error", http.StatusBadRequest)
+			}
+			schema, _ := pinnedPlugin.Plugin.Meta.UsageForModels(info.UpstreamModelName, modelName)
+			meter, declared := schema["image_count"]
+			if !declared || meter.Type != "number" || meter.Unit != "count" {
+				return nil, service.TaskErrorWrapperLocal(errors.New(i18n.T(c, i18n.MsgRelaySpecialPriceNeedsImageMeter)), "model_price_error", http.StatusBadRequest)
+			}
+			exprStr = `tier("special", u("image_count") * ` + price + `)`
+		}
+		exists = true
+	}
 	useTiered := exists || billing_setting.GetBillingMode(modelName) == billing_setting.BillingModeTieredExpr
 	info.BillingModelName = modelName
-	if useTiered && info.UpstreamModelName != "" && info.UpstreamModelName != modelName {
+	if useTiered && !specialPricing && info.UpstreamModelName != "" && info.UpstreamModelName != modelName {
 		_, originOverride := billing_setting.GetPluginBillingExpr(pluginKey, modelName)
 		_, mappedOverride := billing_setting.GetPluginBillingExpr(pluginKey, info.UpstreamModelName)
 		if !originOverride && (mappedOverride || billing_setting.GetBillingMode(modelName) != billing_setting.BillingModeTieredExpr) {
@@ -274,7 +311,7 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		if billingexpr.UsesFixedPricing(exprStr) {
 			return nil, service.TaskErrorWrapper(fmt.Errorf("fixed pricing is not supported for task usage expressions"), "model_price_error", http.StatusBadRequest, common.UpstreamAddresses(c)...)
 		}
-		if !exists || !supported {
+		if !exists || (!supported && !specialPerRequest) {
 			return nil, service.TaskErrorWrapper(fmt.Errorf("task model %s has no usage expression or meter", modelName), "model_price_error", http.StatusBadRequest, common.UpstreamAddresses(c)...)
 		}
 		sharedModel := pinnedPlugin.Generation.SharedModel(modelName) || pinnedPlugin.Generation.SharedModel(info.UpstreamModelName)
@@ -285,13 +322,22 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 			}
 		}
 		var facts map[string]any
-		if validatedProvider, ok := adaptor.(channel.TaskValidatedUsageFactsProvider); ok {
+		if specialPerRequest {
+			// A request price needs no meter, including on legacy task plugins.
+			facts = nil
+		} else if validatedProvider, ok := adaptor.(channel.TaskValidatedUsageFactsProvider); ok {
 			facts, err = validatedProvider.ExtractUsageFactsValidated(c, info)
 			if err != nil {
 				return nil, service.TaskErrorWrapperLocal(err, "plugin_usage_invalid", http.StatusBadRequest)
 			}
 		} else {
 			facts = provider.ExtractUsageFacts(c, info)
+		}
+		if specialPricing && !specialPerRequest {
+			count, ok := facts["image_count"].(float64)
+			if !ok || math.IsNaN(count) || count < 1 || count > float64(kitdto.MaxImageN) || math.Trunc(count) != count {
+				return nil, service.TaskErrorWrapperLocal(errors.New(i18n.T(c, i18n.MsgRelaySpecialPriceInvalidImageCount, map[string]any{"Max": kitdto.MaxImageN})), "plugin_usage_invalid", http.StatusBadRequest)
+			}
 		}
 		cost, trace, runErr := billingexpr.RunExprWithRequest(exprStr, billingexpr.TokenParams{}, billingexpr.RequestInput{Usage: facts})
 		if runErr != nil || cost < 0 {
@@ -304,7 +350,13 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		quota, clamp := common.QuotaRoundChecked(cost * common.QuotaPerUnit * groupRatioInfo.GroupRatio)
 		noteTaskQuotaClamp(info, clamp)
 		priceData = types.PriceData{Quota: quota, QuotaToPreConsume: quota, GroupRatioInfo: groupRatioInfo}
+		if specialPricing && specialRule.Price == 0 && !operation_setting.GetQuotaSetting().EnableFreeModelPreConsume {
+			priceData.FreeModel = true
+		}
 		info.TieredBillingSnapshot = &billingexpr.BillingSnapshot{BillingMode: billing_setting.BillingModeTieredExpr, ModelName: info.GetBillingModelName(), ExprString: exprStr, ExprHash: billingexpr.ExprHashString(exprStr), GroupRatio: groupRatioInfo.GroupRatio, EstimatedQuotaBeforeGroup: cost * common.QuotaPerUnit, EstimatedQuotaAfterGroup: quota, EstimatedTier: trace.MatchedTier, QuotaPerUnit: common.QuotaPerUnit, ExprVersion: billingexpr.ExprVersion(exprStr), TaskUsageBilling: true, UsageFacts: facts}
+		if specialPricing && !specialPerRequest {
+			info.TieredBillingSnapshot.EstimatedImageCount = common.GetPointer(common.QuotaRound(facts["image_count"].(float64)))
+		}
 	} else {
 		priceData, err = helper.ModelPriceHelperPerCall(c, info)
 		if err != nil {

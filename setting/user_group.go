@@ -50,7 +50,7 @@ func ParseUserGroups(value string) (map[string]string, error) {
 		return nil, common.NewMessage("User groups must map user group names to default ratio groups")
 	}
 	for name, route := range groups {
-		if name == "" || name == "auto" || name != strings.TrimSpace(name) || utf8.RuneCountInString(name) > 64 ||
+		if name == "" || name == "auto" || name == "*" || name != strings.TrimSpace(name) || utf8.RuneCountInString(name) > 64 ||
 			route == "" || route == "auto" || route != strings.TrimSpace(route) {
 			return nil, common.NewMessage("User groups must map user group names to default ratio groups")
 		}

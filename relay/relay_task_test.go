@@ -20,6 +20,7 @@ import (
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	kittypes "github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/ratio_setting"
@@ -792,6 +793,246 @@ export function extractUsage() { return {seconds:2}; }
 			}
 			require.NotNil(t, info.TieredBillingSnapshot)
 			assert.Equal(t, tc.expressions["retry-b::declared-model"], info.TieredBillingSnapshot.ExprString)
+		})
+	}
+}
+
+func TestRelayTaskSpecialPricingReservationAndFrozenCompletion(t *testing.T) {
+	service.InitHttpClient()
+	const source = `
+export const meta = {apiVersion:1,key:"special-images",name:"Special Images",version:"1.0.0",author:{name:"Test"},models:["gpt-image-2"],fetchMode:"per_task",usageSchema:{image_count:{type:"number",unit:"count",description:"Image generation unit price"}}};
+export function buildSubmitRequest(ctx) { return {url:ctx.baseUrl+"/submit",method:"POST",body:{model:ctx.model},action:"text_to_image"}; }
+export function parseSubmitResponse(ctx, response) { return {taskId:response.body.id,taskData:response.body,immediate:response.body.immediate ? {status:"SUCCESS"} : undefined}; }
+export function buildQueryRequest(ctx) { return {url:ctx.baseUrl+"/query"}; }
+export function parseTaskResult() { return {status:"SUCCESS"}; }
+export function extractUsage() { return {image_count:2,seconds:10,quality:4}; }
+export function extractUsageOnSubmit() { return {image_count:99,quality:9}; }
+export function extractUsageOnComplete(ctx, result, data) { return {image_count:data.count}; }
+`
+	for _, tc := range []struct {
+		name, userGroup, group, unit, pin  string
+		price                              float64
+		actual, wantReserved, wantFinal    int
+		immediate, legacy, alias           bool
+		zeroBalance, preConsume, noSpecial bool
+		wantCode                           string
+	}{
+		{name: "VIP remains free", userGroup: "vip", group: "premium", unit: "image", pin: "plugin", actual: 3, immediate: true},
+		{name: "zero balance VIP image skips reservation", userGroup: "vip", group: "premium", unit: "image", pin: "plugin", actual: 3, immediate: true, zeroBalance: true},
+		{name: "zero balance VIP request skips reservation", userGroup: "vip", group: "premium", unit: "request", pin: "plugin", actual: 3, immediate: true, zeroBalance: true},
+		{name: "zero balance still fails when free pre-consume enabled", userGroup: "vip", group: "premium", unit: "image", pin: "plugin", actual: 3, immediate: true, zeroBalance: true, preConsume: true, wantCode: "insufficient_user_quota"},
+		{name: "ordinary zero-price task keeps reservation semantics", userGroup: "vip", group: "premium", unit: "request", pin: "plugin", actual: 3, immediate: true, zeroBalance: true, noSpecial: true, wantCode: "insufficient_user_quota"},
+		{name: "ordinary images use final count", userGroup: "ordinary", group: "premium", unit: "image", pin: "endpoint", price: 0.03, actual: 3, wantReserved: 30000, wantFinal: 45000, immediate: true},
+		{name: "free routing group still uses special price", userGroup: "ordinary", group: "free", unit: "image", pin: "route", price: 0.03, actual: 1, wantReserved: 30000, wantFinal: 15000, immediate: true},
+		{name: "async completion freezes original rule", userGroup: "ordinary", group: "default", unit: "image", pin: "plugin", price: 0.03, actual: 4, wantReserved: 30000, wantFinal: 60000},
+		{name: "channel alias matches original model", userGroup: "ordinary", group: "premium", unit: "image", pin: "plugin", price: 0.03, actual: 3, wantReserved: 30000, wantFinal: 45000, alias: true},
+		{name: "legacy request price needs no usage hook", userGroup: "ordinary", group: "premium", unit: "request", pin: "plugin", price: 0.03, actual: 4, wantReserved: 15000, wantFinal: 15000, legacy: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			saveBillingConfig(t)
+			savedRules := setting.SpecialPricingRules2JSONString()
+			t.Cleanup(func() { require.NoError(t, setting.UpdateSpecialPricingRulesByJSONString(savedRules)) })
+			rules, err := common.Marshal([]setting.SpecialPricingRule{
+				{UserGroup: "vip", Model: "gpt-image-*", Price: 0, BillingUnit: tc.unit},
+				{UserGroup: "*", Model: "gpt-image-*", Price: tc.price, BillingUnit: tc.unit},
+			})
+			require.NoError(t, err)
+			require.NoError(t, setting.UpdateSpecialPricingRulesByJSONString(string(rules)))
+			if tc.noSpecial {
+				require.NoError(t, setting.UpdateSpecialPricingRulesByJSONString(`[]`))
+			}
+			require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+				"group_ratio_setting.group_ratio":             `{"default":4,"premium":8,"free":0}`,
+				"billing_setting.billing_mode":                `{"gpt-image-2":"tiered_expr"}`,
+				"billing_setting.billing_expr":                `{"gpt-image-2":"tier(\"wrong-model-price\", 5)"}`,
+				billing_setting.PluginBillingExprOption:       `{"special-images::gpt-image-2":"tier(\"wrong-provider-price\", 9)"}`,
+				"quota_setting.enable_free_model_pre_consume": strconv.FormatBool(tc.preConsume),
+			}))
+			if tc.noSpecial {
+				require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+					billing_setting.PluginBillingExprOption: `{"special-images::gpt-image-2":"tier(\"ordinary-free\", 0)"}`,
+				}))
+			}
+			billing := &imageReservation{limit: 1 << 30}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				body, marshalErr := common.Marshal(map[string]any{"id": "special-job", "count": tc.actual, "immediate": tc.immediate})
+				if marshalErr != nil {
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				_, _ = w.Write(body)
+			}))
+			defer server.Close()
+			modelName, mapping := "gpt-image-2", ""
+			if tc.alias {
+				modelName, mapping = "gpt-image-alias", `{"gpt-image-alias":"gpt-image-2"}`
+			}
+			c, info := newTaskSubmitContext(t, modelName, mapping)
+			common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, server.URL)
+			c.Set("auto_group", tc.group)
+			info.OriginModelName, info.UserGroup, info.UsingGroup = modelName, tc.userGroup, "default"
+			info.Billing = billing
+			var zeroBalanceDB *gorm.DB
+			if tc.zeroBalance {
+				zeroBalanceDB = setupRelayChannelDB(t)
+				require.NoError(t, zeroBalanceDB.AutoMigrate(&model.User{}))
+				require.NoError(t, zeroBalanceDB.Create(&model.User{Id: 1, Username: "zero-balance-vip", Quota: 0}).Error)
+				previousRedis := common.RedisEnabled
+				common.RedisEnabled = false
+				t.Cleanup(func() { common.RedisEnabled = previousRedis })
+				info.UserId, info.UserQuota, info.Billing = 1, 0, nil
+				info.UserSetting.BillingPreference = "wallet_only"
+			}
+			setting.PinGroupSettings(c)
+			pluginSource := source
+			if tc.legacy {
+				pluginSource = strings.ReplaceAll(billingFallbackPlugin, "declared-model", "gpt-image-2")
+			}
+			registry := pluginruntime.NewRegistry()
+			plugin, err := registry.Register(pluginSource, pluginruntime.Options{})
+			require.NoError(t, err)
+			switch tc.pin {
+			case "endpoint":
+				c.Set(pluginruntime.ContextKeyPinnedEndpoint, pluginruntime.PinnedEndpoint{Generation: registry.Generation(), Plugin: plugin})
+			case "route":
+				c.Set(pluginruntime.ContextKeyPinnedRoute, pluginruntime.PinnedRoute{Generation: registry.Generation(), Plugin: plugin})
+			default:
+				c.Set(pluginruntime.ContextKeyPinnedPlugin, pluginruntime.PinnedPlugin{Generation: registry.Generation(), Plugin: plugin})
+			}
+			result, taskErr := RelayTaskSubmit(c, info)
+			if tc.wantCode != "" {
+				require.NotNil(t, taskErr)
+				assert.Equal(t, tc.wantCode, taskErr.Code)
+				assert.Equal(t, http.StatusForbidden, taskErr.StatusCode)
+				assert.False(t, info.PriceData.FreeModel)
+				assert.Nil(t, result)
+				return
+			}
+			require.Nil(t, taskErr, "submission error: %+v", taskErr)
+			require.NotNil(t, result)
+			if tc.zeroBalance {
+				assert.True(t, info.PriceData.FreeModel)
+				assert.False(t, info.ForcePreConsume)
+				assert.Nil(t, info.Billing, "zero-balance VIP must reach success without opening a billing session")
+				require.NotNil(t, result.Immediate)
+				assert.Equal(t, model.TaskStatusSuccess, result.Immediate.Status)
+				require.NoError(t, service.SettleBilling(c, info, result.Quota), "successful free completion must settle without funding")
+				var user model.User
+				require.NoError(t, zeroBalanceDB.First(&user, info.UserId).Error)
+				assert.Zero(t, user.Quota)
+			}
+			assert.Equal(t, tc.wantReserved, billing.held)
+			assert.Equal(t, tc.group, info.UsingGroup)
+			assert.Equal(t, 1.0, info.PriceData.GroupRatioInfo.GroupRatio)
+			assert.True(t, info.PriceData.GroupRatioInfo.IgnoreGroupRatio)
+			assert.Empty(t, info.PriceData.OtherRatios(), "dimensions and legacy submission ratios must not multiply the final price")
+			snap := info.TieredBillingSnapshot
+			require.NotNil(t, snap)
+			assert.True(t, snap.TaskUsageBilling)
+			if tc.unit == "image" {
+				require.NotNil(t, snap.EstimatedImageCount)
+				assert.Equal(t, 2, *snap.EstimatedImageCount)
+			} else {
+				assert.Nil(t, snap.EstimatedImageCount)
+			}
+			assert.Equal(t, modelName, snap.ModelName)
+			assert.Equal(t, "special", snap.EstimatedTier)
+			wantExpr := `tier("special", ` + strconv.FormatFloat(tc.price, 'g', -1, 64) + `)`
+			if tc.unit == "image" {
+				wantExpr = `tier("special", u("image_count") * ` + strconv.FormatFloat(tc.price, 'g', -1, 64) + `)`
+			}
+			assert.Equal(t, wantExpr, snap.ExprString)
+			if tc.immediate {
+				assert.Equal(t, tc.wantFinal, result.Quota)
+			} else {
+				assert.Equal(t, tc.wantReserved, result.Quota)
+			}
+
+			// Exercise the persisted snapshot format used by background polling.
+			encoded, err := common.Marshal(model.TaskBillingContext{TieredSnapshot: snap})
+			require.NoError(t, err)
+			var persisted model.TaskBillingContext
+			require.NoError(t, common.Unmarshal(encoded, &persisted))
+			require.NoError(t, setting.UpdateSpecialPricingRulesByJSONString(`[{"user_group":"*","model":"gpt-image-*","price":9,"billing_unit":"request"}]`))
+			require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"group_ratio_setting.group_ratio": `{"default":99,"premium":99,"free":99}`}))
+			settlement, _, err := service.EvaluateTaskCompletionUsage(persisted.TieredSnapshot, map[string]any{"image_count": float64(tc.actual)})
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantFinal, settlement.ActualQuotaAfterGroup)
+			assert.Equal(t, wantExpr, persisted.TieredSnapshot.ExprString)
+			assert.Equal(t, 1.0, persisted.TieredSnapshot.GroupRatio)
+			if tc.unit == "image" {
+				for _, invalid := range []float64{0, 0.5, 129} {
+					retained, _, err := service.EvaluateTaskCompletionUsage(persisted.TieredSnapshot, map[string]any{"image_count": invalid})
+					require.NoError(t, err)
+					assert.Equal(t, result.Quota, retained.ActualQuotaAfterGroup, "invalid count %v must retain the frozen image quantity", invalid)
+				}
+			}
+		})
+	}
+}
+
+func TestTaskImageCompletionFallbackKeepsOtherTaskMeterSemantics(t *testing.T) {
+	for _, tc := range []struct {
+		name, field string
+		actual      float64
+	}{
+		{name: "ordinary task image_count may be zero", field: "image_count"},
+		{name: "ordinary task meter keeps fractional usage", field: "image_count", actual: 0.5},
+		{name: "seconds may settle to zero", field: "seconds"},
+		{name: "tokens may settle to zero", field: "tokens"},
+		{name: "credits may settle to zero", field: "credits"},
+		{name: "other counts may settle to zero", field: "clips"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			expression := `tier("ordinary", u("` + tc.field + `"))`
+			snap := &billingexpr.BillingSnapshot{
+				ExprString: expression, ExprHash: billingexpr.ExprHashString(expression),
+				TaskUsageBilling: true, GroupRatio: 1, QuotaPerUnit: 2, ExprVersion: 1,
+				UsageFacts: map[string]any{tc.field: float64(2)},
+			}
+			result, facts, err := service.EvaluateTaskCompletionUsage(snap, map[string]any{tc.field: tc.actual})
+			require.NoError(t, err)
+			assert.Equal(t, tc.actual, facts[tc.field])
+			assert.Equal(t, common.QuotaRound(2*tc.actual), result.ActualQuotaAfterGroup)
+			assert.Equal(t, float64(2), snap.UsageFacts[tc.field], "completion must not mutate frozen submission facts")
+		})
+	}
+}
+
+func TestRelayTaskSpecialImagePricingRequiresSelectedModelMeter(t *testing.T) {
+	for _, tc := range []struct{ name, schema, usage, wantCode string }{
+		{name: "missing image meter", schema: `{seconds:{type:"number",unit:"second"}}`, usage: `{seconds:2}`, wantCode: "model_price_error"},
+		{name: "seconds are not images", schema: `{image_count:{type:"number",unit:"second"}}`, usage: `{image_count:2}`, wantCode: "model_price_error"},
+		{name: "tokens are not images", schema: `{image_count:{type:"number",unit:"token"}}`, usage: `{image_count:2}`, wantCode: "model_price_error"},
+		{name: "selected profile replaces default meter", schema: `{image_count:{type:"number",unit:"count"}},usageProfiles:[{models:["declared-model"],schema:{seconds:{type:"number",unit:"second"}}}]`, usage: `{image_count:2}`, wantCode: "model_price_error"},
+		{name: "no usage hook", schema: `{image_count:{type:"number",unit:"count"}}`, wantCode: "plugin_usage_invalid"},
+		{name: "missing count fact", schema: `{image_count:{type:"number",unit:"count"}}`, usage: `{seconds:2}`, wantCode: "plugin_usage_invalid"},
+		{name: "fractional count", schema: `{image_count:{type:"number",unit:"count"}}`, usage: `{image_count:1.5}`, wantCode: "plugin_usage_invalid"},
+		{name: "zero count", schema: `{image_count:{type:"number",unit:"count"}}`, usage: `{image_count:0}`, wantCode: "plugin_usage_invalid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			savedRules := setting.SpecialPricingRules2JSONString()
+			t.Cleanup(func() { require.NoError(t, setting.UpdateSpecialPricingRulesByJSONString(savedRules)) })
+			require.NoError(t, setting.UpdateSpecialPricingRulesByJSONString(`[{"user_group":"*","model":"declared-model","price":0,"billing_unit":"image"}]`))
+			source := strings.Replace(billingFallbackPlugin, `fetchMode:"per_task"`, `fetchMode:"per_task",usageSchema:`+tc.schema, 1)
+			if strings.Contains(tc.schema, `unit:"token"`) {
+				source = strings.Replace(source, `usageSchema:`, `usageExamples:[{label:"image token fixture",facts:{image_count:1}}],usageSchema:`, 1)
+			}
+			if tc.usage != "" {
+				source += `export function extractUsage(){return ` + tc.usage + `;}`
+			}
+			c, info := newTaskSubmitContext(t, "declared-model", "")
+			info.OriginModelName, info.UserGroup, info.UsingGroup = "declared-model", "vip", "default"
+			pinMappingOrderPlugin(t, c, source)
+			result, taskErr := RelayTaskSubmit(c, info)
+			require.NotNil(t, taskErr)
+			assert.Equal(t, tc.wantCode, taskErr.Code)
+			assert.Equal(t, http.StatusBadRequest, taskErr.StatusCode)
+			assert.Contains(t, taskErr.Message, "image_count")
+			assert.Nil(t, result)
+			assert.Nil(t, info.Billing, "an invalid meter must fail before reservation and upstream submission, even for VIP zero prices")
+			assert.Nil(t, info.TieredBillingSnapshot)
 		})
 	}
 }

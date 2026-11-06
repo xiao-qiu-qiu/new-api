@@ -45,6 +45,7 @@ func InitOptionMap() {
 	setting.GroupSettingsPublicationMutex.Lock()
 	defer setting.GroupSettingsPublicationMutex.Unlock()
 	setting.ResetUserGroups()
+	setting.ResetSpecialPricingRules()
 	common.OptionMapRWMutex.Lock()
 	common.OptionMap = make(map[string]string)
 
@@ -176,6 +177,7 @@ func InitOptionMap() {
 	common.OptionMap["GroupGroupRatio"] = ratio_setting.GroupGroupRatio2JSONString()
 	common.OptionMap["UserUsableGroups"] = setting.UserUsableGroups2JSONString()
 	common.OptionMap["UserGroups"] = setting.UserGroups2JSONString()
+	common.OptionMap["SpecialPricingRules"] = setting.SpecialPricingRules2JSONString()
 	common.OptionMap["CompletionRatio"] = ratio_setting.CompletionRatio2JSONString()
 	common.OptionMap["ImageRatio"] = ratio_setting.ImageRatio2JSONString()
 	common.OptionMap["AudioRatio"] = ratio_setting.AudioRatio2JSONString()
@@ -242,6 +244,9 @@ func applyOptionsFromDatabaseLocked(options []*Option) {
 	persistedKeys := make(map[string]bool, len(options))
 	for _, option := range options {
 		persistedKeys[option.Key] = true
+	}
+	if !persistedKeys["SpecialPricingRules"] {
+		_ = applyGroupSettingOption("SpecialPricingRules", "[]")
 	}
 	passkeyOptions := make(map[string]string)
 	for _, option := range options {
@@ -731,6 +736,8 @@ func updateOptionMap(key string, value string) (err error) {
 		err = setting.UpdateUserUsableGroupsByJSONString(value)
 	case "UserGroups":
 		err = setting.UpdateUserGroupsByJSONString(value)
+	case "SpecialPricingRules":
+		err = setting.UpdateSpecialPricingRulesByJSONString(value)
 	case "CompletionRatio":
 		err = ratio_setting.UpdateCompletionRatioByJSONString(value)
 	case "ModelPrice":

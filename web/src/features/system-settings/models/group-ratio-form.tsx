@@ -68,6 +68,7 @@ type GroupFormValues = {
   TopupGroupRatio: string
   UserUsableGroups: string
   GroupGroupRatio: string
+  SpecialPricingRules: string
   AutoGroups: string
   MaxTokenAutoGroups: number
   DefaultUseAutoGroup: boolean
@@ -90,6 +91,7 @@ const fieldSections: Record<keyof GroupFormValues, GroupSettingsSection> = {
   GroupRatio: 'pricing',
   UserUsableGroups: 'pricing',
   GroupGroupRatio: 'overrides',
+  SpecialPricingRules: 'special-pricing',
   GroupSpecialUsableGroup: 'visibility',
   AutoGroups: 'auto',
   MaxTokenAutoGroups: 'auto',
@@ -111,6 +113,7 @@ export const GroupRatioForm = memo(function GroupRatioForm(
     { name: 'UserGroups', label: t('User group default multiplier groups') },
     { name: 'TopupGroupRatio', label: t('Top-up group ratios') },
     { name: 'GroupGroupRatio', label: t('Special ratio rules') },
+    { name: 'SpecialPricingRules', label: t('Special pricing rules') },
     { name: 'GroupSpecialUsableGroup', label: t('Special usable group rules') },
     { name: 'AutoGroups', label: t('Auto group order') },
   ]
@@ -215,6 +218,7 @@ export const GroupRatioForm = memo(function GroupRatioForm(
             topupGroupRatio={values.TopupGroupRatio ?? '{}'}
             userUsableGroups={values.UserUsableGroups ?? '{}'}
             groupGroupRatio={values.GroupGroupRatio ?? '{}'}
+            specialPricingRules={values.SpecialPricingRules ?? '[]'}
             autoGroups={values.AutoGroups ?? '[]'}
             groupSpecialUsableGroup={values.GroupSpecialUsableGroup ?? '{}'}
             maxTokenAutoGroupsField={maxTokenAutoGroupsField}

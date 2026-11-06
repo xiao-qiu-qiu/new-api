@@ -13,6 +13,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 	"github.com/QuantumNous/new-api/setting/config"
 	"github.com/QuantumNous/new-api/setting/model_setting"
@@ -894,3 +895,98 @@ func (s *priceTestReservation) GetPreConsumedQuota() int { return s.held }
 func (s *priceTestReservation) Reserve(quota int) error  { s.held = max(s.held, quota); return nil }
 
 func (s *priceTestReservation) ReserveBeforeSubmit(quota int) error { return s.Reserve(quota) }
+
+func TestSpecialPricingReservesAndSettlesAcrossGroups(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	previousConfig := config.GlobalConfig.ExportAllConfigs()
+	previousRules := setting.SpecialPricingRules2JSONString()
+	previousPrices := ratio_setting.ModelPrice2JSONString()
+	t.Cleanup(func() {
+		require.NoError(t, config.GlobalConfig.LoadFromDB(previousConfig))
+		require.NoError(t, setting.UpdateSpecialPricingRulesByJSONString(previousRules))
+		require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(previousPrices))
+	})
+	require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{
+		"group_ratio_setting.group_ratio":             `{"standard":3,"premium":7,"free":0}`,
+		"group_ratio_setting.group_group_ratio":       `{"vip":{"standard":0,"premium":0.5}}`,
+		"billing_setting.billing_mode":                `{"gpt-image-special":"tiered_expr"}`,
+		"billing_setting.billing_expr":                `{"gpt-image-special":"tier(\"original\", p * 20 + c * 40)"}`,
+		"quota_setting.enable_free_model_pre_consume": "false",
+	}))
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"mj_imagine":0.1}`))
+	const rules = `[{"user_group":"*","model":"gpt-image-*","price":0.03,"billing_unit":"image"},{"user_group":"vip","model":"gpt-image-*","price":0,"billing_unit":"image"},{"user_group":"*","model":"special-chat","price":0.02,"billing_unit":"request"},{"user_group":"*","model":"mj_imagine","price":0.03,"billing_unit":"request"},{"user_group":"vip","model":"mj_imagine","price":0,"billing_unit":"request"}]`
+	for _, tc := range []struct {
+		name, userGroup, group string
+		price                  float64
+	}{
+		{"VIP stays free", "vip", "premium", 0},
+		{"fallback ignores paid multiplier", "default", "standard", 0.03},
+		{"fallback overrides free multiplier", "default", "free", 0.03},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, setting.UpdateSpecialPricingRulesByJSONString(rules))
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+			setting.PinGroupSettings(ctx)
+			count := uint(3)
+			info := &relaycommon.RelayInfo{OriginModelName: "gpt-image-special", UserGroup: tc.userGroup, UsingGroup: tc.group, Request: &dto.ImageRequest{Model: "gpt-image-special", N: &count}, BillingRequestInput: &billingexpr.RequestInput{}}
+			price, err := ModelPriceHelper(ctx, info, 1000, &types.TokenCountMeta{ImagePriceRatio: 4, BillingRatios: map[string]float64{"quality": 5}})
+			require.NoError(t, err)
+			assert.Equal(t, common.QuotaRound(tc.price*3*common.QuotaPerUnit), price.QuotaToPreConsume)
+			assert.Equal(t, tc.price == 0, price.FreeModel)
+			assert.True(t, price.GroupRatioInfo.IgnoreGroupRatio)
+			assert.Equal(t, 1.0, price.GroupRatioInfo.GroupRatio)
+			require.NotNil(t, info.TieredBillingSnapshot)
+			require.NotNil(t, info.TieredBillingSnapshot.EstimatedFixedPrice)
+			assert.Equal(t, tc.price, *info.TieredBillingSnapshot.EstimatedFixedPrice)
+			if tc.price == 0 {
+				require.Nil(t, service.PrepareTieredBillingForSelectedGroup(ctx, info))
+				assert.True(t, info.PriceData.FreeModel)
+				assert.Nil(t, info.Billing, "a fixed free rule must not require wallet credit when free-model pre-consume is disabled")
+			}
+
+			// Both configuration and selected routing group can change while a
+			// request is running. Its frozen rule still determines the amount.
+			require.NoError(t, setting.UpdateSpecialPricingRulesByJSONString(`[]`))
+			ctx.Set("auto_group", "premium")
+			info.PriceData.GroupRatioInfo = HandleGroupRatio(ctx, info)
+			reservation := &priceTestReservation{held: price.QuotaToPreConsume}
+			info.Billing = reservation
+			require.Nil(t, service.PrepareImageBillingForRequest(ctx, info, 4))
+			assert.Equal(t, common.QuotaRound(tc.price*4*common.QuotaPerUnit), reservation.held)
+			info.UpdateImageCount(2)
+			ok, quota, result := service.TryTieredSettle(info, billingexpr.TokenParams{P: 99999, C: 99999})
+			require.True(t, ok)
+			require.NotNil(t, result)
+			assert.Equal(t, common.QuotaRound(tc.price*2*common.QuotaPerUnit), quota)
+		})
+	}
+
+	require.NoError(t, setting.UpdateSpecialPricingRulesByJSONString(rules))
+	ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	info := &relaycommon.RelayInfo{OriginModelName: "special-chat", UserGroup: "default", UsingGroup: "premium", BillingRequestInput: &billingexpr.RequestInput{}}
+	price, err := ModelPriceHelper(ctx, info, 12345, &types.TokenCountMeta{})
+	require.NoError(t, err)
+	assert.Equal(t, 10000, price.QuotaToPreConsume)
+	ok, quota, _ := service.TryTieredSettle(info, billingexpr.TokenParams{P: 99999, C: 99999})
+	require.True(t, ok)
+	assert.Equal(t, 10000, quota)
+	info = &relaycommon.RelayInfo{OriginModelName: "gpt-image-special", UserGroup: "default", UsingGroup: "standard", BillingRequestInput: &billingexpr.RequestInput{}}
+	_, err = ModelPriceHelper(ctx, info, 100, &types.TokenCountMeta{})
+	require.EqualError(t, err, i18n.T(ctx, i18n.MsgRelaySpecialPriceNeedsImageRequest))
+	_, err = ModelPriceHelperPerCall(ctx, info)
+	require.EqualError(t, err, i18n.T(ctx, i18n.MsgRelaySpecialPriceNeedsImageMeter))
+	for _, tc := range []struct {
+		userGroup string
+		price     float64
+	}{{"vip", 0}, {"default", 0.03}} {
+		info = &relaycommon.RelayInfo{OriginModelName: "mj_imagine", UserGroup: tc.userGroup, UsingGroup: "premium"}
+		price, err = ModelPriceHelperPerCall(ctx, info)
+		require.NoError(t, err)
+		assert.Equal(t, tc.price, price.ModelPrice)
+		assert.Equal(t, common.QuotaFromFloat(tc.price*common.QuotaPerUnit), price.Quota)
+		assert.Equal(t, 1.0, price.GroupRatioInfo.GroupRatio)
+		assert.Equal(t, tc.price == 0, price.FreeModel)
+	}
+}

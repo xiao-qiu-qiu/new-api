@@ -46,6 +46,11 @@ import { SettingsSection } from '../components/settings-section'
 import { useUpdateOption } from '../hooks/use-update-option'
 import { positiveIntegerSchema } from '../utils/numeric-field'
 import { GroupRatioForm } from './group-ratio-form'
+import {
+  formatGroupSettings,
+  normalizeGroupSettings,
+  type GroupSettingsDefaults,
+} from './group-settings-codec'
 import { ModelRatioForm } from './model-ratio-form'
 import { ToolPriceSettings } from './tool-price-settings'
 import { UpstreamRatioSync } from './upstream-ratio-sync'
@@ -158,6 +163,7 @@ const createGroupSchema = (t: Translate) =>
     TopupGroupRatio: createGroupJsonField(t, 'TopupGroupRatio'),
     UserUsableGroups: createGroupJsonField(t, 'UserUsableGroups'),
     GroupGroupRatio: createGroupJsonField(t, 'GroupGroupRatio'),
+    SpecialPricingRules: createGroupJsonField(t, 'SpecialPricingRules'),
     GroupSpecialUsableGroup: createGroupJsonField(t, 'GroupSpecialUsableGroup'),
     AutoGroups: createGroupJsonField(t, 'AutoGroups'),
     MaxTokenAutoGroups: positiveIntegerSchema(t('Enter a positive integer')),
@@ -177,7 +183,7 @@ type RatioSettingsCardProps = {
   modelDefaults: Omit<ModelFormValues, 'IgnoreGroupRatio'> & {
     IgnoreGroupRatio?: string
   }
-  groupDefaults: Omit<GroupFormValues, 'UserGroups'> & { UserGroups?: string }
+  groupDefaults: GroupSettingsDefaults
   toolPricesDefault: string
   titleKey?: string
   visibleTabs?: RatioTabId[]
@@ -272,19 +278,7 @@ export function RatioSettingsCard({
     modelNormalizedDefaults.current
   )
 
-  const groupNormalizedDefaults = useRef({
-    UserGroups: normalizeJsonString(groupDefaults.UserGroups ?? '{}'),
-    GroupRatio: normalizeJsonString(groupDefaults.GroupRatio),
-    TopupGroupRatio: normalizeJsonString(groupDefaults.TopupGroupRatio),
-    UserUsableGroups: normalizeJsonString(groupDefaults.UserUsableGroups),
-    GroupGroupRatio: normalizeJsonString(groupDefaults.GroupGroupRatio),
-    AutoGroups: normalizeJsonString(groupDefaults.AutoGroups),
-    MaxTokenAutoGroups: groupDefaults.MaxTokenAutoGroups,
-    DefaultUseAutoGroup: groupDefaults.DefaultUseAutoGroup,
-    GroupSpecialUsableGroup: normalizeJsonString(
-      groupDefaults.GroupSpecialUsableGroup
-    ),
-  })
+  const groupNormalizedDefaults = useRef(normalizeGroupSettings(groupDefaults))
   const modelSchema = useMemo(() => createModelSchema(t), [t])
   const groupSchema = useMemo(() => createGroupSchema(t), [t])
 
@@ -313,18 +307,7 @@ export function RatioSettingsCard({
   const groupForm = useForm<GroupFormValues>({
     resolver: zodResolver(groupSchema),
     mode: 'onChange',
-    defaultValues: {
-      ...groupDefaults,
-      UserGroups: formatJsonForTextarea(groupDefaults.UserGroups ?? '{}'),
-      GroupRatio: formatJsonForTextarea(groupDefaults.GroupRatio),
-      TopupGroupRatio: formatJsonForTextarea(groupDefaults.TopupGroupRatio),
-      UserUsableGroups: formatJsonForTextarea(groupDefaults.UserUsableGroups),
-      GroupGroupRatio: formatJsonForTextarea(groupDefaults.GroupGroupRatio),
-      AutoGroups: formatJsonForTextarea(groupDefaults.AutoGroups),
-      GroupSpecialUsableGroup: formatJsonForTextarea(
-        groupDefaults.GroupSpecialUsableGroup
-      ),
-    },
+    defaultValues: formatGroupSettings(groupDefaults),
   })
 
   useEffect(() => {
@@ -368,32 +351,8 @@ export function RatioSettingsCard({
 
   useEffect(() => {
     if (groupForm.formState.isDirty) return
-    groupNormalizedDefaults.current = {
-      UserGroups: normalizeJsonString(groupDefaults.UserGroups ?? '{}'),
-      GroupRatio: normalizeJsonString(groupDefaults.GroupRatio),
-      TopupGroupRatio: normalizeJsonString(groupDefaults.TopupGroupRatio),
-      UserUsableGroups: normalizeJsonString(groupDefaults.UserUsableGroups),
-      GroupGroupRatio: normalizeJsonString(groupDefaults.GroupGroupRatio),
-      AutoGroups: normalizeJsonString(groupDefaults.AutoGroups),
-      MaxTokenAutoGroups: groupDefaults.MaxTokenAutoGroups,
-      DefaultUseAutoGroup: groupDefaults.DefaultUseAutoGroup,
-      GroupSpecialUsableGroup: normalizeJsonString(
-        groupDefaults.GroupSpecialUsableGroup
-      ),
-    }
-
-    groupForm.reset({
-      ...groupDefaults,
-      UserGroups: formatJsonForTextarea(groupDefaults.UserGroups ?? '{}'),
-      GroupRatio: formatJsonForTextarea(groupDefaults.GroupRatio),
-      TopupGroupRatio: formatJsonForTextarea(groupDefaults.TopupGroupRatio),
-      UserUsableGroups: formatJsonForTextarea(groupDefaults.UserUsableGroups),
-      GroupGroupRatio: formatJsonForTextarea(groupDefaults.GroupGroupRatio),
-      AutoGroups: formatJsonForTextarea(groupDefaults.AutoGroups),
-      GroupSpecialUsableGroup: formatJsonForTextarea(
-        groupDefaults.GroupSpecialUsableGroup
-      ),
-    })
+    groupNormalizedDefaults.current = normalizeGroupSettings(groupDefaults)
+    groupForm.reset(formatGroupSettings(groupDefaults))
   }, [groupDefaults, groupForm])
 
   const saveModelRatios = useCallback(
@@ -449,45 +408,10 @@ export function RatioSettingsCard({
 
   const saveGroupRatios = useCallback(
     async (values: GroupFormValues) => {
-      const normalized = {
-        UserGroups: normalizeJsonString(values.UserGroups),
-        GroupRatio: normalizeJsonString(values.GroupRatio),
-        TopupGroupRatio: normalizeJsonString(values.TopupGroupRatio),
-        UserUsableGroups: normalizeJsonString(values.UserUsableGroups),
-        GroupGroupRatio: normalizeJsonString(values.GroupGroupRatio),
-        AutoGroups: normalizeJsonString(values.AutoGroups),
-        MaxTokenAutoGroups: values.MaxTokenAutoGroups,
-        DefaultUseAutoGroup: values.DefaultUseAutoGroup,
-        GroupSpecialUsableGroup: normalizeJsonString(
-          values.GroupSpecialUsableGroup
-        ),
-      }
-
-      // Deleting an account group also removes its overrides in the same transaction,
-      // otherwise legacy registry discovery would recreate the removed group.
-      const previousGroups = z
-        .record(z.string(), z.string())
-        .parse(JSON.parse(groupNormalizedDefaults.current.UserGroups || '{}'))
-      const nextGroups = z
-        .record(z.string(), z.string())
-        .parse(JSON.parse(normalized.UserGroups || '{}'))
-      const removedGroups = Object.keys(previousGroups).filter(
-        (name) => !Object.hasOwn(nextGroups, name)
+      const normalized = normalizeGroupSettings(
+        values,
+        groupNormalizedDefaults.current.UserGroups
       )
-      if (removedGroups.length) {
-        for (const field of [
-          'TopupGroupRatio',
-          'GroupGroupRatio',
-          'GroupSpecialUsableGroup',
-        ] as const) {
-          const entries = JSON.parse(normalized[field] || '{}') as Record<
-            string,
-            unknown
-          >
-          for (const name of removedGroups) delete entries[name]
-          normalized[field] = JSON.stringify(entries)
-        }
-      }
 
       // Map form field names to API keys (most are 1:1, except GroupSpecialUsableGroup)
       const apiKeyMap: Record<string, string> = {
@@ -593,12 +517,7 @@ export function RatioSettingsCard({
       )
     }
     if (tab === 'groups') {
-      if (
-        !groupSchema.safeParse({
-          ...groupDefaults,
-          UserGroups: groupDefaults.UserGroups ?? '{}',
-        }).success
-      ) {
+      if (!groupSchema.safeParse(formatGroupSettings(groupDefaults)).success) {
         return <ErrorState description={t('JSON structure is invalid')} />
       }
       return (

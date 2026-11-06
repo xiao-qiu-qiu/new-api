@@ -447,6 +447,20 @@ func EvaluateTaskCompletionUsage(snap *billingexpr.BillingSnapshot, facts map[st
 	usage := make(map[string]any, len(snap.UsageFacts)+len(facts))
 	maps.Copy(usage, snap.UsageFacts)
 	maps.Copy(usage, facts)
+	// Only special per-image task pricing carries this frozen count marker.
+	// Other tasks keep their plugin schema's zero and fractional usage semantics.
+	if snap.TaskUsageBilling && snap.EstimatedImageCount != nil {
+		if value, reported := facts["image_count"]; reported {
+			count, ok := value.(float64)
+			if !ok || math.IsNaN(count) || count < 1 || count > float64(dto.MaxImageN) || math.Trunc(count) != count {
+				if reserved, exists := snap.UsageFacts["image_count"]; exists {
+					usage["image_count"] = reserved
+				} else {
+					delete(usage, "image_count")
+				}
+			}
+		}
+	}
 	result, err := billingexpr.ComputeTieredQuotaWithRequest(snap, billingexpr.TokenParams{}, billingexpr.RequestInput{Usage: usage})
 	if err == nil && (result.ActualQuotaBeforeGroup < 0 || math.IsNaN(result.ActualQuotaBeforeGroup)) {
 		err = fmt.Errorf("task completion expression produced an invalid cost")

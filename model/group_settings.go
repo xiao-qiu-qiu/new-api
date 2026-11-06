@@ -37,7 +37,7 @@ func applyGroupSettingOption(key, value string) error {
 
 func IsGroupSettingsOption(key string) bool {
 	switch key {
-	case "UserGroups", "GroupRatio", "GroupGroupRatio", "TopupGroupRatio", "UserUsableGroups",
+	case "UserGroups", "GroupRatio", "GroupGroupRatio", "TopupGroupRatio", "UserUsableGroups", "SpecialPricingRules",
 		"group_ratio_setting.group_special_usable_group", "group_ratio_setting.group_ratio",
 		"group_ratio_setting.group_group_ratio", "AutoGroups", "DefaultUseAutoGroup", "MaxTokenAutoGroups":
 		return true
@@ -84,6 +84,24 @@ func UpdateGroupSettingsOptions(values map[string]string) error {
 		groups, err = setting.ParseUserGroups(value)
 		if err != nil {
 			return err
+		}
+	}
+	specialPricing := setting.GetSpecialPricingRulesCopy()
+	if value, supplied := updates["SpecialPricingRules"]; supplied {
+		specialPricing, err = setting.ParseSpecialPricingRules(value)
+		if err != nil {
+			return err
+		}
+	}
+	for _, rule := range specialPricing {
+		if rule.UserGroup == "*" {
+			continue
+		}
+		if _, exists := groups[rule.UserGroup]; !exists {
+			if _, replacing := updates["UserGroups"]; replacing {
+				return common.NewMessage("User group is still referenced")
+			}
+			return common.NewMessage("User group does not exist")
 		}
 	}
 	ratios := ratio_setting.GetGroupRatioCopy()

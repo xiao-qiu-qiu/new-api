@@ -41,6 +41,7 @@ const defaults = {
   TopupGroupRatio: '{"vip":1.2}',
   UserUsableGroups: '{"default":"Standard access","vip":"Premium access"}',
   GroupGroupRatio: '{}',
+  SpecialPricingRules: '[]',
   AutoGroups: '["default","vip"]',
   MaxTokenAutoGroups: 5,
   DefaultUseAutoGroup: false,
@@ -53,6 +54,7 @@ const schema = z.object({
   TopupGroupRatio: z.string(),
   UserUsableGroups: z.string(),
   GroupGroupRatio: z.string(),
+  SpecialPricingRules: z.string(),
   AutoGroups: z.string(),
   MaxTokenAutoGroups: positiveIntegerSchema('Enter a positive integer'),
   DefaultUseAutoGroup: z.boolean(),
@@ -82,6 +84,155 @@ function Fixture(props: {
 }
 
 describe('group settings workspace', () => {
+  it('adds VIP zero pricing and a paid fallback, preserving them in JSON and saved settings', async () => {
+    const user = userEvent.setup()
+    const onSave = vi.fn(async (_values: typeof defaults) => {})
+    render(<Fixture onSave={onSave} />)
+    await user.click(screen.getByRole('tab', { name: 'Special pricing rules' }))
+    expect(screen.getByText('No special pricing rules')).toBeVisible()
+    await user.click(screen.getByRole('button', { name: 'Add pricing rule' }))
+    let dialog = within(screen.getByRole('dialog'))
+    await user.click(dialog.getByRole('combobox', { name: 'User group' }))
+    await user.click(screen.getByRole('option', { name: 'vip' }))
+    await user.type(
+      dialog.getByRole('textbox', { name: 'Model pattern' }),
+      'gpt-image-*'
+    )
+    await user.click(dialog.getByRole('button', { name: 'Apply' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Add pricing rule' }))
+    dialog = within(screen.getByRole('dialog'))
+    await user.type(
+      dialog.getByRole('textbox', { name: 'Model pattern' }),
+      'gpt-image-*'
+    )
+    await user.clear(dialog.getByRole('textbox', { name: 'Unit price (USD)' }))
+    await user.type(
+      dialog.getByRole('textbox', { name: 'Unit price (USD)' }),
+      '0.03'
+    )
+    await user.click(dialog.getByRole('button', { name: 'Apply' }))
+    expect(screen.getByText('All users (fallback)')).toBeVisible()
+    const table = screen.getByRole('table', { name: 'Special pricing rules' })
+    expect(within(table).getAllByRole('row')).toHaveLength(3)
+    await user.click(screen.getByRole('button', { name: 'Switch to JSON' }))
+    await user.click(screen.getByRole('button', { name: 'Switch to Visual' }))
+    expect(
+      screen.getByRole('table', { name: 'Special pricing rules' })
+    ).toBeVisible()
+    await user.click(
+      screen.getByRole('button', { name: 'Save group settings' })
+    )
+    await waitFor(() => expect(onSave).toHaveBeenCalledOnce())
+    expect(JSON.parse(onSave.mock.calls[0][0].SpecialPricingRules)).toEqual([
+      {
+        user_group: 'vip',
+        model: 'gpt-image-*',
+        price: 0,
+        billing_unit: 'image',
+      },
+      {
+        user_group: '*',
+        model: 'gpt-image-*',
+        price: 0.03,
+        billing_unit: 'image',
+      },
+    ])
+  })
+
+  it('keeps a duplicate rule in the dialog until its model pattern is corrected', async () => {
+    const user = userEvent.setup()
+    render(
+      <Fixture
+        initial={{
+          SpecialPricingRules:
+            '[{"user_group":"*","model":"gpt-image-*","price":0.03,"billing_unit":"image"}]',
+        }}
+      />
+    )
+    await user.click(screen.getByRole('tab', { name: 'Special pricing rules' }))
+    await user.click(screen.getByRole('button', { name: 'Add pricing rule' }))
+    const dialog = within(screen.getByRole('dialog'))
+    await user.type(
+      dialog.getByRole('textbox', { name: 'Model pattern' }),
+      'gpt-image-*'
+    )
+    await user.click(dialog.getByRole('button', { name: 'Apply' }))
+    expect(
+      await dialog.findByText(
+        'A pricing rule already exists for this user group and model pattern.'
+      )
+    ).toBeVisible()
+    await user.clear(dialog.getByRole('textbox', { name: 'Model pattern' }))
+    await user.type(
+      dialog.getByRole('textbox', { name: 'Model pattern' }),
+      'other-image'
+    )
+    await user.click(dialog.getByRole('button', { name: 'Apply' }))
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    )
+    expect(screen.getByText('other-image')).toBeVisible()
+  })
+
+  it('edits pricing without adding a duplicate and confirms removal', async () => {
+    const user = userEvent.setup()
+    const onSave = vi.fn(async (_values: typeof defaults) => {})
+    render(
+      <Fixture
+        onSave={onSave}
+        initial={{
+          SpecialPricingRules:
+            '[{"user_group":"vip","model":"gpt-image-*","price":0.03,"billing_unit":"image"}]',
+        }}
+      />
+    )
+    await user.click(screen.getByRole('tab', { name: 'Special pricing rules' }))
+    await user.click(
+      screen.getByRole('button', { name: 'Edit pricing rule for gpt-image-*' })
+    )
+    const dialog = within(screen.getByRole('dialog'))
+    await user.clear(dialog.getByRole('textbox', { name: 'Unit price (USD)' }))
+    await user.click(dialog.getByRole('button', { name: 'Apply' }))
+    expect(await dialog.findByText('Invalid parameters')).toBeVisible()
+    await user.type(
+      dialog.getByRole('textbox', { name: 'Unit price (USD)' }),
+      '0'
+    )
+    await user.click(dialog.getByRole('combobox', { name: 'Billing unit' }))
+    await user.click(screen.getByRole('option', { name: 'Per request' }))
+    expect(
+      dialog.getByRole('combobox', { name: 'Billing unit' })
+    ).toHaveTextContent('Per request')
+    await user.click(dialog.getByRole('button', { name: 'Apply' }))
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    )
+    await user.click(
+      screen.getByRole('button', { name: 'Save group settings' })
+    )
+    await waitFor(() => expect(onSave).toHaveBeenCalledOnce())
+    expect(JSON.parse(onSave.mock.calls[0][0].SpecialPricingRules)).toEqual([
+      {
+        user_group: 'vip',
+        model: 'gpt-image-*',
+        price: 0,
+        billing_unit: 'request',
+      },
+    ])
+    await user.click(
+      screen.getByRole('button', { name: 'Actions for gpt-image-*' })
+    )
+    await user.click(screen.getByRole('menuitem', { name: 'Delete' }))
+    expect(screen.getByRole('alertdialog')).toBeVisible()
+    await user.click(
+      within(screen.getByRole('alertdialog')).getByRole('button', {
+        name: 'Delete',
+      })
+    )
+    expect(screen.getByText('No special pricing rules')).toBeVisible()
+  })
+
   it('clears rule drafts when an unsaved user group is deleted', async () => {
     const user = userEvent.setup()
     const onSave = vi.fn(async (_values: typeof defaults) => {})
