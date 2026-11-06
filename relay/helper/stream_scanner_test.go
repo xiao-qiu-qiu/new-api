@@ -3,6 +3,7 @@ package helper
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/iotest"
 	"time"
 
 	"github.com/QuantumNous/new-api/constant"
@@ -582,4 +584,101 @@ func TestNewStreamScannerCallerLimit(t *testing.T) {
 	require.True(t, scanner.Scan())
 	assert.Equal(t, "data: ok", scanner.Text())
 	require.NoError(t, scanner.Err())
+}
+
+type nonStreamJSONTestBody struct {
+	io.Reader
+	reads  int
+	closed bool
+}
+
+func (b *nonStreamJSONTestBody) Read(p []byte) (int, error) {
+	b.reads++
+	return b.Reader.Read(p)
+}
+
+func (b *nonStreamJSONTestBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+func TestNormalizeNonStreamJSONResponse(t *testing.T) {
+	readErr := errors.New("upstream read failed")
+	jsonBody := `{"object":"chat.completion","choices":[{"message":{"content":"OK"}}],"usage":{"prompt_tokens":8,"completion_tokens":1,"total_tokens":9}}`
+	for _, tc := range []struct {
+		name        string
+		contentType string
+		body        string
+		readErr     error
+		wantJSON    bool
+		wantNoRead  bool
+	}{
+		{
+			name:        "mislabeled JSON retains whitespace and body",
+			contentType: "text/event-stream; charset=utf-8",
+			body:        " \t\r\n" + jsonBody,
+			wantJSON:    true,
+		},
+		{
+			name:        "SSE retains leading blank lines and comments",
+			contentType: "text/event-stream",
+			body:        "\r\n: keepalive\n\ndata: {\"choices\":[]}\n\ndata: [DONE]\n\n",
+		},
+		{
+			name:        "normal JSON is not read",
+			contentType: "application/json",
+			body:        jsonBody,
+			wantNoRead:  true,
+		},
+		{
+			name:        "empty body remains SSE",
+			contentType: "text/event-stream",
+		},
+		{
+			name:        "read error retains buffered whitespace and Close",
+			contentType: "text/event-stream",
+			body:        " \t\r\n",
+			readErr:     readErr,
+		},
+		{
+			name:        "long whitespace prefix remains SSE and readable",
+			contentType: "text/event-stream",
+			body:        strings.Repeat(" ", 8<<10) + jsonBody,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var reader io.Reader = strings.NewReader(tc.body)
+			if tc.readErr != nil {
+				reader = io.MultiReader(reader, iotest.ErrReader(tc.readErr))
+			}
+			body := &nonStreamJSONTestBody{Reader: reader}
+			resp := &http.Response{
+				Header: http.Header{"Content-Type": {tc.contentType}},
+				Body:   body,
+			}
+
+			NormalizeNonStreamJSONResponse(resp)
+
+			wantContentType := tc.contentType
+			if tc.wantJSON {
+				wantContentType = "application/json"
+			}
+			assert.Equal(t, wantContentType, resp.Header.Get("Content-Type"))
+			assert.False(t, body.closed, "probing must not close the upstream body")
+			if tc.wantNoRead {
+				assert.Zero(t, body.reads)
+				assert.Same(t, body, resp.Body)
+			}
+
+			got, err := io.ReadAll(resp.Body)
+			if tc.readErr != nil {
+				assert.ErrorIs(t, err, tc.readErr)
+			} else {
+				assert.NoError(t, err)
+			}
+			assert.Equal(t, tc.body, string(got))
+			require.NoError(t, resp.Body.Close())
+			assert.True(t, body.closed, "Close must reach the original upstream body")
+		})
+	}
 }
