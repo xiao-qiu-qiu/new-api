@@ -316,8 +316,8 @@ img {
   --glow-blue: #9ed3ff66;
   --glow-mint: #a6e5c85c;
   background:
-    radial-gradient(ellipse 48% 68% at 18% 35%, #e4f3ff80, transparent 78%),
-    radial-gradient(ellipse 48% 68% at 82% 35%, #e3f8ee80, transparent 78%);
+    radial-gradient(ellipse 48% 68% at 18% 60%, #e4f3ff66, transparent 78%),
+    radial-gradient(ellipse 48% 68% at 82% 24%, #e3f8ee66, transparent 78%);
   /* Begin on the host surface, then ease into the two color fields. */
   mask-image: linear-gradient(transparent, #000 140px, #000 55%, transparent);
 }
@@ -327,26 +327,26 @@ img {
   position: absolute;
   inset: -16% -12%;
   background: radial-gradient(
-    ellipse 36% 48% at 24% 38%,
+    ellipse 36% 48% at 26% 58%,
     var(--glow-blue),
     transparent 75%
   );
-  transform: rotate(-12deg);
+  transform: translate3d(-4%, 4%, 0) rotate(-8deg) scale(0.98);
 }
 .hero-glow::after {
   background: radial-gradient(
-    ellipse 36% 48% at 76% 38%,
+    ellipse 36% 48% at 74% 28%,
     var(--glow-mint),
     transparent 75%
   );
-  transform: rotate(12deg);
+  transform: translate3d(4%, -4%, 0) rotate(8deg);
 }
 [data-theme='dark'] .hero-glow {
   --glow-blue: #377fba42;
   --glow-mint: #3c977642;
   background:
-    radial-gradient(ellipse 48% 68% at 18% 35%, #25608c1f, transparent 78%),
-    radial-gradient(ellipse 48% 68% at 82% 35%, #2d7e5e1f, transparent 78%);
+    radial-gradient(ellipse 48% 68% at 18% 60%, #25608c1f, transparent 78%),
+    radial-gradient(ellipse 48% 68% at 82% 24%, #2d7e5e1f, transparent 78%);
 }
 .hero-grid {
   position: absolute;
@@ -885,10 +885,16 @@ pre {
   font-weight: 500;
 }
 .provider-logos .more-providers {
+  display: inline-flex;
+  align-items: center;
   font-size: 10px;
   font-weight: 400;
   letter-spacing: 0;
   gap: 5px;
+  transition: color 200ms ease;
+}
+.provider-logos .more-providers:hover {
+  color: var(--blue-strong);
 }
 .provider-logos .more-providers svg {
   width: 12px;
@@ -1270,7 +1276,7 @@ h2 {
 }
 .catalog-note {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: center;
   gap: 15px;
   margin-top: 20px;
@@ -1764,9 +1770,6 @@ h2 {
   .provider-logos .anthropic-word {
     font-size: 20px;
   }
-  .provider-logos .more-providers {
-    display: none;
-  }
   .provider-logos svg {
     width: 20px;
     height: 20px;
@@ -2154,6 +2157,11 @@ h2 {
     text-align: left;
     max-width: 290px;
     margin: auto;
+  }
+  .provider-logos .more-providers {
+    grid-column: 1 / -1;
+    justify-self: center;
+    min-height: 44px;
   }
   .provider-logos > span {
     font-size: 16px;
@@ -3854,10 +3862,10 @@ body {
 }
 @media (prefers-reduced-motion: no-preference) {
   .hero-glow::before {
-    animation: aurora-drift 18s ease-in-out infinite alternate;
+    animation: aurora-blue-drift 14s ease-in-out infinite alternate;
   }
   .hero-glow::after {
-    animation: aurora-drift 23s ease-in-out -9s infinite alternate-reverse;
+    animation: aurora-mint-drift 18s ease-in-out infinite alternate;
   }
   .motion-ready .hero-title-line > span {
     animation: hero-title-enter 950ms cubic-bezier(0.16, 1, 0.3, 1) both;
@@ -3899,18 +3907,32 @@ body {
     transform: translateX(3px);
   }
 }
-@keyframes aurora-drift {
+@keyframes aurora-blue-drift {
   0% {
-    transform: translate3d(-6%, -4%, 0) rotate(-12deg) scale(0.95);
-    opacity: 0.7;
+    transform: translate3d(-4%, 4%, 0) rotate(-8deg) scale(0.98);
+    opacity: 0.85;
   }
   50% {
-    transform: translate3d(3%, 4%, 0) rotate(4deg) scale(1.06);
+    transform: translate3d(3%, -6%, 0) rotate(2deg) scale(1.07);
     opacity: 1;
   }
   100% {
-    transform: translate3d(7%, -2%, 0) rotate(14deg) scale(1.12);
+    transform: translate3d(8%, -12%, 0) rotate(10deg) scale(1.03);
+    opacity: 0.9;
+  }
+}
+@keyframes aurora-mint-drift {
+  0% {
+    transform: translate3d(4%, -4%, 0) rotate(8deg);
+    opacity: 0.9;
+  }
+  50% {
+    transform: translate3d(-3%, 7%, 0) rotate(-2deg) scale(1.08);
     opacity: 0.8;
+  }
+  100% {
+    transform: translate3d(-8%, 13%, 0) rotate(-10deg) scale(1.04);
+    opacity: 1;
   }
 }
 @keyframes hero-title-enter {

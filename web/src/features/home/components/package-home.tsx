@@ -45,14 +45,14 @@ export function PackageHome(props: { pack: HomepagePackage }) {
     return (
       <>
         {frame}
-        <Footer />
+        <Footer showTagline={false} />
       </>
     )
   }
   return (
     <PublicLayout showMainContainer={false}>
       <main className='pt-16'>{frame}</main>
-      <Footer />
+      <Footer showTagline={false} />
     </PublicLayout>
   )
 }

@@ -16,7 +16,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { describe, expect, it } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { runInNewContext } from 'node:vm'
+
+import { describe, expect, it, vi } from 'vitest'
 
 import { buildHomepageDocument, isHomepageMessage } from '../package-document'
 import {
@@ -149,5 +152,35 @@ describe('Homepage package contract', () => {
         window
       )
     ).toBe(false)
+  })
+  it('opens the CodeQ provider list in the top-level model marketplace', () => {
+    const html = readFileSync('homepage-packages/codeq/index.html', 'utf8')
+    const doc = new DOMParser().parseFromString(html, 'text/html')
+    const link = doc.querySelector('a.more-providers')
+    expect(link?.getAttribute('href')).toBe('/pricing')
+    expect(link?.getAttribute('target')).toBe('_top')
+  })
+  it('keeps all CodeQ model families visible without scenario filters when switching examples', () => {
+    const doc = new DOMParser().parseFromString(
+      readFileSync('homepage-packages/codeq/index.html', 'utf8'),
+      'text/html'
+    )
+    runInNewContext(readFileSync('homepage-packages/codeq/app.js', 'utf8'), {
+      document: doc,
+      window: {},
+      matchMedia: window.matchMedia,
+      addEventListener: vi.fn(),
+    })
+    expect(doc.querySelector('[data-scenario]')).toBeNull()
+    for (const button of doc.querySelectorAll<HTMLButtonElement>(
+      '[data-select], .code-tab'
+    )) {
+      button.click()
+      expect(
+        [...doc.querySelectorAll('.catalog-card')]
+          .filter((card) => !card.hasAttribute('hidden'))
+          .map((card) => card.querySelector('h3')?.textContent)
+      ).toEqual(['GPT', 'Claude', 'Gemini', 'DeepSeek'])
+    }
   })
 })

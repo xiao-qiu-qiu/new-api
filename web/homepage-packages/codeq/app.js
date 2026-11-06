@@ -143,20 +143,6 @@ document
 document
   .querySelector('.endpoint-copy')
   .addEventListener('click', () => copyText(apiBase, 'API endpoint copied'))
-document.querySelectorAll('[data-scenario]').forEach((button) =>
-  button.addEventListener('click', () => {
-    document
-      .querySelectorAll('[data-scenario]')
-      .forEach((item) =>
-        item.setAttribute('aria-pressed', String(item === button))
-      )
-    document.querySelectorAll('.catalog-card').forEach((card) => {
-      card.hidden =
-        button.dataset.scenario !== 'all' &&
-        !card.dataset.category.split(' ').includes(button.dataset.scenario)
-    })
-  })
-)
 renderCode()
 
 addEventListener('newapi:context', (event) => {
