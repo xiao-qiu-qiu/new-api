@@ -313,57 +313,40 @@ img {
   height: 860px;
   pointer-events: none;
   overflow: hidden;
-  --glow-violet: #ba8aff78;
-  --glow-blue: #858bff60;
-  --glow-pink: #edb0f25c;
-  background: radial-gradient(
-    ellipse 65% 65% at 48% 20%,
-    #e7dcff55,
-    transparent 80%
-  );
-  mask-image: linear-gradient(#000 55%, transparent);
+  --glow-blue: #9ed3ff66;
+  --glow-mint: #a6e5c85c;
+  background:
+    radial-gradient(ellipse 48% 68% at 18% 35%, #e4f3ff80, transparent 78%),
+    radial-gradient(ellipse 48% 68% at 82% 35%, #e3f8ee80, transparent 78%);
+  /* Begin on the host surface, then ease into the two color fields. */
+  mask-image: linear-gradient(transparent, #000 140px, #000 55%, transparent);
 }
 .hero-glow::before,
 .hero-glow::after {
   content: '';
   position: absolute;
   inset: -16% -12%;
-  background:
-    radial-gradient(
-      ellipse 28% 42% at 25% 42%,
-      var(--glow-violet),
-      transparent 75%
-    ),
-    radial-gradient(
-      ellipse 30% 38% at 72% 48%,
-      var(--glow-blue),
-      transparent 75%
-    );
+  background: radial-gradient(
+    ellipse 36% 48% at 24% 38%,
+    var(--glow-blue),
+    transparent 75%
+  );
   transform: rotate(-12deg);
 }
 .hero-glow::after {
-  background:
-    radial-gradient(
-      ellipse 40% 18% at 46% 38%,
-      var(--glow-pink),
-      transparent 80%
-    ),
-    radial-gradient(
-      ellipse 28% 32% at 64% 35%,
-      var(--glow-violet),
-      transparent 75%
-    );
+  background: radial-gradient(
+    ellipse 36% 48% at 76% 38%,
+    var(--glow-mint),
+    transparent 75%
+  );
   transform: rotate(12deg);
 }
 [data-theme='dark'] .hero-glow {
-  --glow-violet: #914cf478;
-  --glow-blue: #555efc66;
-  --glow-pink: #ce66c93b;
-  background: radial-gradient(
-    ellipse 65% 65% at 48% 20%,
-    #6239b12e,
-    transparent 80%
-  );
+  --glow-blue: #377fba42;
+  --glow-mint: #3c977642;
+  background:
+    radial-gradient(ellipse 48% 68% at 18% 35%, #25608c1f, transparent 78%),
+    radial-gradient(ellipse 48% 68% at 82% 35%, #2d7e5e1f, transparent 78%);
 }
 .hero-grid {
   position: absolute;
@@ -376,11 +359,10 @@ img {
     linear-gradient(to right, var(--border) 1px, transparent 1px),
     linear-gradient(to bottom, var(--border) 1px, transparent 1px);
   background-size: 64px 64px;
-  mask-image: radial-gradient(
-    ellipse 60% 70% at 50% 25%,
-    #0005,
-    transparent 80%
-  );
+  mask-image:
+    linear-gradient(transparent, #000 140px),
+    radial-gradient(ellipse 60% 70% at 50% 25%, #0005, transparent 80%);
+  mask-composite: intersect;
 }
 .hero-intro {
   text-align: center;
@@ -427,15 +409,16 @@ img {
   display: inline-block;
 }
 .hero h1 .hero-title-accent {
-  color: #7951ce;
-  /* One text surface keeps the diagonal transition continuous across the line. */
+  color: #629dff;
+  /* Keep the faster middle transition continuous across one text surface. */
   background: linear-gradient(
-    115deg,
-    #ad47d6 0%,
-    #9250df 40%,
-    #5553df 40%,
-    #7950df 70%,
-    #a055d8 100%
+    110deg,
+    #559dff 0%,
+    #619eff 32%,
+    #7299ff 39%,
+    #9b76ff 48%,
+    #af51fa 57%,
+    #b143ed 100%
   );
   background-clip: text;
   -webkit-background-clip: text;
@@ -1540,12 +1523,13 @@ h2 {
 }
 [data-theme='dark'] .hero h1 .hero-title-accent {
   background-image: linear-gradient(
-    115deg,
-    #f0b2ff 0%,
-    #d396ff 40%,
-    #a49aff 40%,
-    #bda3ff 70%,
-    #dab5ff 100%
+    110deg,
+    #83b7ff 0%,
+    #8cbaff 32%,
+    #9ab6ff 39%,
+    #b699ff 48%,
+    #ce7dff 57%,
+    #db7af5 100%
   );
 }
 @keyframes blink {
@@ -3846,8 +3830,8 @@ body {
   border-radius: 50%;
   background: radial-gradient(
     circle,
-    #ac80f529,
-    #9274ee12 35%,
+    #7bbcf024,
+    #8bdbbf14 35%,
     transparent 70%
   );
   transition: translate 180ms ease-out;
@@ -3855,8 +3839,8 @@ body {
 [data-theme='dark'] .pointer-glow {
   background: radial-gradient(
     circle,
-    #c29aff2e,
-    #9274ee14 35%,
+    #73b9ef29,
+    #7ed3b414 35%,
     transparent 70%
   );
 }
