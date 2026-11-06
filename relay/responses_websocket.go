@@ -229,6 +229,11 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 	modelName := create.Request.Model
 	started := time.Now()
 	var info *relaycommon.RelayInfo
+	var probeObserver *service.ChannelProbeObserver
+	var groupProbeObserver *service.ChannelProbeObserver
+	var groupProbes []appmodel.ChannelProbe
+	groupSelectionFailed := false
+	var probes []appmodel.ChannelProbe
 	billingPrepared := false
 	defer func() {
 		if recovered := recover(); recovered != nil {
@@ -239,6 +244,16 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			info = &relaycommon.RelayInfo{OriginModelName: modelName, UsingGroup: common.GetContextKeyString(c, appconstant.ContextKeyUsingGroup), StartTime: started}
 		}
 		perfmetrics.RecordRelayResult(c.Request.Context(), info, apiErr)
+		if probeObserver != nil {
+			service.RecordPassiveChannelProbeResult(probes, probeObserver.Result(c.Request.Context(), info, apiErr))
+		}
+		if groupProbeObserver != nil && (billingPrepared || groupSelectionFailed) {
+			groupName := info.UsingGroup
+			if groupName == "" {
+				groupName = common.GetContextKeyString(c, appconstant.ContextKeyUsingGroup)
+			}
+			service.RecordPassiveGroupProbeResult(groupProbes, groupName, groupProbeObserver.Result(c.Request.Context(), info, apiErr))
+		}
 		// Settlement already marks the request policy successful, and nothing
 		// reads a termination decision after this point on the WebSocket path,
 		// so neither policy record belongs here.
@@ -259,8 +274,13 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 	common.SetContextKey(c, appconstant.ContextKeyRequestStartTime, time.Now())
 	service.GetChannelConstraints(c).AddFilter(appdto.ChannelFilter{Kind: appdto.FilterRequestPath, RequestPath: c.Request.URL.Path})
 
+	groupProbes = service.PassiveGroupProbes("", modelName)
+	if len(groupProbes) > 0 {
+		groupProbeObserver = service.NewChannelProbeObserverAt(nil, started)
+	}
 	if s.lockedChannelID != 0 {
 		if apiErr = s.restoreConnectionContext(c, modelName); apiErr != nil {
+			groupSelectionFailed = true
 			return apiErr
 		}
 		info = relaycommon.GenRelayInfoResponses(c, &create.Request)
@@ -275,6 +295,10 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 		if apiErr != nil {
 			return apiErr
 		}
+		probes = service.PassiveChannelProbes(s.lockedChannelID, modelName)
+		if len(probes) > 0 {
+			probeObserver = service.NewChannelProbeObserver(nil)
+		}
 		if err := s.writeTarget(websocket.TextMessage, payload); err != nil {
 			state.closeAfter = true
 			return types.NewError(err, types.ErrorCodeBadResponse, types.ErrOptionWithSkipRetry())
@@ -285,6 +309,7 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			var channel *appmodel.Channel
 			channel, apiErr = selectResponsesWSChannel(c, modelName, retry)
 			if apiErr != nil {
+				groupSelectionFailed = true
 				return apiErr
 			}
 			service.AppendUsedChannel(c, channel.Id)
@@ -311,9 +336,17 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 			}
 			adaptor := GetAdaptor(info.ApiType)
 			adaptor.Init(info)
+			probes = service.PassiveChannelProbes(channel.Id, modelName)
+			if len(probes) > 0 {
+				probeObserver = service.NewChannelProbeObserver(nil)
+			}
 			target, dialErr := relaychannel.DoWssRequest(adaptor, c, info, nil)
 			if dialErr != nil {
 				apiErr = service.NormalizeViolationFeeError(types.NewError(dialErr, types.ErrorCodeDoRequestFailed))
+				if probeObserver != nil {
+					service.RecordPassiveChannelProbeResult(probes, probeObserver.Result(c.Request.Context(), info, apiErr))
+					probeObserver = nil
+				}
 				service.ResetStatusCode(apiErr, c.GetString("status_code_mapping"))
 				info.LastError = apiErr
 				decision := service.DecideRelayRetry(c, apiErr, common.RetryTimes-retry.GetRetry())
@@ -416,6 +449,8 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 						}
 						continue
 					}
+					probeObserver.ObserveEvent(incoming.body)
+					groupProbeObserver.ObserveEvent(incoming.body)
 					if accepted {
 						if rejection.Error != nil {
 							code := ""
@@ -442,6 +477,8 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 					}
 					return rejected
 				}
+				probeObserver.ObserveEvent(incoming.body)
+				groupProbeObserver.ObserveEvent(incoming.body)
 				if strings.HasPrefix(event.Type, "response.") {
 					if !accepted {
 						// Like HTTP, bind the session only once upstream accepted the request.

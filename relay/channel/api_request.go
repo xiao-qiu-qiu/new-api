@@ -518,6 +518,11 @@ func keepUpstreamRedirectResponse(_ *http.Request, _ []*http.Request) error {
 }
 
 func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http.Response, error) {
+	if info.IsChannelTest {
+		// Adapter tests and scheduled probes have an explicit timeout. Bind
+		// their upstream request as well, including the wait for HTTP headers.
+		req = req.WithContext(c.Request.Context())
+	}
 	client, err := service.GetHttpClientWithProxySettings(info.ChannelSetting.Proxy, info.ChannelSetting)
 	if err != nil {
 		return nil, fmt.Errorf("new proxy http client failed: %w", err)

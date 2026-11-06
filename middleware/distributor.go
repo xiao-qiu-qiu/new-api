@@ -98,6 +98,7 @@ func Distribute() func(c *gin.Context) {
 			}
 		}
 		if pinned || shouldSelectChannel {
+			service.MarkChannelProbeRequestStart(c)
 			usingGroup := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
 			var selectErr *service.ChannelSelectError
 			channel, _, selectErr = service.SelectChannelForRequest(c, modelRequest.Model, &service.RetryParam{
@@ -108,6 +109,7 @@ func Distribute() func(c *gin.Context) {
 				Retry:       common.GetPointer(0),
 			})
 			if selectErr != nil {
+				service.RecordGroupProbeSelectionFailure(c, usingGroup, modelRequest.Model)
 				if selectErr.FilterKind == taskdto.FilterTaskPluginIdentity {
 					logTaskPluginChannelDecision(c, selectErr.Channel, modelRequest.Model, "channel_rejected", "identity_mismatch")
 				}

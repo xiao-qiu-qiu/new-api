@@ -40,6 +40,15 @@ func joinPaths(absolutePath, relativePath string) string {
 func registerChannelRoutes(apiRouter *gin.RouterGroup) {
 	channelRoute := apiRouter.Group("/channel")
 	channelRoute.Use(middleware.AdminAuth())
+	probeRoute := channelRoute.Group("/probes")
+	probeRoute.Use(middleware.DisableCache())
+	handlePermissionRoute(probeRoute, http.MethodGet, "", authz.ChannelRead, controller.ListChannelProbes)
+	handlePermissionRoute(probeRoute, http.MethodPost, "", authz.ChannelWrite, middleware.CriticalRateLimit(), controller.CreateChannelProbe)
+	handlePermissionRoute(probeRoute, http.MethodGet, "/groups", authz.ChannelRead, controller.GetChannelProbeGroups)
+	handlePermissionRoute(probeRoute, http.MethodPost, "/order", authz.ChannelWrite, middleware.CriticalRateLimit(), controller.OrderChannelProbes)
+	handlePermissionRoute(probeRoute, http.MethodPut, "/:id", authz.ChannelWrite, middleware.CriticalRateLimit(), controller.UpdateChannelProbe)
+	handlePermissionRoute(probeRoute, http.MethodDelete, "/:id", authz.ChannelWrite, middleware.CriticalRateLimit(), controller.DeleteChannelProbe)
+	handlePermissionRoute(probeRoute, http.MethodPost, "/:id/run", authz.ChannelOperate, middleware.CriticalRateLimit(), controller.RunChannelProbe)
 
 	channelRoute.POST("/:id/key",
 		middleware.RootAuth(),
