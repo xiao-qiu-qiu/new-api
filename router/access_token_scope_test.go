@@ -152,6 +152,8 @@ func TestAccessTokenRouteRulesCoverEveryDashboardRoute(t *testing.T) {
 	}
 	for key, scope := range map[string]string{
 		"GET /api/user/redemption/self":              "wallet:read",
+		"GET /api/log/active":                        "log:read",
+		"GET /api/log/self/active":                   "usage:read",
 		"GET /api/option/video_model_capabilities":   "option:read",
 		"PATCH /api/option/video_model_capabilities": "option:write",
 	} {

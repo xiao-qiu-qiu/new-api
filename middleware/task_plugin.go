@@ -548,6 +548,13 @@ func RouteTaskPluginEndpoint() gin.HandlerFunc {
 		constraints.AddFilter(filter)
 		constraints.AddFilter(dto.ChannelFilter{Kind: dto.FilterRequestPath, RequestPath: c.Request.URL.Path})
 		group := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
+		var finishActive func()
+		if endpoint.Protocol == "openai_responses" || endpoint.Protocol == pluginruntime.ProtocolOpenAIImage {
+			stream, _ := jsonBodyBoolFlags(c)
+			common.SetContextKey(c, constant.ContextKeyIsStream, stream)
+			finishActive = service.BeginActiveRequest(c, request.Model)
+			defer finishActive()
+		}
 		channel, _, selectErr := service.SelectChannelForRequest(c, request.Model, &service.RetryParam{
 			Ctx: c, ModelName: request.Model, TokenGroup: group,
 			RequestPath: c.Request.URL.Path, Retry: common.GetPointer(0),
@@ -556,6 +563,9 @@ func RouteTaskPluginEndpoint() gin.HandlerFunc {
 			Generation: generation, Channel: channel, Model: request.Model,
 		})
 		if selectErr != nil {
+			if finishActive != nil {
+				finishActive()
+			}
 			// Keep the existing plugin diagnostics and canonical-model lookup
 			// when selection cannot resolve the client's original spelling.
 			pinEndpoint(c)
@@ -569,6 +579,9 @@ func RouteTaskPluginEndpoint() gin.HandlerFunc {
 			c.Set(contextKeyTaskPluginEndpointModel, *request)
 			c.Next()
 			return
+		}
+		if finishActive != nil {
+			finishActive()
 		}
 		pinEndpoint(c)
 	}

@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/active_requests"
 	pluginruntime "github.com/QuantumNous/new-api/pkg/jsplugin"
 	perfmetrics "github.com/QuantumNous/new-api/pkg/perf_metrics"
 	"github.com/QuantumNous/new-api/relay"
@@ -70,7 +71,10 @@ func geminiRelayHandler(c *gin.Context, info *relaycommon.RelayInfo) *types.NewA
 }
 
 func Relay(c *gin.Context, relayFormat types.RelayFormat) {
-
+	if relayFormat != types.RelayFormatOpenAIRealtime {
+		finish := service.BeginActiveRequest(c, common.GetContextKeyString(c, constant.ContextKeyOriginalModel))
+		defer finish()
+	}
 	requestId := c.GetString(common.RequestIdKey)
 	//group := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
 	//originalModel := common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
@@ -186,8 +190,15 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 	relayInfo.RetryIndex = 0
 	relayInfo.LastError = nil
+	attempt := 0
 
 	for ; retryParam.GetRetry() <= service.ChannelFailoverRetryBudget(c); retryParam.IncreaseRetry() {
+		active := active_requests.FromContext(c)
+		attempt++
+		active.SetAttempt(attempt)
+		if attempt > 1 {
+			active.SetState(active_requests.StatusRetrying)
+		}
 		relayInfo.StreamStatus = nil
 		relayInfo.PerformanceBusinessRejection = false
 		relayInfo.PerformanceOutputTokens = 0
@@ -248,6 +259,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		if decision.Action != "retry" {
 			break
 		}
+		active.SetState(active_requests.StatusRetrying)
 	}
 
 	useChannel := c.GetStringSlice("use_channel")
@@ -261,7 +273,7 @@ func writeRelayStreamError(c *gin.Context, format types.RelayFormat, apiError *t
 	// 心跳提交响应头后，最终错误继续通过同一个流返回。
 	status, _ := common.GetContextKeyType[*relaycommon.StreamStatus](c, constant.ContextKeyResponseStreamStatus)
 	if status == nil {
-		status = relaycommon.NewStreamStatus()
+		status = relaycommon.NewStreamStatus(active_requests.FromContext(c))
 		common.SetContextKey(c, constant.ContextKeyResponseStreamStatus, status)
 	}
 	status.MarkFailed(string(apiError.GetErrorCode()), string(apiError.GetErrorType()), apiError.StatusCode)

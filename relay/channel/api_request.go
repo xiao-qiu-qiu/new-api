@@ -536,7 +536,7 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		// another generation after the client has stopped receiving output.
 		if clientErr != nil {
 			if info.StreamStatus == nil {
-				info.StreamStatus = common.NewStreamStatus()
+				info.StreamStatus = common.NewStreamStatus(info.ActiveRequest)
 			}
 			info.StreamStatus.MarkClientGone(clientErr)
 			if req.Body != nil {
@@ -594,6 +594,7 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		// Keep the original body for this attempt, but prevent transport replay.
 		req.GetBody = nil
 	}
+	service.MarkActiveRequestWaiting(c)
 	resp, err := relayClient.Do(req)
 	if err != nil {
 		options := []types.NewAPIErrorOptions{types.ErrOptionWithHideErrMsg("upstream error: do request failed")}
@@ -604,7 +605,7 @@ func doRequest(c *gin.Context, req *http.Request, info *common.RelayInfo) (*http
 		if info.IsStream && clientErr != nil {
 			options = append(options, types.ErrOptionWithSkipRetry())
 			if info.StreamStatus == nil {
-				info.StreamStatus = common.NewStreamStatus()
+				info.StreamStatus = common.NewStreamStatus(info.ActiveRequest)
 			}
 			info.StreamStatus.MarkClientGone(clientErr)
 		}

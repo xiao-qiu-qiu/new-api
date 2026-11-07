@@ -359,7 +359,7 @@ func openaiImageJSONAsStreamHandler(c *gin.Context, info *relaycommon.RelayInfo,
 	if info != nil {
 		info.ReceivedResponseCount += emitted
 		if info.StreamStatus == nil {
-			info.StreamStatus = relaycommon.NewStreamStatus()
+			info.StreamStatus = relaycommon.NewStreamStatus(info.ActiveRequest)
 		}
 		info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
 	}

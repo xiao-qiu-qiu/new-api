@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/QuantumNous/new-api/pkg/active_requests"
 )
 
 type StreamEndReason string
@@ -61,6 +63,7 @@ type StreamStatus struct {
 	incompleteReason  string
 	expectsTerminal   bool
 	terminalDelivered bool
+	activeRequest     *active_requests.Handle
 }
 
 // StreamOutcome holds classification facts only; upstream messages never
@@ -78,8 +81,12 @@ type StreamOutcome struct {
 	IncompleteReason string
 }
 
-func NewStreamStatus() *StreamStatus {
-	return &StreamStatus{}
+func NewStreamStatus(active ...*active_requests.Handle) *StreamStatus {
+	s := &StreamStatus{}
+	if len(active) > 0 {
+		s.activeRequest = active[0]
+	}
+	return s
 }
 
 func (s *StreamStatus) SetEndReason(reason StreamEndReason, err error) {
@@ -90,6 +97,7 @@ func (s *StreamStatus) SetEndReason(reason StreamEndReason, err error) {
 	defer s.mu.Unlock()
 	if reason == StreamEndReasonClientGone {
 		s.ClientGone = true
+		s.activeRequest.MarkClientGone()
 	}
 	if s.EndReason == StreamEndReasonClientGone && reason != StreamEndReasonClientGone && s.DrainEndReason == StreamEndReasonNone {
 		s.DrainEndReason = reason
@@ -131,6 +139,7 @@ func (s *StreamStatus) MarkClientGone(err error) {
 	}
 	s.endOnce.Do(func() {})
 	s.ClientGone = true
+	s.activeRequest.MarkClientGone()
 	s.EndReason = StreamEndReasonClientGone
 	s.EndError = err
 }

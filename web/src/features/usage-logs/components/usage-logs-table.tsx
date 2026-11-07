@@ -33,6 +33,8 @@ import {
 } from '@/features/subscriptions/api'
 import { useMediaQuery } from '@/hooks'
 import { useTableUrlState } from '@/hooks/use-table-url-state'
+import { toIntlLocale } from '@/i18n/languages'
+import { formatNumber } from '@/lib/format'
 import { createServerError } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
@@ -42,6 +44,9 @@ import {
   LOG_TYPE_ALL_VALUE,
   LOG_TYPE_ENUM,
 } from '../constants'
+import type { UsageLog } from '../data/schema'
+import { useActiveRequests } from '../hooks/use-active-requests'
+import { getActiveRequest, mergeActiveLogs } from '../lib/active-requests'
 import { shouldShowBillingSource } from '../lib/billing-source'
 import { useColumnsByCategory } from '../lib/columns'
 import { parseLogOther } from '../lib/format'
@@ -85,7 +90,8 @@ interface UsageLogsTableProps {
 }
 
 export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
+  const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
   const getColumnClassName = useCallback(
     () => (logCategory === 'common' ? 'py-2' : 'py-3.5'),
     [logCategory]
@@ -170,6 +176,7 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
       columnFilters,
       searchParams,
       t,
+      userId,
     ],
     queryFn: async () => {
       const result = await fetchLogsByCategory({
@@ -190,22 +197,42 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     placeholderData: (previousData, previousQuery) => {
       if (
         previousQuery?.queryKey[1] === logCategory &&
-        previousQuery.queryKey[2] === viewAccess
+        previousQuery.queryKey[2] === viewAccess &&
+        previousQuery.queryKey.at(-1) === userId
       ) {
         return previousData
       }
       return undefined
     },
+    refetchInterval:
+      logCategory === 'common' && pagination.pageIndex === 0 ? 30_000 : false,
+    refetchIntervalInBackground: false,
   })
 
-  const logs = data?.items || []
+  const showActive =
+    logCategory === 'common' && pagination.pageIndex === 0 && userId != null
+  const activeQuery = useActiveRequests({
+    enabled: showActive,
+    isAdmin,
+    viewAccess,
+    userId,
+    searchParams,
+    columnFilters,
+  })
+  const active =
+    showActive && !activeQuery.isError ? activeQuery.data : undefined
+  const logs =
+    logCategory === 'common'
+      ? mergeActiveLogs((data?.items || []) as UsageLog[], active)
+      : data?.items || []
   const columns = useColumnsByCategory(
     logCategory,
     isAdmin,
     isRoot,
     showBillingSource
   )
-  const isLoadingData = isLoading || (isFetching && !data)
+  const isLoadingData =
+    (isLoading || (isFetching && !data)) && logs.length === 0
 
   const { table } = useDataTable({
     data: logs as Record<string, unknown>[],
@@ -217,6 +244,12 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     ),
     pagination,
     enableRowSelection: false,
+    getRowId: (row, index) => {
+      const request = getActiveRequest(row as UsageLog)
+      return request
+        ? `active:${request.request_id}`
+        : `log:${row.request_id ?? ''}:${row.id ?? index}`
+    },
     onPaginationChange,
     onColumnFiltersChange,
     manualPagination: true,
@@ -252,7 +285,26 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
       }
       toolbar={
         isCommon ? (
-          <CommonLogsFilterBar table={table} />
+          <>
+            <CommonLogsFilterBar table={table} />
+            {showActive && activeQuery.isError && (
+              <p role='status' className='text-warning text-xs'>
+                {t('Live request status is temporarily unavailable')}
+              </p>
+            )}
+            {active != null && active.total > 0 && (
+              <p role='status' className='text-info text-xs'>
+                {active.total > active.items.length
+                  ? t('Showing {{shown}} of {{total}} in-progress requests', {
+                      shown: formatNumber(active.items.length, locale),
+                      total: formatNumber(active.total, locale),
+                    })
+                  : t('In progress: {{total}}', {
+                      total: formatNumber(active.total, locale),
+                    })}
+              </p>
+            )}
+          </>
         ) : (
           <TaskLogsFilterBar table={table} logCategory={logCategory} />
         )
@@ -263,6 +315,9 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
           | undefined
         let tintClass =
           isCommon && logType != null ? (logTypeRowTint[logType] ?? '') : ''
+        if (isCommon && getActiveRequest(row.original as UsageLog)) {
+          tintClass = 'bg-info/5'
+        }
         if (isCommon && isAdmin) {
           const other = parseLogOther(
             ((row.original as Record<string, unknown>).other as string) ?? ''

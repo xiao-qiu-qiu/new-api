@@ -11,7 +11,9 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/active_requests"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 
@@ -241,6 +243,127 @@ func TestAcquireLogExportLock(t *testing.T) {
 			require.NoError(t, err)
 			assert.True(t, ok, "a finished export frees the user")
 			releaseAgain()
+		})
+	}
+}
+
+func TestActiveRequestsVisibilityAndFilters(t *testing.T) {
+	previousRedis := common.RedisEnabled
+	common.RedisEnabled = false
+	t.Cleanup(func() { common.RedisEnabled = previousRedis })
+	now := time.Now().UnixMilli()
+	for _, record := range []active_requests.Record{
+		{RequestID: "active-alice", UserID: 1, Username: "alice", TokenID: 11, TokenName: "work", ModelName: "gpt-test", Group: "premium", Channel: 7, ChannelName: "private-upstream", StartedAt: now},
+		{RequestID: "active-bob", UserID: 2, Username: "bob", TokenName: "other", ModelName: "claude", Group: "default", Channel: 8, StartedAt: now},
+	} {
+		handle := active_requests.Start(record)
+		require.NotNil(t, handle)
+		t.Cleanup(handle.Finish)
+	}
+	query := "username=bob&channel=8&user_id=2"
+	response := callLogHandler(t, GetUserActiveRequests, 1, common.RoleCommonUser, query)[0]
+	require.Equal(t, true, response["success"])
+	data := response["data"].(map[string]any)
+	assert.EqualValues(t, 1, data["total"])
+	assert.Positive(t, data["server_time"])
+	items := data["items"].([]any)
+	require.Len(t, items, 1)
+	item := items[0].(map[string]any)
+	assert.Equal(t, "active-alice", item["request_id"])
+	assert.Empty(t, item["username"])
+	assert.Empty(t, item["channel_name"])
+	assert.EqualValues(t, 0, item["channel"])
+	assert.Equal(t, "work", item["token_name"])
+	assert.EqualValues(t, 11, item["token_id"])
+	assert.Equal(t, "premium", item["group"])
+
+	response = callLogHandler(t, GetActiveRequests, 3, common.RoleAdminUser, "username=ali&channel=7&model_name=gpt-%25&token_name=work&group=premium&type=2")[0]
+	require.Equal(t, true, response["success"])
+	data = response["data"].(map[string]any)
+	require.EqualValues(t, 1, data["total"])
+	item = data["items"].([]any)[0].(map[string]any)
+	assert.Equal(t, "alice", item["username"])
+	assert.Equal(t, "private-upstream", item["channel_name"])
+	assert.EqualValues(t, 7, item["channel"])
+	for _, query := range []string{"type=5", "upstream_request_id=unknown", "request_id=active-bob"} {
+		response = callLogHandler(t, GetUserActiveRequests, 1, common.RoleCommonUser, query)[0]
+		require.Equal(t, true, response["success"])
+		data = response["data"].(map[string]any)
+		assert.EqualValues(t, 0, data["total"])
+		assert.Empty(t, data["items"])
+	}
+	response = callLogHandler(t, GetUserActiveRequests, 0, common.RoleCommonUser, "")[0]
+	assert.EqualValues(t, 0, response["data"].(map[string]any)["total"], "missing identity cannot list all users")
+	tooLong := fmt.Sprintf("start_timestamp=%d", time.Now().Unix()-366*24*3600)
+	response = callLogHandler(t, GetUserActiveRequests, 1, common.RoleCommonUser, tooLong)[0]
+	assert.Equal(t, false, response["success"])
+}
+
+func TestActiveRequestsAuthorization(t *testing.T) {
+	admin, _ := setupAccessTokenAudit(t)
+	user := &model.User{Username: "active-user", AffCode: "active-user", Role: common.RoleCommonUser, Status: common.UserStatusEnabled, AuthVersion: 1}
+	require.NoError(t, model.DB.Create(user).Error)
+	_, adminToken := createAccessTokenTestSession(t, admin.Id, "active-admin-session")
+	_, userToken := createAccessTokenTestSession(t, user.Id, "active-user-session")
+	adminLog, _ := createScopedAccessToken(t, admin.Id, 0, "log:read")
+	adminUsage, _ := createScopedAccessToken(t, admin.Id, 0, "usage:read")
+	userUsage, _ := createScopedAccessToken(t, user.Id, 0, "usage:read")
+	userProfile, _ := createScopedAccessToken(t, user.Id, 0, "profile:read")
+	expiredLog, _ := createScopedAccessToken(t, admin.Id, time.Now().Unix()-1, "log:read")
+	revokedLog, revoked := createScopedAccessToken(t, admin.Id, 0, "log:read")
+	_, err := model.DeleteUserAccessToken(admin.Id, revoked.Id)
+	require.NoError(t, err)
+	for _, userID := range []int{admin.Id, user.Id} {
+		handle := active_requests.Start(active_requests.Record{RequestID: fmt.Sprintf("pat-active-%d", userID), UserID: userID, Username: "private-user", Channel: 7, ChannelName: "private-upstream"})
+		t.Cleanup(handle.Finish)
+	}
+	engine := gin.New()
+	engine.GET("/api/log/active", middleware.AdminAuth(), GetActiveRequests)
+	engine.GET("/api/log/self/active", middleware.UserAuth(), GetUserActiveRequests)
+	for _, tc := range []struct {
+		name, path, token string
+		status            int
+	}{
+		{"anonymous admin", "/api/log/active", "", http.StatusUnauthorized},
+		{"anonymous self", "/api/log/self/active", "", http.StatusUnauthorized},
+		{"ordinary user admin", "/api/log/active", userToken, http.StatusForbidden},
+		{"ordinary user self", "/api/log/self/active", userToken, http.StatusOK},
+		{"administrator", "/api/log/active", adminToken, http.StatusOK},
+		{"log PAT administrator", "/api/log/active", adminLog, http.StatusOK},
+		{"usage PAT cannot read global", "/api/log/active", adminUsage, http.StatusForbidden},
+		{"usage PAT cannot bypass role", "/api/log/active", userUsage, http.StatusForbidden},
+		{"usage PAT self", "/api/log/self/active?user_id=1&username=private-user&channel=7", userUsage, http.StatusOK},
+		{"administrator usage PAT self", "/api/log/self/active", adminUsage, http.StatusOK},
+		{"log PAT lacks own usage scope", "/api/log/self/active", adminLog, http.StatusForbidden},
+		{"profile PAT lacks usage scope", "/api/log/self/active", userProfile, http.StatusForbidden},
+		{"expired log PAT", "/api/log/active", expiredLog, http.StatusUnauthorized},
+		{"revoked log PAT", "/api/log/active", revokedLog, http.StatusUnauthorized},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			response := accessTokenRequest(engine, http.MethodGet, tc.path, tc.token, "", "")
+			assert.Equal(t, tc.status, response.Code, response.Body.String())
+			if tc.status == http.StatusOK {
+				assert.Equal(t, "no-store", response.Header().Get("Cache-Control"))
+				var result struct {
+					Success bool                   `json:"success"`
+					Data    active_requests.Result `json:"data"`
+				}
+				require.NoError(t, common.Unmarshal(response.Body.Bytes(), &result))
+				require.True(t, result.Success)
+				if strings.Contains(tc.path, "/self/") {
+					require.Equal(t, 1, result.Data.Total)
+					require.Len(t, result.Data.Items, 1)
+					item := result.Data.Items[0]
+					if tc.token == userToken || tc.token == userUsage {
+						assert.Equal(t, user.Id, item.UserID)
+					} else {
+						assert.Equal(t, admin.Id, item.UserID)
+					}
+					assert.Empty(t, item.Username)
+					assert.Zero(t, item.Channel)
+					assert.Empty(t, item.ChannelName)
+				}
+			}
 		})
 	}
 }

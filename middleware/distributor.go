@@ -15,6 +15,7 @@ import (
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/active_requests"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -133,6 +134,33 @@ func Distribute() func(c *gin.Context) {
 						common.SetContextKey(c, constant.ContextKeyUsingGroup, playgroundRequest.Group)
 					}
 				}
+			}
+		}
+		// Only ordinary Relay endpoints own this lifecycle. Protocol/plugin
+		// endpoints can submit background tasks and must not borrow it.
+		_, pluginEndpoint := c.Get(jsplugin.ContextKeyPinnedEndpoint)
+		_, pluginRoute := c.Get(jsplugin.ContextKeyPinnedRoute)
+		_, pluginRequest := c.Get(jsplugin.ContextKeyPinnedPlugin)
+		if c.Request.Method == http.MethodPost && !pluginEndpoint && !pluginRoute && !pluginRequest {
+			route := c.FullPath()
+			if route == "" {
+				route = c.Request.URL.Path
+			}
+			switch route {
+			case "/v1/messages", "/v1/completions", "/v1/chat/completions",
+				"/v1/responses", "/v1/responses/compact", "/v1/alpha/search",
+				"/v1/tools/search", "/v1/tools/fetch", "/v1/edits", "/v1/embeddings",
+				"/v1/audio/transcriptions", "/v1/audio/translations", "/v1/audio/speech",
+				"/v1/rerank", "/v1/engines/:model/embeddings", "/v1/models/*path",
+				"/v1/moderations", "/v1beta/models/*path", "/v1/images/generations",
+				"/v1/images/edits", "/pg/chat/completions":
+				stream := strings.HasSuffix(c.Request.URL.Path, ":streamGenerateContent")
+				if !stream && c.ContentType() == gin.MIMEJSON {
+					stream, _ = jsonBodyBoolFlags(c)
+				}
+				common.SetContextKey(c, constant.ContextKeyIsStream, stream)
+				finish := service.BeginActiveRequest(c, modelRequest.Model)
+				defer finish()
 			}
 		}
 		if pinned || shouldSelectChannel {
@@ -690,6 +718,11 @@ func SetupContextForSelectedChannel(c *gin.Context, channel *model.Channel, mode
 	common.SetContextKey(c, constant.ContextKeyChannelId, channel.Id)
 	common.SetContextKey(c, constant.ContextKeyChannelName, channel.Name)
 	common.SetContextKey(c, constant.ContextKeyChannelType, channel.Type)
+	activeGroup := common.GetContextKeyString(c, constant.ContextKeyAutoGroup)
+	if activeGroup == "" {
+		activeGroup = common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
+	}
+	active_requests.FromContext(c).SetChannel(channel.Id, channel.Name, activeGroup)
 	common.SetContextKey(c, constant.ContextKeyChannelCreateTime, channel.CreatedTime)
 	common.SetContextKey(c, constant.ContextKeyChannelSetting, channel.GetSetting())
 	otherSettings := channel.GetOtherSettings()

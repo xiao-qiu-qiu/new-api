@@ -131,7 +131,7 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	}
 
 	// 无条件新建 StreamStatus
-	info.StreamStatus = relaycommon.NewStreamStatus()
+	info.StreamStatus = relaycommon.NewStreamStatus(info.ActiveRequest)
 	lifecycle := info.StreamLifecycle
 	if lifecycle == nil {
 		lifecycle = relaycommon.NewStreamLifecycle(c.Request.Context(), info.StreamDisconnectMode == "drain" && !info.IsChannelTest, time.Duration(info.StreamDrainTimeoutSeconds)*time.Second)

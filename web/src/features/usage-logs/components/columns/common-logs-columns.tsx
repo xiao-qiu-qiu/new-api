@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import type { ColumnDef } from '@tanstack/react-table'
+import { flexRender, type ColumnDef } from '@tanstack/react-table'
 import { GitBranch, Sparkles, KeyRound } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -63,6 +63,7 @@ import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import { LOG_TYPE_ALL_VALUE } from '../../constants'
 import type { UsageLog } from '../../data/schema'
+import { getActiveRequest } from '../../lib/active-requests'
 import {
   formatModelName,
   decodeBillingExprB64,
@@ -82,6 +83,7 @@ import {
   isPerCallBilling,
 } from '../../lib/utils'
 import type { LogOtherData } from '../../types'
+import { ActiveRequestCell } from '../active-request-cells'
 import { DetailsDialog } from '../dialogs/details-dialog'
 import { LogCacheHitRate } from '../log-cache-hit-rate'
 import { LogCostDisplay } from '../log-cost-display'
@@ -947,7 +949,19 @@ export function useCommonLogsColumns(
       }
     )
 
-    return columns
+    return columns.map((column) => ({
+      ...column,
+      cell: (context) => {
+        const request = getActiveRequest(context.row.original)
+        const content = flexRender(column.cell, context)
+        if (!request) return content
+        return (
+          <ActiveRequestCell request={request} columnId={context.column.id}>
+            {content}
+          </ActiveRequestCell>
+        )
+      },
+    }))
     // Log formatters read currency settings from the store.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [t, isAdmin, isRoot, showBillingSource, currency])

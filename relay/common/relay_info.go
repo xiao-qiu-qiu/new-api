@@ -10,6 +10,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
+	"github.com/QuantumNous/new-api/pkg/active_requests"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relaykit/dto"
@@ -200,7 +201,8 @@ type RelayInfo struct {
 	// 若为空，调用 GetFinalRequestRelayFormat 会回退到 RequestConversionChain 的最后一项或 RelayFormat。
 	FinalRequestRelayFormat types.RelayFormat
 
-	StreamStatus *StreamStatus
+	StreamStatus  *StreamStatus
+	ActiveRequest *active_requests.Handle
 	// Snapshot once per request, including retries. The lifecycle belongs to
 	// one HTTP attempt and is closed with that attempt's response body.
 	StreamDisconnectMode      string
@@ -634,6 +636,7 @@ func genBaseRelayInfo(c *gin.Context, request dto.Request) *RelayInfo {
 	reasoningEffort := reasoningEffortFromRequest(request)
 	originModelName := common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
 	info := &RelayInfo{
+		ActiveRequest:        active_requests.FromContext(c),
 		Request:              request,
 		ReasoningEffort:      reasoningEffort,
 		RequestedServiceTier: requestedServiceTier(request),
@@ -670,6 +673,7 @@ func genBaseRelayInfo(c *gin.Context, request dto.Request) *RelayInfo {
 		},
 	}
 
+	info.ActiveRequest.SetStream(isStream)
 	info.SnapshotStreamDisconnectSettings()
 	if info.RelayMode == relayconstant.RelayModeUnknown {
 		info.RelayMode = c.GetInt("relay_mode")
@@ -1023,6 +1027,9 @@ func (info *RelayInfo) SetFirstResponseTime() {
 	if info.isFirstResponse {
 		info.FirstResponseTime = time.Now()
 		info.isFirstResponse = false
+		if info.IsStream {
+			info.ActiveRequest.SetState(active_requests.StatusStreaming)
+		}
 	}
 }
 

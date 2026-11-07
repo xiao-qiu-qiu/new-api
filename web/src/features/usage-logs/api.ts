@@ -53,7 +53,11 @@ async function fetchLogs<T>(
     ...params,
   })
   const path = buildApiPath(endpoint, isAdmin)
-  const res = await api.get(`${path}?${queryParams}`)
+  const res = await api.get(`${path}?${queryParams}`, {
+    // TanStack owns common log deduplication. An active-request handoff must
+    // start a fresh read even when an older response is still in flight.
+    disableDuplicate: endpoint === '/api/log',
+  })
   return res.data
 }
 

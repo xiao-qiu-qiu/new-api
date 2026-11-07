@@ -32,8 +32,10 @@ import { cn } from '@/lib/utils'
 
 import { LOG_TYPE_ENUM } from '../constants'
 import type { UsageLog } from '../data/schema'
+import { getActiveRequest } from '../lib/active-requests'
 import { TASK_MOBILE_SUMMARY_FIELDS } from '../lib/task-mobile-layout'
 import type { LogCategory } from '../types'
+import { ActiveRequestMobileCard } from './active-request-cells'
 import { CommonLogMobileCard } from './common-log-mobile-card'
 
 const logTypeRowTint: Record<number, string> = {
@@ -288,7 +290,13 @@ export function UsageLogsMobileList<TData>({
         const logType = (row.original as Record<string, unknown>).type as
           | number
           | undefined
-        const tintClass = logType != null ? (logTypeRowTint[logType] ?? '') : ''
+        const activeRequest =
+          logCategory === 'common'
+            ? getActiveRequest(row.original as UsageLog)
+            : undefined
+        const tintClass = activeRequest
+          ? 'border-info/30 bg-info/5'
+          : (logTypeRowTint[logType ?? 0] ?? '')
 
         return (
           <div
@@ -300,7 +308,10 @@ export function UsageLogsMobileList<TData>({
               tintClass
             )}
           >
-            {logCategory === 'common' && (
+            {activeRequest && (
+              <ActiveRequestMobileCard request={activeRequest} cells={cells} />
+            )}
+            {logCategory === 'common' && !activeRequest && (
               <CommonLogMobileCard
                 log={row.original as UsageLog}
                 cells={cells}

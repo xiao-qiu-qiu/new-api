@@ -20,6 +20,7 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	appI18n "github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/active_requests"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	builtinplugins "github.com/QuantumNous/new-api/plugins"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
@@ -2271,8 +2272,10 @@ func TestRouteTaskPluginEndpointUsesSelectedChannel(t *testing.T) {
 								body, contentType = form.Bytes(), writer.FormDataContentType()
 							}
 							reached := false
+							requestID := common.NewRequestId()
 							router := gin.New()
 							router.POST(path, func(c *gin.Context) {
+								c.Set(common.RequestIdKey, requestID)
 								common.SetContextKey(c, constant.ContextKeyUsingGroup, "route-test")
 								common.SetContextKey(c, constant.ContextKeyUserId, 7)
 								if tc.pinOrdinary || tc.pinPlugin {
@@ -2284,6 +2287,13 @@ func TestRouteTaskPluginEndpointUsesSelectedChannel(t *testing.T) {
 								}
 							}, RouteTaskPluginEndpoint(), PrepareTaskPluginEndpoint(), Distribute(), func(c *gin.Context) {
 								reached = true
+								active, err := active_requests.Query(t.Context(), active_requests.Filter{RequestID: requestID})
+								require.NoError(t, err)
+								if !tc.wantPlugin && path != "/v1/videos" {
+									assert.Len(t, active.Items, 1, "ordinary relay retains the selection owner's lifecycle")
+								} else {
+									assert.Empty(t, active.Items, "plugin/background execution does not retain an ordinary relay record")
+								}
 								_, pinned := c.Get(jsplugin.ContextKeyPinnedEndpoint)
 								assert.Equal(t, tc.wantPlugin, pinned)
 								_, relayEndpoint := c.Get(jsplugin.ContextKeyRelayEndpoint)
@@ -2330,6 +2340,9 @@ func TestRouteTaskPluginEndpointUsesSelectedChannel(t *testing.T) {
 							request.Header.Set("Content-Type", contentType)
 							recorder := httptest.NewRecorder()
 							router.ServeHTTP(recorder, request)
+							active, err := active_requests.Query(t.Context(), active_requests.Filter{RequestID: requestID})
+							require.NoError(t, err)
+							assert.Empty(t, active.Items, "completed endpoint arbitration must release its lifecycle")
 							status := tc.wantStatus
 							if status == 0 {
 								status = http.StatusNoContent

@@ -66,7 +66,7 @@ func OaiResponsesToChatBufferedStreamHandler(c *gin.Context, info *relaycommon.R
 	}
 	defer service.CloseResponseBodyGracefully(resp)
 
-	info.StreamStatus = relaycommon.NewStreamStatus()
+	info.StreamStatus = relaycommon.NewStreamStatus(info.ActiveRequest)
 	info.StreamStatus.RequireTerminal()
 	accumulator := relayconvert.NewResponsesBufferedAccumulator()
 	var finalResponse *dto.OpenAIResponsesResponse
