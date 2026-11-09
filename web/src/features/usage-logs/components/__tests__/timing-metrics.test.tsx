@@ -80,9 +80,10 @@ function renderTiming(options: {
 }
 
 it.each([false, true])(
-  'excludes first-token latency from displayed TPS and its status color (mobile=%s)',
+  'excludes first response time from displayed TPS and its status color (mobile=%s)',
   (mobile) => {
     renderTiming({ mobile, frtMs: 6000 })
+    expect(screen.getByText('First response')).toBeVisible()
     expect(screen.getByText('50 t/s')).toBeVisible()
     expect(screen.getByText('Duration').nextElementSibling).toHaveClass(
       'text-success'
@@ -91,7 +92,7 @@ it.each([false, true])(
 )
 
 it.each([10000, 11000])(
-  'shows no TPS when first-token latency %s ms leaves no generation time',
+  'shows no TPS when first response time %s ms leaves no generation time',
   (frtMs) => {
     renderTiming({ frtMs })
     expect(screen.getByText('—')).toBeVisible()
@@ -100,7 +101,7 @@ it.each([10000, 11000])(
 )
 
 it.each([undefined, -1000])(
-  'uses total-duration average when the first-token measurement is absent (%s)',
+  'uses total-duration average when the first-response measurement is absent (%s)',
   (frtMs) => {
     renderTiming({ frtMs })
     expect(screen.getByText('20 t/s')).toBeVisible()
@@ -110,5 +111,5 @@ it.each([undefined, -1000])(
 it('uses total-duration average for non-streaming logs even if they contain frt', () => {
   renderTiming({ isStream: false, frtMs: 6000 })
   expect(screen.getByText('20 t/s')).toBeVisible()
-  expect(screen.queryByText('First token')).not.toBeInTheDocument()
+  expect(screen.queryByText('First response')).not.toBeInTheDocument()
 })

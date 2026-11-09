@@ -215,7 +215,7 @@ export function HeaderNavigationSection({
       requireAuthKey: 'channelStatusRequireAuth',
       requireAuthDependsOn: 'channelStatusEnabled',
       title: t('Model Status'),
-      description: t('Model availability and first-token latency.'),
+      description: t('Model availability and first response time.'),
       requireAuthTitle: t('Require login to view model status'),
       requireAuthDescription: t(
         'Visitors must authenticate before accessing model status.'

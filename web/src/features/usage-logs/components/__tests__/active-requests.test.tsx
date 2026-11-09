@@ -125,7 +125,7 @@ it.each([false, true])(
   'shows pending status and unknown amounts instead of finalized billing (mobile=%s)',
   (mobile) => {
     renderFixture(mobile)
-    expect(screen.getByText('Waiting for first token')).toBeVisible()
+    expect(screen.getByText('Waiting for first response')).toBeVisible()
     expect(screen.getByText('example-model')).toBeVisible()
     expect(screen.queryByText('Consume')).not.toBeInTheDocument()
     expect(screen.queryByText(/\$0/)).not.toBeInTheDocument()
@@ -172,7 +172,9 @@ it('shows draining after client disconnect without claiming the request complete
     },
   })
   expect(screen.getByText('Finishing after disconnect')).toBeVisible()
-  expect(screen.queryByText('Waiting for first token')).not.toBeInTheDocument()
+  expect(
+    screen.queryByText('Waiting for first response')
+  ).not.toBeInTheDocument()
 })
 
 it('advances elapsed time locally using the server clock offset', () => {

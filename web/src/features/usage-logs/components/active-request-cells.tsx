@@ -37,7 +37,7 @@ export function ActiveRequestStatus(props: { request: ObservedRequest }) {
   switch (props.request.status) {
     case 'waiting':
       label = props.request.is_stream
-        ? t('Waiting for first token')
+        ? t('Waiting for first response')
         : t('Waiting for response')
       break
     case 'streaming':

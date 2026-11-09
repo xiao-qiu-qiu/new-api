@@ -23,7 +23,7 @@ import (
 // POST /api/channel/probes/:id/run -> RunChannelProbe
 // GET /api/channel/probes/status -> GetPublicChannelProbeStatus (public)
 // JSON is always {success, message, data}. PUT replaces all editable fields.
-// Timestamps are Unix seconds; TTFT/latency/thresholds are milliseconds.
+// Timestamps are Unix seconds; first-response/total latency and thresholds are milliseconds.
 // Raw history is newest first (60/model); timeline contains minute-based sample counts.
 
 func ListChannelProbes(c *gin.Context) {
@@ -238,7 +238,7 @@ func runChannelProbeAttempt(ctx context.Context, channel *model.Channel, modelNa
 		outcome := result.relayInfo.StreamStatus.OutcomeSnapshot()
 		noContent = outcome.EndReason == relaycommon.StreamEndReasonEOF && outcome.Response == relaycommon.ResponseOutcomeUnknown
 	}
-	if noContent && observation.TTFTMS == nil {
+	if noContent && !result.probeObserver.HasContent() {
 		observation.Success, observation.ErrorCode = false, "no_content"
 	}
 	return observation, result

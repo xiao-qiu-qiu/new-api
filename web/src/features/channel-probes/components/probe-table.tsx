@@ -150,7 +150,7 @@ export function ProbeTable(props: {
     },
     {
       id: 'ttft',
-      header: t('First-token latency'),
+      header: t('First response time'),
       cell: (probe) => (
         <div className='flex flex-col gap-1.5 text-xs tabular-nums'>
           {(probe.model_statuses ?? [probe]).map((item) => (

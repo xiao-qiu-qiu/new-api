@@ -128,7 +128,7 @@ export function ProbeDialog(props: {
       name: 'active_enabled',
       label: t('Active probes'),
       hint: t(
-        'Send scheduled streaming requests to measure time to first token. Probes may consume upstream quota.'
+        'Send scheduled streaming requests to measure first response time. Probes may consume upstream quota.'
       ),
     },
     {

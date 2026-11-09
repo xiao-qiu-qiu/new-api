@@ -20,8 +20,8 @@ import (
 )
 
 // ChannelProbeObserver inspects only bounded SSE lines, without saving content.
-// A response header, heartbeat, role delta, or usage event is not a first token.
-// It is independent of billing's FirstResponseTime (which can be metadata).
+// Content observation stays independent of the first-response timing used by
+// usage logs: metadata alone must not make an active generation probe succeed.
 type ChannelProbeObserver struct {
 	gin.ResponseWriter
 	mu      sync.Mutex
@@ -36,7 +36,7 @@ func NewChannelProbeObserver(writer gin.ResponseWriter) *ChannelProbeObserver {
 	return &ChannelProbeObserver{ResponseWriter: writer, started: time.Now()}
 }
 
-// NewChannelProbeObserverAt includes selection and retries in group TTFT.
+// NewChannelProbeObserverAt includes selection and retries in group latency.
 func NewChannelProbeObserverAt(writer gin.ResponseWriter, started time.Time) *ChannelProbeObserver {
 	return &ChannelProbeObserver{ResponseWriter: writer, started: started}
 }
@@ -127,8 +127,16 @@ func channelProbeContentDelta(event gjson.Result) bool {
 				return true
 			}
 		}
-	case "response.output_text.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta", "response.function_call_arguments.delta":
+	case "response.output_text.delta", "response.reasoning_text.delta", "response.reasoning_summary_text.delta", "response.function_call_arguments.delta", "response.custom_tool_call_input.delta", "response.refusal.delta":
 		return event.Get("delta").String() != ""
+	case "response.output_item.added":
+		item := event.Get("item")
+		switch item.Get("type").String() {
+		case "function_call":
+			return item.Get("name").String() != "" || item.Get("arguments").String() != ""
+		case "custom_tool_call":
+			return item.Get("name").String() != "" || item.Get("input").String() != ""
+		}
 	}
 	for _, candidate := range event.Get("candidates").Array() {
 		for _, part := range candidate.Get("content.parts").Array() {
@@ -140,11 +148,24 @@ func channelProbeContentDelta(event gjson.Result) bool {
 	return false
 }
 
+func (w *ChannelProbeObserver) HasContent() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.first != nil
+}
+
 func (w *ChannelProbeObserver) Result(ctx context.Context, info *relaycommon.RelayInfo, apiErr *types.NewAPIError) model.ChannelProbeResult {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	result := model.ChannelProbeResult{CheckedAt: time.Now().Unix(), LatencyMS: time.Since(w.started).Milliseconds(), Success: true}
-	if w.first != nil {
+	// TTFTMS keeps its legacy JSON/storage name for compatibility.
+	if info != nil && info.IsStream && !info.FirstResponseTime.IsZero() &&
+		!info.FirstResponseTime.Before(info.StartTime) && !info.FirstResponseTime.Before(w.started) {
+		// Match usage logs' millisecond arithmetic while retaining the group's
+		// original selection/retry start. Never reuse an earlier attempt's time.
+		value := info.FirstResponseTime.UnixMilli() - w.started.UnixMilli()
+		result.TTFTMS = &value
+	} else if (info == nil || info.IsStream) && w.first != nil {
 		value := *w.first
 		result.TTFTMS = &value
 	}

@@ -21,7 +21,7 @@ import { describe, expect, it } from 'vitest'
 
 import { StatusCard } from '../components/status-card'
 import { getWindowAvailability } from '../lib/status'
-import type { ProbeResult, PublicChannelStatus } from '../types'
+import type { ProbeResult, ProbeStatus, PublicChannelStatus } from '../types'
 
 const sample: ProbeResult = {
   checked_at: 1700000000,
@@ -80,11 +80,94 @@ describe('model status measurements', () => {
     )
     expect(screen.getByText('3')).toBeVisible()
     expect(screen.queryByText('15')).not.toBeInTheDocument()
-    expect(screen.getByText('Average first-token latency')).toBeVisible()
+    expect(screen.getByText('Average first response time')).toBeVisible()
   })
+  it.each<{
+    average: number
+    status: ProbeStatus
+    latestMs: number | null
+    color: string
+    label: string
+  }>([
+    {
+      average: 7999,
+      status: 'red',
+      latestMs: 21000,
+      color: 'text-emerald-600',
+      label: 'Slow or unavailable',
+    },
+    {
+      average: 8000,
+      status: 'green',
+      latestMs: 3670,
+      color: 'text-amber-600',
+      label: 'Responsive',
+    },
+    {
+      average: 19999,
+      status: 'red',
+      latestMs: 21000,
+      color: 'text-amber-600',
+      label: 'Slow or unavailable',
+    },
+    {
+      average: 20000,
+      status: 'green',
+      latestMs: 3670,
+      color: 'text-red-500',
+      label: 'Responsive',
+    },
+    {
+      average: 10454,
+      status: 'green',
+      latestMs: 3670,
+      color: 'text-amber-600',
+      label: 'Responsive',
+    },
+    {
+      average: 3670,
+      status: 'unknown',
+      latestMs: null,
+      color: 'text-emerald-600',
+      label: 'Unknown',
+    },
+    {
+      average: 3670,
+      status: 'red',
+      latestMs: null,
+      color: 'text-emerald-600',
+      label: 'Slow or unavailable',
+    },
+  ])(
+    'colors the $average ms average by its 8s/20s thresholds while keeping the latest $status badge',
+    ({ average, status, latestMs, color, label }) => {
+      render(
+        <StatusCard
+          probe={{
+            ...probe,
+            green_ms: 8000,
+            yellow_ms: 20000,
+            recent_average_ttft_ms: average,
+            status,
+            latest: {
+              ...sample,
+              ttft_ms: latestMs,
+              status,
+              success: status !== 'red',
+            },
+          }}
+        />
+      )
+      expect(
+        screen.getByText('Average first response time').previousElementSibling
+      ).toHaveClass(color)
+      expect(screen.getByText(label)).toBeVisible()
+    }
+  )
   it('shows no average when recent requests have no measured latency', () => {
     render(<StatusCard probe={{ ...probe, recent_average_ttft_ms: null }} />)
     expect(screen.getByText('—')).toBeVisible()
+    expect(screen.getByText('—')).toHaveClass('text-muted-foreground')
     expect(screen.queryByText('0.25')).not.toBeInTheDocument()
   })
   it('hides cache rate and price when the API has insufficient samples', () => {
@@ -157,11 +240,12 @@ describe('model status measurements', () => {
       screen.getByRole('button', { name: /No samples.*0 samples/ })
     ).toBeVisible()
   })
-  it('hides stale TTFT while preserving the selected-window availability', () => {
+  it('hides stale first response time while preserving the selected-window availability', () => {
     render(<StatusCard probe={{ ...probe, stale: true }} />)
     expect(screen.getByText('Unknown')).toBeVisible()
     expect(screen.getByText('Stale')).toBeVisible()
     expect(screen.queryByText('0.25')).not.toBeInTheDocument()
+    expect(screen.getByText('—')).toHaveClass('text-muted-foreground')
     expect(screen.getByText('97')).toBeVisible()
   })
   it('shows timeout independently and orders real time buckets from oldest to latest', () => {

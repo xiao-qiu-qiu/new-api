@@ -105,7 +105,7 @@ export function TimingMetricsCell(props: TimingMetricsCellProps) {
             />
           )}
           <span className='text-muted-foreground shrink-0'>
-            {t('First token')}
+            {t('First response')}
           </span>
           <span className={cn('tabular-nums', textColorMap[firstTokenVariant])}>
             {firstTokenLabel}

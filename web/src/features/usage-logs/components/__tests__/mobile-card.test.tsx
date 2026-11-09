@@ -528,7 +528,9 @@ it.each([false, true])(
         .closest('.col-start-2')
     ).not.toBeNull()
     if (streaming) {
-      expect(within(row as HTMLElement).getByText('First token')).toBeVisible()
+      expect(
+        within(row as HTMLElement).getByText('First response')
+      ).toBeVisible()
     }
   }
 )

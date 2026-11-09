@@ -79,7 +79,7 @@ export function ChannelStatus() {
                 {t('Model Status')}
               </h1>
               <p className='text-muted-foreground mt-2 text-sm sm:text-base'>
-                {t('Availability and first-token latency at a glance.')}
+                {t('Availability and first response time at a glance.')}
               </p>
             </div>
             <Button

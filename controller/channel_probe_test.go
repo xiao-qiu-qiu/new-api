@@ -178,6 +178,15 @@ func TestChannelProbeContentTiming(t *testing.T) {
 		{"Claude thinking", "data: {\"type\":\"content_block_delta\",\"delta\":{\"thinking\":\"hi\"}}\n\n", true, true},
 		{"Responses metadata", "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp\"}}\n\n", false, true},
 		{"Responses text", "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n", true, true},
+		{"Responses reasoning", "data: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"think\"}\n\n", true, true},
+		{"Responses reasoning summary", "data: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"think\"}\n\n", true, true},
+		{"Responses empty reasoning item", "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"reasoning\",\"summary\":[]}}\n\n", false, true},
+		{"Responses function name", "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"name\":\"lookup\",\"arguments\":\"\"}}\n\n", true, true},
+		{"Responses function arguments", "data: {\"type\":\"response.function_call_arguments.delta\",\"delta\":\"{}\"}\n\n", true, true},
+		{"Responses custom tool name", "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"custom_tool_call\",\"name\":\"apply_patch\",\"input\":\"\"}}\n\n", true, true},
+		{"Responses custom tool input", "data: {\"type\":\"response.custom_tool_call_input.delta\",\"delta\":\"patch\"}\n\n", true, true},
+		{"Responses empty tool item", "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"arguments\":\"\"}}\n\n", false, true},
+		{"Responses refusal text", "data: {\"type\":\"response.refusal.delta\",\"delta\":\"Cannot help\"}\n\n", true, true},
 		{"Gemini text", "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"hi\"}]}}]}\n\n", true, true},
 		{"late error", "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: {\"error\":{\"message\":\"TOKEN upstream-url\"}}\n\n", true, false},
 	} {
@@ -217,6 +226,55 @@ func TestChannelProbeContentTiming(t *testing.T) {
 	assert.True(t, passive.Success)
 	assert.Nil(t, passive.TTFTMS)
 	assert.Equal(t, "unknown", service.ChannelProbeStatus(passive.Success, passive.TTFTMS, probe))
+}
+
+func TestChannelProbeFirstResponseTiming(t *testing.T) {
+	started := time.Now().Add(-time.Minute).Truncate(time.Millisecond)
+	for _, tc := range []struct {
+		name          string
+		groupOffset   time.Duration
+		stream        bool
+		content       bool
+		firstResponse time.Time
+		wantMS        *int64
+	}{
+		{name: "metadata before delayed content", stream: true, content: true, firstResponse: started.Add(3 * time.Second), wantMS: common.GetPointer(int64(3000))},
+		{name: "metadata without content still measures first response", stream: true, firstResponse: started.Add(3 * time.Second), wantMS: common.GetPointer(int64(3000))},
+		{name: "zero first response latency is valid", stream: true, firstResponse: started, wantMS: common.GetPointer(int64(0))},
+		{name: "group includes selection and retries", stream: true, content: true, groupOffset: 2 * time.Second, firstResponse: started.Add(3 * time.Second), wantMS: common.GetPointer(int64(5000))},
+		{name: "no response does not use request duration", stream: true, firstResponse: started.Add(-time.Second)},
+		{name: "nonstream does not report first response", content: true, firstResponse: started.Add(3 * time.Second)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			observer := service.NewChannelProbeObserverAt(c.Writer, started.Add(-tc.groupOffset))
+			observer.Header().Set("Content-Type", "text/event-stream")
+			_, err := observer.WriteString("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp\"}}\n\n")
+			require.NoError(t, err)
+			assert.False(t, observer.HasContent())
+			if tc.content {
+				_, err = observer.WriteString("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n")
+				require.NoError(t, err)
+			}
+			info := &relaycommon.RelayInfo{IsStream: tc.stream, StartTime: started, FirstResponseTime: tc.firstResponse}
+			result := observer.Result(context.Background(), info, nil)
+			assert.True(t, result.Success)
+			assert.Equal(t, tc.wantMS, result.TTFTMS)
+			assert.Equal(t, tc.content, observer.HasContent())
+		})
+	}
+
+	// Native event observers can work without a RelayInfo timestamp. A stale
+	// first response from a previous attempt must not become negative latency.
+	observer := service.NewChannelProbeObserverAt(nil, started)
+	observer.ObserveEvent([]byte(`{"type":"response.output_text.delta","delta":"hello"}`))
+	fallback := observer.Result(context.Background(), nil, nil)
+	require.NotNil(t, fallback.TTFTMS)
+	for _, firstResponse := range []time.Time{time.Time{}, started.Add(-time.Second)} {
+		info := &relaycommon.RelayInfo{IsStream: true, StartTime: started.Add(-2 * time.Second), FirstResponseTime: firstResponse}
+		result := observer.Result(context.Background(), info, nil)
+		assert.Equal(t, fallback.TTFTMS, result.TTFTMS)
+	}
 }
 
 func TestChannelProbePersistenceAndAttemptIsolation(t *testing.T) {
@@ -539,7 +597,11 @@ func TestChannelProbeNativeAdapterWithoutUserOrBilling(t *testing.T) {
 			result := RunActiveChannelProbe(ctx, channelProbeFixture())
 			assert.False(t, result.Success)
 			assert.Equal(t, "no_content", result.ErrorCode)
-			assert.Nil(t, result.TTFTMS)
+			if tc.mode == 3 {
+				assert.Nil(t, result.TTFTMS)
+			} else {
+				assert.NotNil(t, result.TTFTMS, "metadata has a first response but cannot prove generated content")
+			}
 		})
 	}
 }
@@ -673,12 +735,14 @@ func TestChannelProbeUpgradeMultiModelWindowsAndOrder(t *testing.T) {
 func TestChannelProbeGroupRoutingAndModelTargets(t *testing.T) {
 	db := channelProbeTestDB(t)
 	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Ability{}))
-	oldRetry, oldCache := common.RetryTimes, common.MemoryCacheEnabled
+	oldRetry, oldCache, oldRedis := common.RetryTimes, common.MemoryCacheEnabled, common.RedisEnabled
 	oldTimeout := constant.StreamingTimeout
 	constant.StreamingTimeout = 5
 	t.Cleanup(func() { constant.StreamingTimeout = oldTimeout })
-	common.RetryTimes, common.MemoryCacheEnabled = 1, false
-	t.Cleanup(func() { common.RetryTimes, common.MemoryCacheEnabled = oldRetry, oldCache })
+	common.RetryTimes, common.MemoryCacheEnabled, common.RedisEnabled = 1, false, false
+	t.Cleanup(func() {
+		common.RetryTimes, common.MemoryCacheEnabled, common.RedisEnabled = oldRetry, oldCache, oldRedis
+	})
 	service.InitHttpClient()
 	var failedCalls, successfulCalls atomic.Int32
 	var models []string

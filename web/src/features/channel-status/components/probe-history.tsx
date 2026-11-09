@@ -114,7 +114,7 @@ export function ProbeHistory(props: {
                   </div>
                 )}
                 <div className='text-xs'>
-                  {t('Average first-token latency')}:{' '}
+                  {t('Average first response time')}:{' '}
                   {bucket.ttft_ms == null
                     ? '—'
                     : `${formatNumber(bucket.ttft_ms / 1000, locale)} s`}

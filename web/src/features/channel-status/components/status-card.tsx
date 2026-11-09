@@ -36,7 +36,7 @@ import {
   getWindowAvailability,
   statusTextColors,
 } from '../lib/status'
-import type { PublicChannelStatus } from '../types'
+import type { ProbeStatus, PublicChannelStatus } from '../types'
 import { ProbeHistory } from './probe-history'
 import { ProbeStatusBadge } from './probe-status-badge'
 
@@ -47,7 +47,13 @@ export function StatusCard(props: { probe: PublicChannelStatus }) {
   const probe = props.probe
   const status = getProbeStatus(probe)
   const availability = getWindowAvailability(probe)
-  const ttft = probe.recent_average_ttft_ms
+  const firstResponseMs = probe.recent_average_ttft_ms
+  let averageStatus: ProbeStatus = 'unknown'
+  if (firstResponseMs != null && !probe.stale) {
+    if (firstResponseMs < probe.green_ms) averageStatus = 'green'
+    else if (firstResponseMs < probe.yellow_ms) averageStatus = 'yellow'
+    else averageStatus = 'red'
+  }
   const cacheRate = probe.average_cache_hit_rate
   const estimatedPrice = probe.estimated_price_per_100m_tokens
   const showCacheRate =
@@ -124,25 +130,25 @@ export function StatusCard(props: { probe: PublicChannelStatus }) {
                 <dd
                   className={cn(
                     'text-lg leading-none font-semibold tracking-tight tabular-nums',
-                    statusTextColors[status]
+                    statusTextColors[averageStatus]
                   )}
                 >
-                  {ttft == null || probe.stale ? (
+                  {firstResponseMs == null || probe.stale ? (
                     '—'
                   ) : (
                     <>
-                      {formatNumber(ttft / 1000, locale)}
+                      {formatNumber(firstResponseMs / 1000, locale)}
                       <span className='ml-1 text-xs font-normal'>s</span>
                     </>
                   )}
                 </dd>
                 <dt className='text-muted-foreground mt-1.5 text-[11px]'>
-                  {t('Average first-token latency')}
+                  {t('Average first response time')}
                 </dt>
               </TooltipTrigger>
               <TooltipContent>
                 {t(
-                  'Average first-token latency of the latest 5 requests. Requests without a measured latency are excluded.'
+                  'Average first response time of the latest 5 requests, consistent with usage logs. Unmeasured requests are excluded.'
                 )}
               </TooltipContent>
             </Tooltip>
