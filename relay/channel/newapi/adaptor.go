@@ -3,8 +3,13 @@ package newapi
 import (
 	"errors"
 	"io"
+	"maps"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/relay/channel"
 	"github.com/QuantumNous/new-api/relay/channel/claude"
 	"github.com/QuantumNous/new-api/relay/channel/gemini"
@@ -86,6 +91,37 @@ func (a *Adaptor) ConvertGeminiRequest(c *gin.Context, info *relaycommon.RelayIn
 }
 
 func (a *Adaptor) ConvertImageRequest(c *gin.Context, info *relaycommon.RelayInfo, request dto.ImageRequest) (any, error) {
+	if relaycommon.NormalizeNewAPIImageRequest(info.ChannelType, &request) {
+		count, err := request.ImageCount(false)
+		if err != nil {
+			return nil, types.NewErrorWithStatusCode(err, types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+		}
+		if info.RelayMode == relayconstant.RelayModeImagesEdits && strings.Contains(c.Request.Header.Get("Content-Type"), "multipart/form-data") {
+			form := c.Request.MultipartForm
+			if form == nil {
+				form, err = common.ParseMultipartFormReusable(c)
+				if err != nil {
+					return nil, err
+				}
+			}
+			// OpenAI's multipart encoder copies raw form values, not the DTO.
+			// Use an attempt-local copy so the reusable client body stays intact.
+			normalized := *form
+			normalized.Value = maps.Clone(form.Value)
+			values := url.Values(normalized.Value)
+			for key, value := range map[string]string{"size": request.Size, "quality": request.Quality, "n": strconv.Itoa(count)} {
+				values.Del(key)
+				if value != "" {
+					values.Set(key, value)
+				}
+			}
+			originalForm, originalPostForm := c.Request.MultipartForm, c.Request.PostForm
+			c.Request.MultipartForm, c.Request.PostForm = &normalized, values
+			defer func() {
+				c.Request.MultipartForm, c.Request.PostForm = originalForm, originalPostForm
+			}()
+		}
+	}
 	return a.openaiAdaptor.ConvertImageRequest(c, info, request)
 }
 

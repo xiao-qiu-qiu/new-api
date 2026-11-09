@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
-import { fireEvent, screen } from "@testing-library/dom";
+import { fireEvent, screen, within } from "@testing-library/dom";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, expect, test, vi } from "vitest";
@@ -24,7 +25,8 @@ window.__newApiCanvasHost = {
 const { ImageSettingsPanel } = await import("../image-settings-panel");
 const { CanvasImageSettingsPopover } =
   await import("../canvas/canvas-image-settings-popover");
-const { defaultConfig } = await import("@/stores/use-config-store");
+const { defaultConfig, useConfigStore } =
+  await import("@/stores/use-config-store");
 const { canvasThemes } = await import("@/lib/canvas-theme");
 const { default: i18n } = await import("@/i18n");
 Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
@@ -32,6 +34,7 @@ Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", {
   value: true,
 });
 let root: Root | undefined;
+let queryClient: QueryClient | undefined;
 
 test("a legacy Gemini node summary displays the effective resolution and ratio", () => {
   const container = document.createElement("div");
@@ -60,9 +63,13 @@ test("a legacy Gemini node summary displays the effective resolution and ratio",
 afterEach(() => {
   act(() => root?.unmount());
   root = undefined;
+  queryClient?.clear();
+  queryClient = undefined;
+  useConfigStore.setState({ config: defaultConfig });
   document.body.replaceChildren();
   localStorage.clear();
   vi.clearAllMocks();
+  vi.unstubAllGlobals();
 });
 
 function renderPanel(overrides: Partial<AiConfig>) {
@@ -99,6 +106,9 @@ test.each(["gemini-3-pro-image", "media::gemini-3-pro-image"])(
 
     for (const resolution of ["1K", "2K", "4K"]) {
       expect(screen.getByRole("button", { name: resolution })).toBeTruthy();
+    }
+    for (const format of ["PNG", "JPEG", "WEBP", "GIF"]) {
+      expect(screen.queryByRole("button", { name: format })).toBeNull();
     }
     for (const ratio of [
       "1:1",
@@ -146,6 +156,128 @@ test("a Gemini imageModel without an explicit model uses the same constrained co
       name: i18n.t("settingsPanels.common.high"),
     }),
   ).toBeNull();
+});
+
+test("a Gemini model with a saved GIF format displays static image controls and hides unsupported output settings", () => {
+  renderPanel({ imageOutputFormat: "gif", size: "16:9", quality: "4K" });
+
+  for (const format of ["PNG", "JPEG", "WEBP", "GIF"]) {
+    expect(screen.queryByRole("button", { name: format })).toBeNull();
+  }
+  expect(screen.queryByText(i18n.t("Animation frames"))).toBeNull();
+  expect(screen.queryByText(i18n.t("Frame duration (ms)"))).toBeNull();
+  expect(screen.queryByRole("spinbutton", { name: "W" })).toBeNull();
+  expect(
+    screen.getByRole("button", { name: "4K" }).getAttribute("aria-pressed"),
+  ).toBe("true");
+  expect(
+    screen.getByRole("button", { name: "16:9" }).getAttribute("aria-pressed"),
+  ).toBe("true");
+  expect(
+    screen.getByRole("button", {
+      name: i18n.t("settingsPanels.image.images", { count: 3 }),
+    }),
+  ).toBeTruthy();
+});
+
+test("the image workbench follows the selected image model when a legacy model remains configured", async () => {
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: true,
+    media: query,
+    onchange: null,
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  }));
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+  const { App, ConfigProvider } = await import("antd");
+  const { default: ImagePage } = await import("@/pages/image");
+  useConfigStore.setState({
+    config: {
+      ...defaultConfig,
+      model: "media::gpt-image-1",
+      imageModel: "media::gpt-image-1",
+      size: "3840x2160",
+      quality: "high",
+      channels: [
+        {
+          id: "media",
+          name: "Images",
+          baseUrl: "https://unused.example",
+          apiKey: "",
+          apiFormat: "openai",
+          models: [
+            { name: "gpt-image-1", capability: "image" },
+            { name: "gemini-3.1-flash-image", capability: "image" },
+          ],
+        },
+      ],
+    },
+  });
+  const container = document.createElement("div");
+  document.body.append(container);
+  root = createRoot(container);
+  const client = new QueryClient();
+  queryClient = client;
+  await act(async () =>
+    root?.render(
+      createElement(
+        QueryClientProvider,
+        { client },
+        createElement(
+          ConfigProvider,
+          { theme: { token: { motion: false } } },
+          createElement(App, null, createElement(ImagePage)),
+        ),
+      ),
+    ),
+  );
+  expect(screen.getByRole("spinbutton", { name: "W" })).toBeTruthy();
+
+  await act(async () =>
+    fireEvent.click(
+      screen.getByRole("button", { name: "gpt-image-1（Images）" }),
+    ),
+  );
+  await act(async () =>
+    fireEvent.click(
+      within(screen.getByRole("listbox")).getByRole("option", {
+        name: "gemini-3.1-flash-image",
+      }),
+    ),
+  );
+
+  expect(useConfigStore.getState().config.model).toBe("media::gpt-image-1");
+  expect(useConfigStore.getState().config.imageModel).toBe(
+    "media::gemini-3.1-flash-image",
+  );
+  expect(
+    screen.getByRole("button", { name: "gemini-3.1-flash-image（Images）" }),
+  ).toBeTruthy();
+  expect(screen.queryByRole("spinbutton", { name: "W" })).toBeNull();
+  expect(
+    screen.queryByRole("button", {
+      name: i18n.t("settingsPanels.common.high"),
+    }),
+  ).toBeNull();
+  expect(
+    screen.queryByText(i18n.t("settingsPanels.image.transparent")),
+  ).toBeNull();
+  expect(
+    screen.getByRole("button", { name: "4K" }).getAttribute("aria-pressed"),
+  ).toBe("true");
+  expect(
+    screen.getByRole("button", { name: "16:9" }).getAttribute("aria-pressed"),
+  ).toBe("true");
 });
 
 test("a legacy 3840x2160/high Gemini node displays 4K and 16:9 and preserves 4K when its ratio changes", () => {
@@ -235,6 +367,7 @@ test("selecting Gemini Auto ratio preserves an explicit resolution", () => {
 test("a GPT image model retains generic quality and editable pixel dimensions", () => {
   const panel = renderPanel({
     model: "media::gpt-image-1",
+    imageModel: "media::gemini-3-pro-image",
     size: "1024x1024",
     quality: "auto",
   });

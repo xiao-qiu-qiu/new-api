@@ -35,9 +35,9 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const activeSize = config.size || "auto";
     const transparentBackground = config.background === "transparent";
     const outputFormat = config.imageOutputFormat || "png";
-    const animated = outputFormat === "gif";
-    const supportsGif = /^gpt-image-2\.6-(?:flare|sunburst)$/i.test(modelOptionName(config.model || config.imageModel));
     const gemini = isGeminiImageModel(modelOptionName(config.model || config.imageModel));
+    const animated = !gemini && outputFormat === "gif";
+    const supportsGif = /^gpt-image-2\.6-(?:flare|sunburst)$/i.test(modelOptionName(config.model || config.imageModel));
     const geminiSettings = gemini ? resolveGeminiImageSettings(activeSize, config.quality) : undefined;
     const selectedScale = geminiSettings?.scale ?? inferMediaScale(activeSize);
     const selectedRatio = geminiSettings?.ratio ?? inferMediaRatio(activeSize);
@@ -72,7 +72,7 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 }}
             >
                 {showTitle ? <div className="text-lg font-semibold">{t("settingsPanels.image.title")}</div> : null}
-                <div className="space-y-2.5">
+                {!gemini ? <div className="space-y-2.5">
                     <SettingTitle color={theme.node.muted}>{t("Image output format")}</SettingTitle>
                     <div className="grid grid-cols-4 gap-2.5">
                         {["png", "jpeg", "webp", "gif"].map((format) => (
@@ -87,7 +87,7 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                             </OptionPill>
                         ))}
                     </div>
-                </div>
+                </div> : null}
                 {animated ? <div className="grid grid-cols-2 gap-3">
                     <div className="space-y-2.5">
                         <SettingTitle color={theme.node.muted}>{t("Animation frames")}</SettingTitle>

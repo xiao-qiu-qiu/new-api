@@ -197,6 +197,33 @@ test.each(settings)(
   },
 );
 
+test.each(["generation", "edit"] as const)(
+  "Gemini %s ignores saved GIF options after the output format controls are hidden",
+  async (mode) => {
+    const config = imageConfig({
+      imageOutputFormat: "gif",
+      imageFrameCount: "999",
+      imageFrameDurationMs: "99999",
+    });
+    if (mode === "generation") await requestGeneration(config, "A cat");
+    else await requestEdit(config, "A cat", [reference]);
+
+    const body = siteFetch.mock.calls[0][1]?.body;
+    const parameters =
+      body instanceof FormData
+        ? Object.fromEntries(body.entries())
+        : JSON.parse(String(body));
+    expect(parameters).toMatchObject({
+      size: "1:1",
+      quality: "4K",
+      response_format: "b64_json",
+    });
+    expect(parameters).not.toHaveProperty("output_format");
+    expect(parameters).not.toHaveProperty("frame_count");
+    expect(parameters).not.toHaveProperty("frame_duration_ms");
+  },
+);
+
 test.each(["gemini-3.1-flash-image-preview", "gemini-nano-banana-pro"])(
   "%s generation resolves the raw model name before applying Gemini settings",
   async (model) => {
@@ -301,6 +328,8 @@ test.each([
   ["9:21", "auto", "auto", "9:16"],
   ["1648x3840", "high", "4k", "9:16"],
   ["1920x1080", "auto", "2k", "16:9"],
+  ["1584x672", "auto", "1k", "21:9"],
+  ["3168x1344", "auto", "2k", "21:9"],
   ["1K", "high", "1k", "auto"],
   ["2K", "auto", "2k", "auto"],
   ["4K", "auto", "4k", "auto"],

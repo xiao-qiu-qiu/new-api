@@ -2,6 +2,7 @@ package relay
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -48,6 +49,7 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 		return types.NewError(fmt.Errorf("invalid api type: %d", info.ApiType), types.ErrorCodeInvalidApiType, types.ErrOptionWithSkipRetry())
 	}
 	adaptor.Init(info)
+	geminiImage := relaycommon.NormalizeNewAPIImageRequest(info.ChannelType, request)
 	imageCount, err := request.ImageCount(false)
 	if err != nil {
 		return types.NewErrorWithStatusCode(err, types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
@@ -56,7 +58,8 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 	var requestBody io.Reader
 	var jsonData []byte
 
-	if model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled {
+	multipartRequest := strings.Contains(c.Request.Header.Get("Content-Type"), "multipart/form-data")
+	if (model_setting.GetGlobalSettings().PassThroughRequestEnabled || info.ChannelSetting.PassThroughBodyEnabled) && !(geminiImage && multipartRequest) {
 		storage, err := common.GetBodyStorage(c)
 		if err != nil {
 			return types.NewErrorWithStatusCode(err, types.ErrorCodeReadRequestBodyFailed, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
@@ -103,6 +106,34 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 		}
 	}
 	if jsonData != nil {
+		if info.ChannelType == constant.ChannelTypeNewAPI {
+			var outbound dto.ImageRequest
+			if err := common.Unmarshal(jsonData, &outbound); err != nil {
+				return types.NewErrorWithStatusCode(err, types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+			}
+			if relaycommon.NormalizeNewAPIImageRequest(info.ChannelType, &outbound) {
+				// Patch the final JSON, including passthrough and overrides, without
+				// dropping extensions that the typed Images DTO does not serialize.
+				var fields map[string]json.RawMessage
+				if err := common.Unmarshal(jsonData, &fields); err != nil {
+					return types.NewErrorWithStatusCode(err, types.ErrorCodeInvalidRequest, http.StatusBadRequest, types.ErrOptionWithSkipRetry())
+				}
+				for key, value := range map[string]string{"size": outbound.Size, "quality": outbound.Quality} {
+					delete(fields, key)
+					if value != "" {
+						fields[key], err = common.Marshal(value)
+						if err != nil {
+							return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+						}
+					}
+				}
+				jsonData, err = common.Marshal(fields)
+				if err != nil {
+					return types.NewError(err, types.ErrorCodeConvertRequestFailed, types.ErrOptionWithSkipRetry())
+				}
+				request.Size, request.Quality = outbound.Size, outbound.Quality
+			}
+		}
 		// Validate the final GIF contract after passthrough and channel overrides,
 		// before reserving quota or submitting an incompatible request.
 		if ojson.GetBytesNoCopy(jsonData, "output_format").String() == "gif" ||

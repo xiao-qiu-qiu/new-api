@@ -29,7 +29,10 @@ export function resolveGeminiImageSettings(
 ): { scale: "auto" | "1k" | "2k" | "4k"; ratio: string } {
   const value = size.trim().toLowerCase();
   const resolution = quality.trim().toLowerCase();
-  const inferredScale = /^[124]k$/.test(value) ? value : inferMediaScale(value);
+  let inferredScale = /^[124]k$/.test(value) ? value : inferMediaScale(value);
+  // These native wide sizes cross the generic canvas long-edge thresholds.
+  if (value === "1584x672") inferredScale = "1k";
+  if (value === "3168x1344") inferredScale = "2k";
   let scale: "auto" | "1k" | "2k" | "4k" = "auto";
   if (resolution === "1k" || resolution === "2k" || resolution === "4k") {
     scale = resolution;

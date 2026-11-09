@@ -12,7 +12,11 @@ import {
 } from "@/lib/gemini-image";
 import { encodeWanxImageEditMask } from "@/lib/canvas/canvas-image-mask";
 import { requestSiteResponsesText } from "./site-agent";
-import type { AiConfig, ModelChannel } from "@/stores/use-config-store";
+import {
+  modelOptionName,
+  type AiConfig,
+  type ModelChannel,
+} from "@/stores/use-config-store";
 import type { ReferenceImage } from "@/types/image";
 import {
   assertMediaPayload,
@@ -210,10 +214,11 @@ function imageRequestParameters(
     "image",
   );
   const configuredFormat = config.imageOutputFormat || "png";
+  const geminiImage = isGeminiImageModel(selection.model);
   const outputFormat = IMAGE_OUTPUT_FORMATS.has(configuredFormat)
     ? configuredFormat
     : "png";
-  const animated = outputFormat === "gif";
+  const animated = !geminiImage && outputFormat === "gif";
   if (
     animated &&
     !/^gpt-image-2\.6-(?:flare|sunburst)$/i.test(selection.model)
@@ -240,7 +245,6 @@ function imageRequestParameters(
       i18n.t("GIF frame duration must be an integer from 20 to 2000 ms."),
     );
   }
-  const geminiImage = isGeminiImageModel(selection.model);
   let size: string | undefined;
   let quality: string | undefined;
   if (geminiImage) {
@@ -307,7 +311,10 @@ export async function requestEdit(
   references: ReferenceImage[],
   options?: MediaRequestOptions,
 ): Promise<Array<{ id: string; dataUrl: string }>> {
-  if (config.imageOutputFormat === "gif") {
+  if (
+    config.imageOutputFormat === "gif" &&
+    !isGeminiImageModel(modelOptionName(config.model || config.imageModel))
+  ) {
     throw new Error(
       i18n.t(
         "GIF output is only available for text-to-image generation. Remove reference images and masks.",
