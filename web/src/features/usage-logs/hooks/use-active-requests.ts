@@ -89,7 +89,13 @@ export function useActiveRequests(
     stableFilters,
   ] as const
   const shouldEnable =
-    options.enabled && options.userId != null && includesConsume && visible
+    options.enabled &&
+    options.userId != null &&
+    includesConsume &&
+    !params.error_keyword &&
+    !params.error_code &&
+    !params.request_result &&
+    visible
 
   return useQuery({
     queryKey,

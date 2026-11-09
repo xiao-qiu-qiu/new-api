@@ -194,7 +194,16 @@ it('downloads the streamed logs of the current filters as CSV', async () => {
   const success = vi.spyOn(toast, 'success')
   const user = userEvent.setup()
   const range = recentRange()
-  renderExport({ role: ROLE.USER, search: { ...range, model: 'gpt-4o' } })
+  renderExport({
+    role: ROLE.USER,
+    search: {
+      ...range,
+      model: 'gpt-4o',
+      errorKeyword: 'blocked by policy',
+      errorCode: 'cyber_policy',
+      requestResult: 'failed',
+    },
+  })
 
   await user.click(await screen.findByRole('button', { name: 'Export' }))
   await user.click(
@@ -206,6 +215,9 @@ it('downloads the streamed logs of the current filters as CSV', async () => {
   const params = new URL(String(url), 'http://localhost').searchParams
   expect(String(url)).toMatch(/^\/api\/log\/self\/export\?/)
   expect(params.get('model_name')).toBe('gpt-4o')
+  expect(params.get('error_keyword')).toBe('blocked by policy')
+  expect(params.get('error_code')).toBe('cyber_policy')
+  expect(params.get('request_result')).toBe('failed')
   expect(params.get('start_timestamp')).toBe(
     String(Math.floor(range.startTime / 1000))
   )

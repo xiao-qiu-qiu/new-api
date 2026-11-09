@@ -203,6 +203,32 @@ describe('active request data', () => {
 })
 
 describe('active request polling', () => {
+  it.each([
+    { errorKeyword: 'blocked by policy' },
+    { errorCode: 'cyber_policy' },
+    { requestResult: 'failed' },
+    { requestResult: 'success' },
+    { requestResult: 'stream_error' },
+  ])(
+    'hides pending requests when filtering completed outcomes with %j',
+    async (searchParams) => {
+      const get = vi.spyOn(api, 'get').mockResolvedValue(activeResponse())
+      const hook = renderHook(
+        (filters: Record<string, unknown>) =>
+          useActiveRequests({ ...options, searchParams: filters }),
+        { wrapper, initialProps: {} as Record<string, unknown> }
+      )
+      await waitFor(() =>
+        expect(hook.result.current.data?.items).toHaveLength(1)
+      )
+      get.mockClear()
+      hook.rerender(searchParams)
+      expect(hook.result.current.data).toBeUndefined()
+      expect(hook.result.current.fetchStatus).toBe('idle')
+      expect(get).not.toHaveBeenCalled()
+    }
+  )
+
   it('applies the same search and column filter precedence as persisted logs', async () => {
     const get = vi.spyOn(api, 'get').mockResolvedValue(activeResponse())
     const hook = renderHook(

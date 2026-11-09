@@ -51,6 +51,9 @@ export function getLogCsvHeader(isAdmin: boolean, t: Translate): string[] {
     t('IP'),
     t('Request ID'),
     t('Details'),
+    t('Error Code'),
+    t('Stream Status'),
+    t('End Error'),
   ]
 }
 
@@ -61,6 +64,29 @@ export function getLogCsvRow(
   t: Translate
 ): string[] {
   const other = parseLogOther(log.other ?? '')
+  const streamStatus = other?.stream_status
+  let errorCode: unknown = other?.error_code ?? streamStatus?.error_code
+  if (errorCode == null && streamStatus?.end_error) {
+    try {
+      const terminal = JSON.parse(streamStatus.end_error) as {
+        code?: unknown
+        error?: { code?: unknown }
+        response?: { error?: { code?: unknown } }
+      } | null
+      errorCode =
+        terminal?.code ??
+        terminal?.error?.code ??
+        terminal?.response?.error?.code
+    } catch {
+      // Plain-text termination errors have no structured error code.
+    }
+  }
+  const endErrors = [
+    streamStatus?.end_error,
+    ...(Array.isArray(streamStatus?.errors) ? streamStatus.errors : []),
+  ].filter(
+    (error): error is string => typeof error === 'string' && error !== ''
+  )
   const usage = isDisplayableLogType(log.type)
   const cacheWrite =
     (other?.cache_creation_tokens_5m ?? 0) +
@@ -91,6 +117,11 @@ export function getLogCsvRow(
     log.ip ?? '',
     log.request_id ?? '',
     renderLogContent(other, t) ?? log.content ?? '',
+    typeof errorCode === 'string' || typeof errorCode === 'number'
+      ? String(errorCode)
+      : '',
+    typeof streamStatus?.status === 'string' ? streamStatus.status : '',
+    [...new Set(endErrors)].join('\n'),
   ]
 }
 

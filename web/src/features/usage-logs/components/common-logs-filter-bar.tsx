@@ -94,6 +94,9 @@ function buildSearchSourceKey(values: {
   username?: unknown
   requestId?: unknown
   upstreamRequestId?: unknown
+  errorKeyword?: unknown
+  errorCode?: unknown
+  requestResult?: unknown
   type?: unknown
 }) {
   return [
@@ -106,6 +109,9 @@ function buildSearchSourceKey(values: {
     values.username,
     values.requestId,
     values.upstreamRequestId,
+    values.errorKeyword,
+    values.errorCode,
+    values.requestResult,
     Array.isArray(values.type) ? values.type.join(',') : values.type,
   ]
     .map((value) => String(value ?? ''))
@@ -158,6 +164,9 @@ export function CommonLogsFilterBar<TData>(
       username: searchParams.username,
       requestId: searchParams.requestId,
       upstreamRequestId: searchParams.upstreamRequestId,
+      errorKeyword: searchParams.errorKeyword,
+      errorCode: searchParams.errorCode,
+      requestResult: searchParams.requestResult,
       type: searchParams.type,
     }
     const filters: CommonLogFilters = {
@@ -172,6 +181,9 @@ export function CommonLogsFilterBar<TData>(
       username: searchParams.username || undefined,
       requestId: searchParams.requestId || undefined,
       upstreamRequestId: searchParams.upstreamRequestId || undefined,
+      errorKeyword: searchParams.errorKeyword || undefined,
+      errorCode: searchParams.errorCode || undefined,
+      requestResult: searchParams.requestResult || undefined,
     }
     return {
       sourceKey: buildSearchSourceKey(sourceValues),
@@ -188,6 +200,9 @@ export function CommonLogsFilterBar<TData>(
     searchParams.username,
     searchParams.requestId,
     searchParams.upstreamRequestId,
+    searchParams.errorKeyword,
+    searchParams.errorCode,
+    searchParams.requestResult,
     searchParams.type,
   ])
   const [draft, setDraft] = useState<CommonLogDraft>(() => searchState)
@@ -214,14 +229,16 @@ export function CommonLogsFilterBar<TData>(
   const handleApply = useCallback(
     (nextFilters: CommonLogFilters = filters) => {
       const filterParams = buildSearchParams(nextFilters, 'common')
+      const nextSearch = { ...filterParams, type: [logType], page: 1 }
+      setDraft({
+        sourceKey: buildSearchSourceKey(nextSearch),
+        filters: nextFilters,
+        logType,
+      })
       navigate({
         to: '/usage-logs/$section',
         params: { section: 'common' },
-        search: {
-          ...filterParams,
-          type: [logType],
-          page: 1,
-        },
+        search: nextSearch,
       })
       queryClient.invalidateQueries({ queryKey: ['logs'] })
       queryClient.invalidateQueries({ queryKey: ['usage-logs-stats'] })
@@ -267,11 +284,17 @@ export function CommonLogsFilterBar<TData>(
     !!filters.username ||
     !!filters.channel ||
     !!filters.requestId ||
-    !!filters.upstreamRequestId
+    !!filters.upstreamRequestId ||
+    !!filters.errorKeyword ||
+    !!filters.errorCode
 
   const hasTypeFilter = logType !== LOG_TYPE_ALL_VALUE
   const hasAdditionalFilters =
-    !!filters.model || !!filters.group || hasTypeFilter || hasExpandedFilters
+    !!filters.model ||
+    !!filters.group ||
+    !!filters.requestResult ||
+    hasTypeFilter ||
+    hasExpandedFilters
 
   const expandedFilterCount = [
     filters.token,
@@ -279,6 +302,8 @@ export function CommonLogsFilterBar<TData>(
     isAdmin ? filters.channel : undefined,
     filters.requestId,
     filters.upstreamRequestId,
+    filters.errorKeyword,
+    filters.errorCode,
   ].filter(Boolean).length
   const sensitiveInputClass = sensitiveVisible
     ? undefined
@@ -293,6 +318,15 @@ export function CommonLogsFilterBar<TData>(
     [t]
   )
   const selectedLogType = logTypeItems.find((type) => type.value === logType)
+  const requestResultItems = useMemo(
+    () => [
+      { value: 'all', label: t('All request results') },
+      { value: 'success', label: t('Successful requests') },
+      { value: 'failed', label: t('Failed requests') },
+      { value: 'stream_error', label: t('Stream errors') },
+    ],
+    [t]
+  )
   const deprecatedTypeDescription = t(
     'Only used to find historical logs. New records are available in Audit Logs.'
   )
@@ -434,8 +468,52 @@ export function CommonLogsFilterBar<TData>(
       </Select>
     </LogsFilterField>
   )
+  const requestResultFilter = (
+    <LogsFilterField>
+      <Select
+        items={requestResultItems}
+        value={filters.requestResult || 'all'}
+        onValueChange={(value) => {
+          if (value !== null) {
+            handleChange('requestResult', value === 'all' ? undefined : value)
+          }
+        }}
+      >
+        <SelectTrigger aria-label={t('Request result')}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent alignItemWithTrigger={false}>
+          <SelectGroup>
+            {requestResultItems.map((item) => (
+              <SelectItem key={item.value} value={item.value}>
+                {item.label}
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        </SelectContent>
+      </Select>
+    </LogsFilterField>
+  )
   const advancedFilters = (
     <>
+      <LogsFilterField wide>
+        <LogsFilterInput
+          aria-label={t('Error keyword')}
+          placeholder={t('Error keyword')}
+          value={filters.errorKeyword || ''}
+          onChange={(e) => handleChange('errorKeyword', e.target.value)}
+          onKeyDown={handleKeyDown}
+        />
+      </LogsFilterField>
+      <LogsFilterField>
+        <LogsFilterInput
+          aria-label={t('Error code (exact match)')}
+          placeholder={t('Error code (exact match)')}
+          value={filters.errorCode || ''}
+          onChange={(e) => handleChange('errorCode', e.target.value)}
+          onKeyDown={handleKeyDown}
+        />
+      </LogsFilterField>
       <LogsFilterField>
         <LogsFilterInput
           aria-label={t('Token Name')}
@@ -500,6 +578,7 @@ export function CommonLogsFilterBar<TData>(
           {modelFilter}
           {groupFilter}
           {typeFilter}
+          {requestResultFilter}
         </>
       }
       advancedFilters={advancedFilters}
@@ -509,12 +588,17 @@ export function CommonLogsFilterBar<TData>(
           {modelFilter}
           {groupFilter}
           {typeFilter}
+          {requestResultFilter}
           {advancedFilters}
         </>
       }
       mobileFilterCount={
-        [filters.model, filters.group, hasTypeFilter].filter(Boolean).length +
-        expandedFilterCount
+        [
+          filters.model,
+          filters.group,
+          filters.requestResult,
+          hasTypeFilter,
+        ].filter(Boolean).length + expandedFilterCount
       }
       hasAdvancedActiveFilters={hasExpandedFilters}
       advancedFilterCount={expandedFilterCount}

@@ -64,6 +64,17 @@ func openLogFilterTestDatabase(t *testing.T, dialect string) *gorm.DB {
 	var version string
 	require.NoError(t, db.Raw(versionSQL).Scan(&version).Error)
 	t.Logf("log database: %s %s", dialect, version)
+	previousDB, previousType, previousGroupCol := LOG_DB, common.LogDatabaseType(), logGroupCol
+	LOG_DB = db
+	common.SetLogDatabaseType(common.DatabaseType(dialect))
+	logGroupCol = "`group`"
+	if dialect == "postgres" {
+		logGroupCol = `"group"`
+	}
+	t.Cleanup(func() {
+		LOG_DB, logGroupCol = previousDB, previousGroupCol
+		common.SetLogDatabaseType(previousType)
+	})
 	return db
 }
 
@@ -71,17 +82,6 @@ func TestLogTextFilterDatabaseMatrix(t *testing.T) {
 	for _, dialect := range []string{"sqlite", "mysql", "postgres", "clickhouse"} {
 		t.Run(dialect, func(t *testing.T) {
 			db := openLogFilterTestDatabase(t, dialect)
-			previousDB, previousType, previousGroupCol := LOG_DB, common.LogDatabaseType(), logGroupCol
-			LOG_DB = db
-			common.SetLogDatabaseType(common.DatabaseType(dialect))
-			logGroupCol = "`group`"
-			if dialect == "postgres" {
-				logGroupCol = `"group"`
-			}
-			t.Cleanup(func() {
-				LOG_DB, logGroupCol = previousDB, previousGroupCol
-				common.SetLogDatabaseType(previousType)
-			})
 			now := time.Now().Unix()
 			entries := []Log{
 				{UserId: 1, Username: "alice", ModelName: `pre-gpt_4\mini!-post`, TokenName: `prefix-key_!\main-suffix`, Quota: 11, PromptTokens: 2, CompletionTokens: 3, RequestId: "own", CreatedAt: now - 1},
@@ -146,7 +146,7 @@ func TestLogTextFilterDatabaseMatrix(t *testing.T) {
 						return nil
 					}))
 					assert.ElementsMatch(t, tc.allIDs, exported)
-					stat, err := SumUsedQuota(filter.Type, filter.StartTimestamp, filter.EndTimestamp, filter.ModelName, filter.Username, filter.TokenName, filter.Channel, filter.Group)
+					stat, err := SumUsedQuota(filter)
 					require.NoError(t, err)
 					assert.Equal(t, tc.allStat, stat)
 
@@ -181,7 +181,7 @@ func TestLogTextFilterDatabaseMatrix(t *testing.T) {
 							t.Error("invalid searches must not export rows")
 							return nil
 						}))
-						_, err = SumUsedQuota(0, 0, 0, filter.ModelName, filter.Username, filter.TokenName, 0, "")
+						_, err = SumUsedQuota(filter)
 						require.Error(t, err)
 					}
 				}
@@ -190,6 +190,170 @@ func TestLogTextFilterDatabaseMatrix(t *testing.T) {
 				stat, err := SumUserUsedQuota(0, LogFilter{})
 				require.NoError(t, err)
 				assert.Equal(t, Stat{}, stat)
+			})
+		})
+	}
+}
+
+func TestLogErrorFilterDatabaseMatrix(t *testing.T) {
+	for _, dialect := range []string{"sqlite", "mysql", "postgres", "clickhouse"} {
+		t.Run(dialect, func(t *testing.T) {
+			db := openLogFilterTestDatabase(t, dialect)
+			now := time.Now().Unix()
+			entries := []Log{
+				{TokenName: "success", Other: `{}`},
+				{TokenName: "empty"},
+				{TokenName: "null", Other: `null`},
+				{TokenName: "non-object", Other: `[]`},
+				{TokenName: "completed", Other: ` { "stream_status" : { "status" : "ok", "response_status" : "completed", "end_reason" : "done", "errors" : [ ] } } `},
+				{TokenName: "policy-content", Type: LogTypeError, Content: "Blocked By Policy"},
+				{TokenName: "code-nonstream", Type: LogTypeError, Other: `{"error_code":"cyber_policy","error_type":"invalid_request_error","status_code":403}`},
+				{TokenName: "code-other-owner", UserId: 2, Type: LogTypeError, Other: `{"error_code":"cyber_policy"}`},
+				{TokenName: "code-nested", Type: LogTypeError, Other: `{"error":{"code":"cyber_policy","message":"public failure wording"}}`},
+				{TokenName: "legacy-terminal", Other: `{"stream_status":{"status":"error","end_error":"{\"type\":\"error\",\"error\":{\"code\":\"cyber_policy\",\"message\":\"blocked by policy\"}}"}}`},
+				{TokenName: "root-terminal", Other: `{"stream_status":{"status":"error","end_error":"{\n \"code\" : \"cyber_policy\"\n}"}}`},
+				{TokenName: "response-terminal", Other: `{"stream_status":{"status":"ok","response_status":"failed","end_error":"{\"response\":{\"error\":{\"code\":\"cyber_policy\"}}}"}}`},
+				{TokenName: "structured-stream", Other: `{"stream_status":{"status":"error","error_code":"cyber_policy"}}`},
+				{TokenName: "incomplete", Other: `{"stream_status":{"status":"ok","response_status":"incomplete"}}`},
+				{TokenName: "cancelled", Other: `{"stream_status":{"response_status":"cancelled"}}`},
+				{TokenName: "canceled", Other: `{"stream_status":{"response_status":"canceled"}}`},
+				{TokenName: "timeout", Other: `{"stream_status":{"status":"ok","response_status":"completed","end_reason":"timeout"}}`},
+				{TokenName: "error-count", Other: `{"stream_status":{"status":"ok","error_count":2}}`},
+				{TokenName: "error-array", Other: `{"stream_status":{"status":"ok","errors":["buffer aborted"]}}`},
+				{TokenName: "client-gone", Other: `{"stream_status":{"status":"ok","response_status":"completed","client_gone":true}}`},
+				{TokenName: "plain-terminal", Other: `{"stream_status":{"end_error":"upstream closed"}}`},
+				{TokenName: "code-prefix", Type: LogTypeError, Other: `{"error_code":"cyber_policy_extra"}`},
+				{TokenName: "code-case", Type: LogTypeError, Other: `{"error_code":"CYBER_POLICY"}`},
+				{TokenName: "code-mention", Other: `{"stream_status":{"end_error":"{\"message\":\"cyber_policy\"}"}}`},
+				{TokenName: "quoted-code-mention", Other: `{"stream_status":{"end_error":"{\"message\":\"quoted \\\"code\\\":\\\"cyber_policy\\\"\"}"}}`},
+				{TokenName: "literal-content", Type: LogTypeError, Content: `prefix literal%_!\path suffix`},
+				{TokenName: "literal-array", Other: `{"stream_status":{"status":"error","errors":["prefix LITERAL%_!\\path suffix"]}}`},
+				{TokenName: "literal-decoy", Type: LogTypeError, Content: "literalXX!path"},
+				{TokenName: "hidden", Other: `{"admin_info":{"error_code":"cyber_policy","message":"secret-only"},"root_info":{"stream_status":{"status":"error"},"error_code":"cyber_policy","message":"secret-only"},"audit_info":{"message":"secret-only"}}`},
+				{TokenName: "legacy-hidden", Other: `{"reject_reason":"secret-only","channel_name":"secret-only"}`},
+				{TokenName: "json-null-error", Other: `{"error_code":null,"stream_status":{"end_error":null,"error_count":null,"errors":null}}`},
+				{TokenName: "retry-failed", RequestId: "retry", Type: LogTypeError, Content: "blocked by policy"},
+				{TokenName: "retry-success", RequestId: "retry", Other: `{}`},
+			}
+			for i := range entries {
+				entries[i].Id = i + 1
+				entries[i].CreatedAt = now - 5
+				entries[i].Group = "team"
+				if entries[i].UserId == 0 {
+					entries[i].UserId = 1
+				}
+				if entries[i].RequestId == "" {
+					entries[i].RequestId = entries[i].TokenName
+				}
+				if entries[i].Type == LogTypeUnknown {
+					entries[i].Type = LogTypeConsume
+					entries[i].Quota = 3
+					entries[i].PromptTokens, entries[i].CompletionTokens = 2, 1
+				}
+			}
+			require.NoError(t, db.Create(&entries).Error)
+			if dialect != "clickhouse" {
+				// ClickHouse's existing logs schema uses a non-nullable String.
+				require.NoError(t, db.Model(&Log{}).Where("token_name = ?", "empty").UpdateColumn("other", nil).Error)
+				// Keep both the SQL NULL and historical empty-string contracts.
+				require.NoError(t, db.Model(&Log{}).Where("token_name = ?", "success").UpdateColumn("other", "").Error)
+			}
+			streamErrors := []string{"legacy-terminal", "root-terminal", "response-terminal", "structured-stream", "incomplete", "cancelled", "canceled", "timeout", "error-count", "error-array", "client-gone", "plain-terminal", "code-mention", "quoted-code-mention", "literal-array"}
+			errorLogs := []string{"policy-content", "code-nonstream", "code-other-owner", "code-nested", "code-prefix", "code-case", "literal-content", "literal-decoy", "retry-failed"}
+			failed := append(append([]string{}, streamErrors...), errorLogs...)
+			for _, tc := range []struct {
+				name   string
+				filter LogFilter
+				ids    []string
+			}{
+				{name: "case insensitive content and public terminal", filter: LogFilter{ErrorKeyword: "BLOCKED BY POLICY"}, ids: []string{"policy-content", "legacy-terminal", "retry-failed"}},
+				{name: "public error message", filter: LogFilter{ErrorKeyword: "public failure wording"}, ids: []string{"code-nested"}},
+				{name: "decoded error arrays", filter: LogFilter{ErrorKeyword: "BUFFER ABORTED"}, ids: []string{"error-array"}},
+				{name: "literal wildcard escape and backslash", filter: LogFilter{ErrorKeyword: `literal%_!\path`}, ids: []string{"literal-content", "literal-array"}},
+				{name: "single literal percent", filter: LogFilter{ErrorKeyword: "%"}, ids: []string{"literal-content", "literal-array"}},
+				{name: "single literal escape", filter: LogFilter{ErrorKeyword: "!"}, ids: []string{"literal-content", "literal-array", "literal-decoy"}},
+				{name: "hidden scopes never participate", filter: LogFilter{ErrorKeyword: "secret-only"}},
+				{name: "exact code includes historical JSON string terminals", filter: LogFilter{ErrorCode: "cyber_policy"}, ids: []string{"code-nonstream", "code-other-owner", "code-nested", "legacy-terminal", "root-terminal", "response-terminal", "structured-stream"}},
+				{name: "code comparison is case sensitive", filter: LogFilter{ErrorCode: "CYBER_POLICY"}, ids: []string{"code-case"}},
+				{name: "no code prefix matching", filter: LogFilter{ErrorCode: "cyber"}},
+				{name: "JSON null is not an error code", filter: LogFilter{ErrorCode: "null"}},
+				{name: "stream failures", filter: LogFilter{RequestResult: "stream_error"}, ids: streamErrors},
+				{name: "all failures", filter: LogFilter{RequestResult: "failed"}, ids: failed},
+				{name: "successful historical and completed consume logs", filter: LogFilter{RequestResult: "success"}, ids: []string{"success", "empty", "null", "non-object", "completed", "hidden", "legacy-hidden", "json-null-error", "retry-success"}},
+				{name: "composed error filters", filter: LogFilter{ErrorKeyword: "blocked by policy", ErrorCode: "cyber_policy", RequestResult: "stream_error"}, ids: []string{"legacy-terminal"}},
+				{name: "type intersects result", filter: LogFilter{Type: LogTypeError, RequestResult: "stream_error"}},
+				{name: "retry failed row", filter: LogFilter{RequestId: "retry", RequestResult: "failed"}, ids: []string{"retry-failed"}},
+				{name: "retry successful row", filter: LogFilter{RequestId: "retry", RequestResult: "success"}, ids: []string{"retry-success"}},
+				{name: "retry rows remain separate", filter: LogFilter{RequestId: "retry"}, ids: []string{"retry-failed", "retry-success"}},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					filter := tc.filter
+					filter.StartTimestamp, filter.EndTimestamp, filter.Group = now-3600, now+60, "team"
+					for _, self := range []bool{false, true} {
+						var expected []string
+						var expectedStat Stat
+						for _, id := range tc.ids {
+							for _, entry := range entries {
+								if entry.TokenName != id || (self && entry.UserId != 1) {
+									continue
+								}
+								expected = append(expected, id)
+								if entry.Type == LogTypeConsume {
+									expectedStat.Quota += entry.Quota
+									expectedStat.Rpm++
+									expectedStat.Tpm += entry.PromptTokens + entry.CompletionTokens
+								}
+							}
+						}
+						var logs []*Log
+						var total int64
+						var err error
+						if self {
+							logs, total, err = GetUserLogs(1, filter, 0, 2)
+						} else {
+							logs, total, err = GetAllLogs(filter, 0, 2)
+						}
+						require.NoError(t, err)
+						assert.EqualValues(t, len(expected), total)
+						assert.Len(t, logs, min(2, len(expected)), "filter before applying pagination")
+						for _, log := range logs {
+							assert.Contains(t, expected, log.TokenName)
+						}
+						var exported []string
+						consume := func(log *Log) error {
+							exported = append(exported, log.TokenName)
+							if self {
+								assert.Equal(t, 1, log.UserId)
+								assert.NotContains(t, log.Other, "secret-only")
+							}
+							return nil
+						}
+						var stat Stat
+						if self {
+							require.NoError(t, StreamUserLogs(context.Background(), 1, filter, consume))
+							stat, err = SumUserUsedQuota(1, filter)
+						} else {
+							require.NoError(t, StreamAllLogs(context.Background(), filter, common.RoleAdminUser, consume))
+							stat, err = SumUsedQuota(filter)
+						}
+						assert.ElementsMatch(t, expected, exported)
+						require.NoError(t, err)
+						assert.Equal(t, expectedStat, stat, "same search and ownership boundary for consumption statistics")
+					}
+				})
+			}
+			t.Run("unknown result is rejected by every query", func(t *testing.T) {
+				filter := LogFilter{RequestResult: "unknown"}
+				_, _, err := GetAllLogs(filter, 0, 2)
+				require.Error(t, err)
+				_, _, err = GetUserLogs(1, filter, 0, 2)
+				require.Error(t, err)
+				_, err = SumUsedQuota(filter)
+				require.Error(t, err)
+				_, err = SumUserUsedQuota(1, filter)
+				require.Error(t, err)
+				require.Error(t, StreamAllLogs(context.Background(), filter, common.RoleAdminUser, func(*Log) error { t.Error("invalid filter must not export rows"); return nil }))
+				require.Error(t, StreamUserLogs(context.Background(), 1, filter, func(*Log) error { t.Error("invalid filter must not export rows"); return nil }))
 			})
 		})
 	}

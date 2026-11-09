@@ -488,6 +488,9 @@ type LogFilter struct {
 	Group             string
 	RequestId         string
 	UpstreamRequestId string
+	ErrorKeyword      string
+	ErrorCode         string
+	RequestResult     string
 }
 
 func (f LogFilter) apply(tx *gorm.DB) (*gorm.DB, error) {
@@ -522,7 +525,7 @@ func (f LogFilter) apply(tx *gorm.DB) (*gorm.DB, error) {
 	if f.Group != "" {
 		tx = tx.Where("logs."+logGroupCol+" = ?", f.Group)
 	}
-	return tx, nil
+	return f.applyErrorSearch(tx)
 }
 
 func GetAllLogs(filter LogFilter, startIdx int, num int) (logs []*Log, total int64, err error) {
@@ -688,16 +691,8 @@ type Stat struct {
 	Tpm   int `json:"tpm"`
 }
 
-func SumUsedQuota(logType int, startTimestamp int64, endTimestamp int64, modelName string, username string, tokenName string, channel int, group string) (stat Stat, err error) {
-	return sumUsedQuota(LOG_DB, LogFilter{
-		StartTimestamp: startTimestamp,
-		EndTimestamp:   endTimestamp,
-		ModelName:      modelName,
-		Username:       username,
-		TokenName:      tokenName,
-		Channel:        channel,
-		Group:          group,
-	})
+func SumUsedQuota(filter LogFilter) (Stat, error) {
+	return sumUsedQuota(LOG_DB, filter)
 }
 
 // SumUserUsedQuota uses the same ownership boundary as the user's log list.
@@ -708,7 +703,7 @@ func SumUserUsedQuota(userId int, filter LogFilter) (Stat, error) {
 }
 
 func sumUsedQuota(db *gorm.DB, filter LogFilter) (stat Stat, err error) {
-	filter.Type = LogTypeConsume
+	db = db.Where("logs.type = ?", LogTypeConsume)
 	tx, err := filter.apply(db.Session(&gorm.Session{}).Table("logs"))
 	if err != nil {
 		return stat, err

@@ -55,7 +55,12 @@ export interface CommonLogFilters extends CommonFilters {
   username?: string
   requestId?: string
   upstreamRequestId?: string
+  errorKeyword?: string
+  errorCode?: string
+  requestResult?: LogRequestResult
 }
+
+export type LogRequestResult = 'success' | 'failed' | 'stream_error'
 
 /**
  * Drawing logs specific filters
@@ -121,6 +126,8 @@ export interface ToolSurchargeItem {
 }
 
 export interface LogOtherData {
+  error_code?: string | number
+  error_type?: string
   admin_info?: {
     request_policy?: PolicyEvent[]
     is_multi_key?: boolean
@@ -262,7 +269,9 @@ export interface LogOtherData {
   billing_source?: string
   group?: string
   stream_status?: {
+    error_code?: string | number
     status?: string
+    response_status?: string
     end_reason?: string
     error_count?: number
     end_error?: string
@@ -452,6 +461,9 @@ export interface GetLogsParams {
   group?: string
   request_id?: string
   upstream_request_id?: string
+  error_keyword?: string
+  error_code?: string
+  request_result?: LogRequestResult
 }
 
 export interface GetLogsResponse {
@@ -476,6 +488,9 @@ export interface GetLogStatsParams {
   group?: string
   request_id?: string
   upstream_request_id?: string
+  error_keyword?: string
+  error_code?: string
+  request_result?: LogRequestResult
 }
 
 export interface GetLogStatsResponse {

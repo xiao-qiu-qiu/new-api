@@ -112,6 +112,9 @@ describe('usage log CSV export', () => {
       '203.0.113.9',
       'req-1',
       '',
+      '',
+      '',
+      '',
     ])
   })
 
@@ -154,7 +157,164 @@ describe('usage log CSV export', () => {
 
     expect(row.slice(1, 2)).toEqual(['充值'])
     expect(row.slice(5, 12)).toEqual(['', '', '', '', '', '', ''])
-    expect(row.at(-1)).toBe('充值 $5')
+    expect(row[getLogCsvHeader(false, t).indexOf('Details')]).toBe('充值 $5')
+    expect(row.slice(-3)).toEqual(['', '', ''])
+  })
+
+  test.each([false, true])(
+    'stream policy errors are exported without private metadata (admin=%s)',
+    async (isAdmin) => {
+      const t = await chineseTranslator()
+      const header = getLogCsvHeader(isAdmin, t)
+      const row = getLogCsvRow(
+        {
+          ...consumeLog,
+          content: 'Original details',
+          other: JSON.stringify({
+            error_code: 'cyber_policy',
+            stream_status: {
+              status: 'error',
+              end_error: 'blocked by policy',
+              errors: ['blocked by policy', 'upstream response failed'],
+            },
+            admin_info: {
+              error_code: 'private-admin-code',
+              secret: 'admin-secret',
+            },
+            root_info: { secret: 'root-secret' },
+          }),
+        },
+        isAdmin,
+        t
+      )
+
+      expect(row).toHaveLength(header.length)
+      expect(header.slice(-3)).toEqual([
+        'Error Code',
+        'Stream Status',
+        'End Error',
+      ])
+      expect(row.slice(-3)).toEqual([
+        'cyber_policy',
+        'error',
+        'blocked by policy\nupstream response failed',
+      ])
+      expect(row[header.indexOf('Details')]).toBe('Original details')
+      expect(toCsvLine(row)).not.toMatch(
+        /private-admin-code|admin-secret|root-secret/
+      )
+    }
+  )
+
+  test('soft stream errors without an end error remain searchable in CSV', async () => {
+    const t = await chineseTranslator()
+    const row = getLogCsvRow(
+      {
+        ...consumeLog,
+        other: JSON.stringify({
+          stream_status: { status: 'error', errors: ['blocked by policy'] },
+        }),
+      },
+      false,
+      t
+    )
+
+    expect(row.slice(-3)).toEqual(['', 'error', 'blocked by policy'])
+  })
+
+  test('non-stream errors retain numeric error codes and original details', async () => {
+    const t = await chineseTranslator()
+    const row = getLogCsvRow(
+      {
+        ...consumeLog,
+        type: 5,
+        is_stream: false,
+        content: 'blocked by policy',
+        other: JSON.stringify({ error_code: 403 }),
+      },
+      false,
+      t
+    )
+
+    expect(row.slice(-4)).toEqual(['blocked by policy', '403', '', ''])
+  })
+
+  test('stream error codes are exported when no top-level error code was recorded', async () => {
+    const t = await chineseTranslator()
+    const row = getLogCsvRow(
+      {
+        ...consumeLog,
+        other: JSON.stringify({
+          stream_status: {
+            status: 'error',
+            error_code: 'cyber_policy',
+            end_error: 'blocked by policy',
+          },
+        }),
+      },
+      false,
+      t
+    )
+
+    expect(row.slice(-3)).toEqual([
+      'cyber_policy',
+      'error',
+      'blocked by policy',
+    ])
+  })
+
+  test.each([
+    { code: 'cyber_policy', message: 'blocked by policy' },
+    { error: { code: 'cyber_policy', message: 'blocked by policy' } },
+    {
+      response: {
+        error: { code: 'cyber_policy', message: 'blocked by policy' },
+      },
+    },
+  ])(
+    'extracts error codes from historical JSON terminal errors %j',
+    async (terminal) => {
+      const t = await chineseTranslator()
+      const row = getLogCsvRow(
+        {
+          ...consumeLog,
+          other: JSON.stringify({
+            stream_status: {
+              status: 'error',
+              end_error: JSON.stringify(terminal),
+            },
+          }),
+        },
+        false,
+        t
+      )
+      expect(row.slice(-3)).toEqual([
+        'cyber_policy',
+        'error',
+        JSON.stringify(terminal),
+      ])
+    }
+  )
+
+  test('invalid diagnostic values are ignored rather than serializing nested objects', async () => {
+    const t = await chineseTranslator()
+    const row = getLogCsvRow(
+      {
+        ...consumeLog,
+        other: JSON.stringify({
+          error_code: { secret: 'private-code' },
+          stream_status: {
+            status: { secret: 'private-status' },
+            end_error: { secret: 'private-error' },
+            errors: [{ secret: 'private-soft-error' }, null],
+          },
+        }),
+      },
+      false,
+      t
+    )
+
+    expect(row.slice(-3)).toEqual(['', '', ''])
   })
 
   test('cells are quoted and text that starts a formula stays text', () => {

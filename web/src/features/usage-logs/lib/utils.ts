@@ -35,6 +35,7 @@ import {
 import type {
   GetLogsParams,
   GetLogsResponse,
+  LogRequestResult,
   FetchLogsConfig,
   GetMidjourneyLogsParams,
   GetTaskLogsParams,
@@ -198,6 +199,15 @@ export function buildApiParams(config: {
       : {}),
     ...(searchParams.upstreamRequestId
       ? { upstream_request_id: String(searchParams.upstreamRequestId) }
+      : {}),
+    ...(searchParams.errorKeyword
+      ? { error_keyword: String(searchParams.errorKeyword) }
+      : {}),
+    ...(searchParams.errorCode
+      ? { error_code: String(searchParams.errorCode) }
+      : {}),
+    ...(searchParams.requestResult
+      ? { request_result: searchParams.requestResult as LogRequestResult }
       : {}),
     ...buildTimeRangeParams(searchParams, false),
   }

@@ -28,6 +28,9 @@ func logFilterFromQuery(c *gin.Context, admin bool) model.LogFilter {
 		Group:             c.Query("group"),
 		RequestId:         c.Query("request_id"),
 		UpstreamRequestId: c.Query("upstream_request_id"),
+		ErrorKeyword:      c.Query("error_keyword"),
+		ErrorCode:         c.Query("error_code"),
+		RequestResult:     c.Query("request_result"),
 	}
 	if admin {
 		filter.Username = c.Query("username")
@@ -114,6 +117,10 @@ func ExportUserLogs(c *gin.Context) {
 // range.
 func exportLogs(c *gin.Context, all bool) {
 	filter := logFilterFromQuery(c, all)
+	if err := filter.Validate(); err != nil {
+		common.ApiError(c, err)
+		return
+	}
 	startTimestamp, err := limitLogTimeRange(filter.StartTimestamp, filter.EndTimestamp)
 	if err != nil {
 		common.ApiError(c, err)
@@ -201,15 +208,7 @@ func GetLogByKey(c *gin.Context) {
 }
 
 func GetLogsStat(c *gin.Context) {
-	logType, _ := strconv.Atoi(c.Query("type"))
-	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
-	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
-	tokenName := c.Query("token_name")
-	username := c.Query("username")
-	modelName := c.Query("model_name")
-	channel, _ := strconv.Atoi(c.Query("channel"))
-	group := c.Query("group")
-	stat, err := model.SumUsedQuota(logType, startTimestamp, endTimestamp, modelName, username, tokenName, channel, group)
+	stat, err := model.SumUsedQuota(logFilterFromQuery(c, true))
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -228,24 +227,15 @@ func GetLogsStat(c *gin.Context) {
 }
 
 func GetLogsSelfStat(c *gin.Context) {
-	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
-	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
+	filter := logFilterFromQuery(c, false)
 	if c.GetInt("role") < common.RoleAdminUser {
 		var err error
-		if startTimestamp, err = limitLogTimeRange(startTimestamp, endTimestamp); err != nil {
+		if filter.StartTimestamp, err = limitLogTimeRange(filter.StartTimestamp, filter.EndTimestamp); err != nil {
 			common.ApiError(c, err)
 			return
 		}
 	}
-	channel, _ := strconv.Atoi(c.Query("channel"))
-	quotaNum, err := model.SumUserUsedQuota(c.GetInt("id"), model.LogFilter{
-		StartTimestamp: startTimestamp,
-		EndTimestamp:   endTimestamp,
-		ModelName:      c.Query("model_name"),
-		TokenName:      c.Query("token_name"),
-		Channel:        channel,
-		Group:          c.Query("group"),
-	})
+	quotaNum, err := model.SumUserUsedQuota(c.GetInt("id"), filter)
 	if err != nil {
 		common.ApiError(c, err)
 		return
