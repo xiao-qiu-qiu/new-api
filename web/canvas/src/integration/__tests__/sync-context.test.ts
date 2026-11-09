@@ -206,3 +206,26 @@ it('restores model metadata and selections when loading a saved channel configur
   expect(config.videoModel).toBe('current::video')
   expect(config.channels[0].models).toMatchObject([model])
 })
+
+it.each([
+  ['images::gemini-nano-banana-2.1', 'images::gemini-nano-banana-2.1'],
+  ['removed::gemini-nano-banana-2.1', 'current::multimodal'],
+])('rehydrates saved selection %s against the current station catalog', async (saved, expected) => {
+  context.channels = [currentChannel, {
+    ...currentChannel,
+    id: 'images',
+    models: [{ name: 'gemini-nano-banana-2.1', capability: 'image' }],
+  }]
+  const { CONFIG_STORE_KEY, defaultConfig, useConfigStore } = await import('@/stores/use-config-store')
+  const { applySiteContext } = await import('../sync-context')
+  localStorage.setItem(CONFIG_STORE_KEY, JSON.stringify({
+    state: { config: { ...defaultConfig, imageModel: saved, channels: [], models: [], apiKey: '' } },
+    version: 0,
+  }))
+
+  await useConfigStore.persist.rehydrate()
+  applySiteContext()
+
+  expect(useConfigStore.getState().config.imageModel).toBe(expected)
+  expect(useConfigStore.getState().config.channels).toEqual(context.channels)
+})

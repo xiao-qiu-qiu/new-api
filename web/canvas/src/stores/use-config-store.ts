@@ -4,6 +4,7 @@ import { persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
 
 import i18n from "@/i18n";
+import { getSiteContext } from "@/integration/site-context";
 import { getUserStorageKey } from "@/lib/site-storage";
 import type { VideoModelCapabilities } from "@/lib/video-model-constraints";
 
@@ -254,7 +255,13 @@ export const useConfigStore = create<ConfigStore>()(
                 const persistedWebdav = (persistedState.webdav || {}) as Partial<WebdavSyncConfig>;
                 const config = { ...defaultConfig, ...persistedConfig };
                 if (!Array.isArray(persistedConfig.channels)) config.channels = [];
-                const channels = normalizeChannels(config);
+                let channels = normalizeChannels(config);
+                const siteChannels = getSiteContext().channels;
+                if (!persistedConfig.channels?.length && siteChannels.length) {
+                    // Persistence strips the catalog. Restore selections against
+                    // the authenticated host catalog, before picking defaults.
+                    channels = siteChannels;
+                }
                 const models = modelOptionsFromChannels(channels);
                 return {
                     ...current,
