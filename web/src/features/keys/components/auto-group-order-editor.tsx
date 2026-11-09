@@ -16,20 +16,12 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { ArrowRight01Icon } from '@hugeicons/core-free-icons'
-import { HugeiconsIcon } from '@hugeicons/react'
 import { Reorder } from 'motion/react'
 import { useMemo, type ComponentProps } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { AutoGroupOrderItem } from '@/components/auto-group-order-item'
-import { Button } from '@/components/ui/button'
-import {
-  Empty,
-  EmptyDescription,
-  EmptyHeader,
-  EmptyTitle,
-} from '@/components/ui/empty'
+import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 
 import {
@@ -40,11 +32,9 @@ import { GroupRatioBadge } from './auto-group-visuals'
 
 type AutoGroupOrderEditorProps = Omit<ComponentProps<'div'>, 'onChange'> & {
   value: string[]
-  mode: 'inherit' | 'custom'
   options: ApiKeyGroupOption[]
-  globalOptions: ApiKeyGroupOption[]
   maxCount: number
-  onChange: (value: { groups: string[]; mode: 'inherit' | 'custom' }) => void
+  onChange: (groups: string[]) => void
   'data-slot'?: string
   'data-form-root'?: string
 }
@@ -53,7 +43,6 @@ export function AutoGroupOrderEditor(props: AutoGroupOrderEditorProps) {
   const { t } = useTranslation()
   const maxCount =
     Number.isInteger(props.maxCount) && props.maxCount > 0 ? props.maxCount : 20
-  const isInheriting = props.mode === 'inherit'
   const atLimit = props.value.length >= maxCount
   const candidates = useMemo(
     () =>
@@ -66,17 +55,7 @@ export function AutoGroupOrderEditor(props: AutoGroupOrderEditorProps) {
 
   const handleAdd = (group: string) => {
     if (atLimit || props.value.includes(group)) return
-    props.onChange({
-      groups: [...props.value, group],
-      mode: 'custom',
-    })
-  }
-
-  const handleRemove = (group: string) => {
-    props.onChange({
-      groups: props.value.filter((item) => item !== group),
-      mode: 'custom',
-    })
+    props.onChange([...props.value, group])
   }
 
   const handleMove = (index: number, direction: 'up' | 'down') => {
@@ -84,7 +63,7 @@ export function AutoGroupOrderEditor(props: AutoGroupOrderEditorProps) {
     if (targetIndex < 0 || targetIndex >= props.value.length) return
     const next = [...props.value]
     ;[next[index], next[targetIndex]] = [next[targetIndex], next[index]]
-    props.onChange({ groups: next, mode: 'custom' })
+    props.onChange(next)
   }
 
   return (
@@ -99,30 +78,6 @@ export function AutoGroupOrderEditor(props: AutoGroupOrderEditorProps) {
       aria-invalid={props['aria-invalid']}
       className={cn('flex flex-col gap-3', props.className)}
     >
-      <div className='flex items-center justify-between gap-3'>
-        <p className='text-muted-foreground text-xs' aria-live='polite'>
-          {isInheriting
-            ? t('Using global groups ({{count}} groups)', {
-                count: props.globalOptions.length,
-              })
-            : t('{{count}} / {{max}} groups selected', {
-                count: props.value.length,
-                max: maxCount,
-              })}
-        </p>
-        <Button
-          type='button'
-          variant='outline'
-          size='sm'
-          disabled={isInheriting}
-          onClick={() => {
-            props.onChange({ groups: [], mode: 'inherit' })
-          }}
-        >
-          {t('Use global groups')}
-        </Button>
-      </div>
-
       <ApiKeyGroupCombobox
         options={candidates}
         value={undefined}
@@ -135,97 +90,50 @@ export function AutoGroupOrderEditor(props: AutoGroupOrderEditorProps) {
         disabled={atLimit || candidates.length === 0}
       />
 
-      {isInheriting && props.globalOptions.length === 0 && (
-        <Empty className='min-h-28 border'>
-          <EmptyHeader>
-            <EmptyTitle>{t('Use global groups')}</EmptyTitle>
-            <EmptyDescription>
-              {t('No available global groups.')}
-            </EmptyDescription>
-          </EmptyHeader>
-        </Empty>
-      )}
-
-      {isInheriting && props.globalOptions.length > 0 && (
-        <ol
-          data-slot='global-auto-order'
-          aria-label={t('Use global groups')}
-          className='flex max-h-24 flex-wrap content-start gap-1.5 overflow-y-auto'
-        >
-          {props.globalOptions.map((option, index) => (
-            <li key={option.value} className='flex min-w-0 items-center gap-1'>
-              {index > 0 && (
-                <HugeiconsIcon
-                  icon={ArrowRight01Icon}
-                  strokeWidth={2}
-                  aria-hidden='true'
-                  data-slot='global-auto-order-connector'
-                  className='text-muted-foreground size-3.5 shrink-0'
-                />
-              )}
-              <span
-                data-slot='global-auto-order-chip'
-                title={option.desc}
-                className='bg-muted/30 flex min-w-0 items-center gap-1.5 rounded-md border px-2 py-1'
-              >
-                <span
-                  data-slot='global-auto-order-index'
-                  aria-hidden='true'
-                  className='bg-primary/10 text-primary flex size-4 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold tabular-nums'
-                >
-                  {index + 1}
-                </span>
-                <span
-                  data-slot='global-auto-order-name'
-                  className='max-w-40 truncate text-xs font-medium'
-                >
-                  {option.label}
-                </span>
-                {option.desc && (
-                  <span
-                    data-slot='global-auto-order-description'
-                    className='sr-only'
-                  >
-                    {option.desc}
-                  </span>
-                )}
-                <GroupRatioBadge ratio={option.ratio} />
-              </span>
-            </li>
-          ))}
-        </ol>
-      )}
-
-      {!isInheriting && props.value.length === 0 && (
-        <Empty className='min-h-24 border'>
-          <EmptyHeader>
-            <EmptyTitle>{t('Selected groups')}</EmptyTitle>
-            <EmptyDescription>
-              {t('No groups selected. Add a group or use global groups.')}
-            </EmptyDescription>
-          </EmptyHeader>
-        </Empty>
-      )}
-
-      {!isInheriting && props.value.length > 0 && (
+      {props.value.length > 0 && (
         <Reorder.Group
           axis='y'
           values={props.value}
-          onReorder={(groups) => props.onChange({ groups, mode: 'custom' })}
+          onReorder={props.onChange}
           className='flex flex-col gap-2'
         >
-          {props.value.map((group, index) => (
-            <AutoGroupOrderItem
-              key={group}
-              group={group}
-              index={index}
-              count={props.value.length}
-              onMove={handleMove}
-              onRemove={handleRemove}
-            />
-          ))}
+          {props.value.map((group, index) => {
+            const option = props.options.find((item) => item.value === group)
+            return (
+              <AutoGroupOrderItem
+                key={group}
+                group={group}
+                index={index}
+                count={props.value.length}
+                leading={
+                  <span
+                    className='text-muted-foreground w-4 shrink-0 text-center text-xs tabular-nums'
+                    aria-hidden='true'
+                  >
+                    {index + 1}
+                  </span>
+                }
+                onMove={handleMove}
+                onRemove={(removed) =>
+                  props.onChange(props.value.filter((item) => item !== removed))
+                }
+              >
+                {option ? (
+                  <GroupRatioBadge ratio={option.ratio} />
+                ) : (
+                  <Badge variant='destructive'>{t('Unavailable')}</Badge>
+                )}
+              </AutoGroupOrderItem>
+            )
+          })}
         </Reorder.Group>
       )}
+      <p className='text-muted-foreground text-xs' aria-live='polite'>
+        {t('{{count}} / {{max}} groups selected', {
+          count: props.value.length,
+          max: maxCount,
+        })}
+      </p>
     </div>
   )
 }

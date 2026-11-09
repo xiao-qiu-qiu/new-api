@@ -21,7 +21,6 @@ import { z } from 'zod'
 
 import { parseQuotaFromDollars, quotaUnitsToDollars } from '@/lib/format'
 
-import { DEFAULT_GROUP } from '../constants'
 import {
   openAITierPolicySchema,
   type ApiKey,
@@ -32,7 +31,11 @@ import {
 // Form Schema
 // ============================================================================
 
-export function getApiKeyFormSchema(t: TFunction, maxAutoGroups = 20) {
+export function getApiKeyFormSchema(
+  t: TFunction,
+  maxAutoGroups = 20,
+  availableGroups?: string[]
+) {
   const autoGroupLimit =
     Number.isInteger(maxAutoGroups) && maxAutoGroups > 0 ? maxAutoGroups : 20
 
@@ -46,42 +49,44 @@ export function getApiKeyFormSchema(t: TFunction, maxAutoGroups = 20) {
       allow_ips: z.string().optional(),
       allow_user_quota_query: z.boolean(),
       openai_tier_policy: openAITierPolicySchema,
-      group: z.string().optional(),
-      auto_groups_mode: z.enum(['inherit', 'custom']),
-      auto_groups: z.array(z.string()),
+      auto_groups: z
+        .array(z.string().min(1))
+        .min(1, t('Select at least one group')),
       cross_group_retry: z.boolean().optional(),
       tokenCount: z.number().min(1).optional(),
     })
     .superRefine((data, ctx) => {
-      if (data.group === 'auto') {
-        if (
-          data.auto_groups_mode === 'custom' &&
-          data.auto_groups.length === 0
-        ) {
-          ctx.addIssue({
-            code: 'custom',
-            path: ['auto_groups'],
-            message: t('Select at least one group or use global groups.'),
-          })
-        }
+      if (data.auto_groups.length > autoGroupLimit) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['auto_groups'],
+          message: t('Select at most {{max}} groups', {
+            max: autoGroupLimit,
+          }),
+        })
+      }
 
-        if (data.auto_groups.length > autoGroupLimit) {
-          ctx.addIssue({
-            code: 'custom',
-            path: ['auto_groups'],
-            message: t('Select at most {{max}} groups', {
-              max: autoGroupLimit,
-            }),
-          })
-        }
-
-        if (new Set(data.auto_groups).size !== data.auto_groups.length) {
-          ctx.addIssue({
-            code: 'custom',
-            path: ['auto_groups'],
-            message: t('Groups must not contain duplicates'),
-          })
-        }
+      if (new Set(data.auto_groups).size !== data.auto_groups.length) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['auto_groups'],
+          message: t('Groups must not contain duplicates'),
+        })
+      }
+      if (
+        data.auto_groups.some(
+          (group) =>
+            group === 'auto' ||
+            (availableGroups !== undefined && !availableGroups.includes(group))
+        )
+      ) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['auto_groups'],
+          message: t(
+            'Some selected groups are unavailable. Choose available groups.'
+          ),
+        })
       }
 
       if (data.unlimited_quota) {
@@ -116,22 +121,16 @@ export const API_KEY_FORM_DEFAULT_VALUES: ApiKeyFormValues = {
   allow_ips: '',
   allow_user_quota_query: true,
   openai_tier_policy: 'follow',
-  group: DEFAULT_GROUP,
-  auto_groups_mode: 'inherit',
   auto_groups: [],
   cross_group_retry: true,
   tokenCount: 1,
 }
 
-export function getApiKeyFormDefaultValues(
-  defaultUseAutoGroup: boolean
-): ApiKeyFormValues {
+export function getApiKeyFormDefaultValues(): ApiKeyFormValues {
   return {
     ...API_KEY_FORM_DEFAULT_VALUES,
-    group: defaultUseAutoGroup ? 'auto' : DEFAULT_GROUP,
-    auto_groups_mode: 'inherit',
     auto_groups: [],
-    cross_group_retry: defaultUseAutoGroup,
+    model_limits: [],
   }
 }
 
@@ -159,12 +158,9 @@ export function transformFormDataToPayload(
     allow_ips: data.allow_ips || '',
     allow_user_quota_query: data.allow_user_quota_query,
     openai_tier_policy: data.openai_tier_policy,
-    group: data.group || '',
-    auto_groups:
-      data.group === 'auto' && data.auto_groups_mode === 'custom'
-        ? data.auto_groups
-        : [],
-    cross_group_retry: data.group === 'auto' ? !!data.cross_group_retry : false,
+    group: data.auto_groups.length > 1 ? 'auto' : data.auto_groups[0] || '',
+    auto_groups: data.auto_groups.length > 1 ? data.auto_groups : [],
+    cross_group_retry: data.auto_groups.length > 1 && !!data.cross_group_retry,
   }
 }
 
@@ -172,17 +168,14 @@ export function transformFormDataToPayload(
  * Transform API key data to form defaults
  */
 export function transformApiKeyToFormDefaults(
-  apiKey: ApiKey,
-  availableAutoGroups: string[] = [],
-  maxAutoGroups = 20
+  apiKey: ApiKey
 ): ApiKeyFormValues {
-  const availableSet = new Set(availableAutoGroups)
-  const storedAutoGroups = apiKey.auto_groups ?? []
-  const autoGroups = storedAutoGroups
-    .filter((group) => availableSet.has(group))
-    .slice(0, Math.max(0, maxAutoGroups))
-  const autoGroupsMode = storedAutoGroups.length > 0 ? 'custom' : 'inherit'
-
+  let selectedGroups: string[] = []
+  if (apiKey.group === 'auto') {
+    selectedGroups = [...(apiKey.auto_groups ?? [])]
+  } else if (apiKey.group) {
+    selectedGroups = [apiKey.group]
+  }
   return {
     name: apiKey.name,
     remain_quota_dollars: apiKey.unlimited_quota
@@ -197,9 +190,7 @@ export function transformApiKeyToFormDefaults(
     allow_ips: apiKey.allow_ips || '',
     allow_user_quota_query: !!apiKey.allow_user_quota_query,
     openai_tier_policy: apiKey.openai_tier_policy || 'follow',
-    group: apiKey.group || DEFAULT_GROUP,
-    auto_groups_mode: autoGroupsMode,
-    auto_groups: autoGroups,
+    auto_groups: selectedGroups,
     cross_group_retry: !!apiKey.cross_group_retry,
     tokenCount: 1,
   }

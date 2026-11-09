@@ -68,14 +68,12 @@ import {
 } from '@/components/ui/sheet'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { RelatedPolicyLink } from '@/features/system-settings/request-policies/related-policy-link'
-import { useStatus } from '@/hooks/use-status'
 import { getUserModels, getUserGroups } from '@/lib/api'
 import { getCurrencyDisplay, getCurrencyLabel } from '@/lib/currency'
 import { handleServerError } from '@/lib/handle-server-error'
@@ -101,10 +99,7 @@ import {
   transformApiKeyToFormDefaults,
 } from '../lib'
 import type { ApiKey } from '../types'
-import {
-  ApiKeyGroupCombobox,
-  type ApiKeyGroupOption,
-} from './api-key-group-combobox'
+import type { ApiKeyGroupOption } from './api-key-group-combobox'
 import { ApiKeySpeedTierField } from './api-key-speed-tier-field'
 import { useApiKeys } from './api-keys-provider'
 import { AutoGroupOrderEditor } from './auto-group-order-editor'
@@ -124,13 +119,11 @@ export function ApiKeysMutateDrawer({
   const isUpdate = !!currentRow
   const currentRowId = currentRow?.id
   const { triggerRefresh } = useApiKeys()
-  const { status, loading: statusLoading } = useStatus()
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [initializedTarget, setInitializedTarget] = useState<string | null>(
     null
   )
-  const defaultUseAutoGroup = status?.default_use_auto_group === true
 
   // Fetch models
   const { data: modelsData } = useQuery({
@@ -186,45 +179,32 @@ export function ApiKeysMutateDrawer({
       })),
     [groupsData, t]
   )
-  const backendHasAuto = groups.some((g) => g.value === 'auto')
-  const availableAutoGroupNames = useMemo(
-    () => groups.filter((group) => group.value !== 'auto').map((g) => g.value),
+  const availableGroupNames = useMemo(
+    () =>
+      groups
+        .filter((group) => group.value !== 'auto')
+        .map((group) => group.value),
     [groups]
   )
-  const globalAutoGroups = useMemo(() => {
-    const available = new Set(availableAutoGroupNames)
-    return (autoGroupsData?.data?.groups || []).filter((group) =>
-      available.has(group)
-    )
-  }, [autoGroupsData, availableAutoGroupNames])
-  const globalAutoGroupOptions = useMemo(() => {
-    const groupsByValue = new Map(groups.map((group) => [group.value, group]))
-    return globalAutoGroups.flatMap((group) => {
-      const option = groupsByValue.get(group)
-      return option ? [option] : []
-    })
-  }, [globalAutoGroups, groups])
   const maxAutoGroups =
     Number.isInteger(autoGroupsData?.data?.max_count) &&
     Number(autoGroupsData?.data?.max_count) > 0
       ? Number(autoGroupsData?.data?.max_count)
       : 20
   const schema = useMemo(
-    () => getApiKeyFormSchema(t, maxAutoGroups),
-    [t, maxAutoGroups]
+    () => getApiKeyFormSchema(t, maxAutoGroups, availableGroupNames),
+    [t, maxAutoGroups, availableGroupNames]
   )
 
   const form = useForm<ApiKeyFormValues>({
     resolver: zodResolver(schema),
-    defaultValues: getApiKeyFormDefaultValues(defaultUseAutoGroup),
+    defaultValues: getApiKeyFormDefaultValues(),
   })
 
   // Load existing data when updating
   useEffect(() => {
     if (!open) {
-      form.reset(
-        getApiKeyFormDefaultValues(defaultUseAutoGroup && backendHasAuto)
-      )
+      form.reset(getApiKeyFormDefaultValues())
       setInitializedTarget(null)
       return
     }
@@ -237,25 +217,16 @@ export function ApiKeysMutateDrawer({
       return
     }
     if (isUpdate && (!apiKeyFetched || apiKeyFetching)) return
-    if (!isUpdate && statusLoading) return
 
     const target = isUpdate && currentRow ? `update:${currentRow.id}` : 'create'
     if (initializedTarget === target) return
     if (isUpdate && currentRow) {
       if (apiKeyData?.success && apiKeyData.data) {
-        form.reset(
-          transformApiKeyToFormDefaults(
-            apiKeyData.data,
-            availableAutoGroupNames,
-            maxAutoGroups
-          )
-        )
+        form.reset(transformApiKeyToFormDefaults(apiKeyData.data))
         setInitializedTarget(target)
       }
     } else {
-      form.reset(
-        getApiKeyFormDefaultValues(defaultUseAutoGroup && backendHasAuto)
-      )
+      form.reset(getApiKeyFormDefaultValues())
       setInitializedTarget(target)
     }
   }, [
@@ -263,9 +234,6 @@ export function ApiKeysMutateDrawer({
     isUpdate,
     currentRow,
     form,
-    defaultUseAutoGroup,
-    statusLoading,
-    backendHasAuto,
     groupsFetched,
     groupsFetching,
     autoGroupsFetched,
@@ -273,26 +241,20 @@ export function ApiKeysMutateDrawer({
     apiKeyData,
     apiKeyFetched,
     apiKeyFetching,
-    availableAutoGroupNames,
-    maxAutoGroups,
     initializedTarget,
   ])
 
   const formTarget =
     isUpdate && currentRow ? `update:${currentRow.id}` : 'create'
   const isFormInitialized = initializedTarget === formTarget
-  const selectedGroup = form.watch('group')
   const selectedModels = form.watch('model_limits')
-  const autoGroupsMode = form.watch('auto_groups_mode')
   const selectedAutoGroups = form.watch('auto_groups')
   const hasTierCandidate = (
     selectedModels.length > 0 ? selectedModels : models
   ).some(supportsOpenAITierPolicy)
-  let tierGroups = selectedGroup ? [selectedGroup] : []
-  if (selectedGroup === 'auto') {
-    tierGroups =
-      autoGroupsMode === 'custom' ? selectedAutoGroups : globalAutoGroups
-  }
+  const tierGroups = selectedAutoGroups.filter((group) =>
+    availableGroupNames.includes(group)
+  )
   const tierModelQueries = useQueries({
     queries: hasTierCandidate
       ? tierGroups.map((group) => ({
@@ -311,24 +273,6 @@ export function ApiKeysMutateDrawer({
         (selectedModels.length === 0 || selectedModelSet.has(model))
     )
   )
-
-  // Correct group after groups load: if the form value is not in available groups, fall back
-  useEffect(() => {
-    if (groups.length === 0) return
-    const currentGroup = selectedGroup
-    if (currentGroup && !groups.some((g) => g.value === currentGroup)) {
-      const fallback =
-        groups.find((g) => g.value === 'default')?.value ??
-        groups[0]?.value ??
-        ''
-      form.setValue('group', fallback)
-      if (currentGroup === 'auto') {
-        form.setValue('auto_groups', [])
-        form.setValue('auto_groups_mode', 'inherit')
-        form.setValue('cross_group_retry', false)
-      }
-    }
-  }, [groups, form, selectedGroup])
 
   const onSubmit = async (data: ApiKeyFormValues) => {
     setIsSubmitting(true)
@@ -456,168 +400,55 @@ export function ApiKeysMutateDrawer({
                 )}
               />
 
-              {backendHasAuto && (
-                <FormField
-                  control={form.control}
-                  name='group'
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>{t('Group mode')}</FormLabel>
-                      <FormControl>
-                        <ToggleGroup
-                          aria-label={t('Group mode')}
-                          value={[
-                            field.value === 'auto' ? 'multiple' : 'single',
-                          ]}
-                          onValueChange={(values) => {
-                            const mode = values[0]
-                            if (!mode) return
-                            if (mode === 'multiple') {
-                              if (field.value === 'auto') return
-                              if (form.getValues('auto_groups').length === 0) {
-                                form.setValue(
-                                  'auto_groups',
-                                  field.value ? [field.value] : [],
-                                  { shouldDirty: true }
-                                )
-                                form.setValue('auto_groups_mode', 'custom', {
-                                  shouldDirty: true,
-                                })
-                              }
-                              field.onChange('auto')
-                              form.setValue('cross_group_retry', true, {
-                                shouldDirty: true,
-                              })
-                            } else {
-                              if (field.value !== 'auto') return
-                              field.onChange(
-                                form
-                                  .getValues('auto_groups')
-                                  .find((group) =>
-                                    availableAutoGroupNames.includes(group)
-                                  ) ??
-                                  availableAutoGroupNames.find(
-                                    (group) => group === 'default'
-                                  ) ??
-                                  availableAutoGroupNames[0] ??
-                                  ''
-                              )
-                              form.setValue('cross_group_retry', false, {
-                                shouldDirty: true,
-                              })
-                            }
-                          }}
-                          variant='outline'
-                          className='w-full'
+              <FormField
+                control={form.control}
+                name='auto_groups'
+                render={({ field }) => (
+                  <FormItem>
+                    <div className='flex items-center gap-1'>
+                      <FormLabel>{t('Selected groups')}</FormLabel>
+                      <Tooltip>
+                        <TooltipTrigger
+                          render={
+                            <Button
+                              type='button'
+                              variant='ghost'
+                              size='icon'
+                              className='size-6'
+                              aria-label={t('Group priority')}
+                            />
+                          }
                         >
-                          <ToggleGroupItem value='single' className='flex-1'>
-                            {t('Single group')}
-                          </ToggleGroupItem>
-                          <ToggleGroupItem value='multiple' className='flex-1'>
-                            {t('Multiple groups')}
-                          </ToggleGroupItem>
-                        </ToggleGroup>
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-              )}
+                          <Info className='size-3.5' aria-hidden='true' />
+                        </TooltipTrigger>
+                        <TooltipContent className='max-w-72 flex-col items-start'>
+                          <p>
+                            {t(
+                              'Choose and order the groups this API key will try.'
+                            )}
+                          </p>
+                          <p>
+                            {t(
+                              'Billed at the rate of the group used for each request.'
+                            )}
+                          </p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
+                    <FormControl>
+                      <AutoGroupOrderEditor
+                        value={field.value}
+                        options={groups}
+                        maxCount={maxAutoGroups}
+                        onChange={field.onChange}
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
 
-              {selectedGroup !== 'auto' && (
-                <FormField
-                  control={form.control}
-                  name='group'
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>{t('Group')}</FormLabel>
-                      <FormControl>
-                        <ApiKeyGroupCombobox
-                          options={groups.filter(
-                            (group) => group.value !== 'auto'
-                          )}
-                          value={field.value}
-                          onValueChange={(group) => {
-                            field.onChange(group)
-                            form.setValue('cross_group_retry', false, {
-                              shouldDirty: true,
-                            })
-                          }}
-                          placeholder={t('Select a group')}
-                        />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-              )}
-
-              {selectedGroup === 'auto' && (
-                <FormField
-                  control={form.control}
-                  name='auto_groups'
-                  render={({ field }) => (
-                    <FormItem>
-                      <div className='flex items-center gap-1'>
-                        <FormLabel>{t('Selected groups')}</FormLabel>
-                        <Tooltip>
-                          <TooltipTrigger
-                            render={
-                              <Button
-                                type='button'
-                                variant='ghost'
-                                size='icon'
-                                className='size-6'
-                                aria-label={t('Group priority')}
-                              />
-                            }
-                          >
-                            <Info className='size-3.5' aria-hidden='true' />
-                          </TooltipTrigger>
-                          <TooltipContent className='max-w-72 flex-col items-start'>
-                            <p>
-                              {t(
-                                'Choose and order the groups this API key will try.'
-                              )}
-                            </p>
-                            <p>
-                              {t(
-                                'Billed at the rate of the group used for each request.'
-                              )}
-                            </p>
-                          </TooltipContent>
-                        </Tooltip>
-                      </div>
-                      <FormControl>
-                        <AutoGroupOrderEditor
-                          value={field.value}
-                          mode={autoGroupsMode}
-                          options={groups}
-                          globalOptions={globalAutoGroupOptions}
-                          maxCount={maxAutoGroups}
-                          onChange={(value) => {
-                            form.setValue('auto_groups_mode', value.mode, {
-                              shouldDirty: true,
-                              shouldValidate: false,
-                            })
-                            form.setValue(
-                              'auto_groups',
-                              value.groups.slice(0, maxAutoGroups),
-                              {
-                                shouldDirty: true,
-                                shouldValidate: true,
-                              }
-                            )
-                          }}
-                        />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
-              )}
-
-              {selectedGroup === 'auto' && (
+              {selectedAutoGroups.length > 1 && (
                 <FormField
                   control={form.control}
                   name='cross_group_retry'

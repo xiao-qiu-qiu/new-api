@@ -44,6 +44,15 @@ export function ApiKeyGroupCell(props: ApiKeyGroupCellProps) {
   const isMobile = useMediaQuery('(max-width: 640px)')
 
   const group = props.group?.trim() || ''
+  if (!group || (group === 'auto' && !props.autoGroups?.length)) {
+    return (
+      <StatusBadge
+        label={t('Select groups')}
+        variant='warning'
+        copyable={false}
+      />
+    )
+  }
   if (group !== 'auto') {
     const ratio =
       group && typeof props.ratio === 'number' ? props.ratio : undefined
@@ -51,13 +60,12 @@ export function ApiKeyGroupCell(props: ApiKeyGroupCellProps) {
       <TruncatedCell
         className={isMobile ? 'w-full' : 'max-w-50'}
         tabIndex={0}
-        tooltipContent={group || t('Follow user group')}
+        tooltipContent={group}
         tooltipClassName='break-all'
       >
         <GroupBadge
           group={group}
           ratio={ratio}
-          ratioLabel={group ? undefined : t('Inherited')}
           type='text'
           className='px-0'
           containerClassName={cn('gap-3', isMobile && 'w-full justify-between')}
@@ -94,17 +102,11 @@ export function ApiKeyGroupCell(props: ApiKeyGroupCellProps) {
           />
         </span>
         <span className='text-muted-foreground block w-full truncate'>
-          {props.autoGroups?.length
-            ? props.autoGroups.join(' → ')
-            : t('Use global groups')}
+          {props.autoGroups?.join(' → ')}
         </span>
       </TooltipTrigger>
       <TooltipContent className='max-h-64 max-w-80 flex-col items-start overflow-y-auto break-words'>
-        <p>
-          {props.autoGroups?.length
-            ? props.autoGroups.join(' → ')
-            : t('Use global groups')}
-        </p>
+        <p>{props.autoGroups?.join(' → ')}</p>
         <p>
           {t('Cross-group retry')}:{' '}
           {props.crossGroupRetry ? t('Enabled') : t('Disabled')}

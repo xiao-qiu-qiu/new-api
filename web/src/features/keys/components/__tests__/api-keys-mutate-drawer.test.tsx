@@ -60,17 +60,19 @@ let renderedDrawer: RenderedDrawer | null = null
 function installApiFixtures(
   createdPayloads: Array<Record<string, unknown>>,
   models: string[] = [],
-  groupModels: Record<string, string[]> = {}
+  groupModels: Record<string, string[]> = {},
+  existingKey?: ApiKey
 ) {
   apiClient.get = async (url) => {
+    if (existingKey && url === `/api/token/${existingKey.id}`) {
+      return { data: { success: true, data: existingKey } }
+    }
     if (url.startsWith('/api/user/models?group=')) {
       const group =
         new URL(url, 'http://localhost').searchParams.get('group') || ''
       return { data: { success: true, data: groupModels[group] ?? models } }
     }
     switch (url) {
-      case '/api/status':
-        return { data: { data: { default_use_auto_group: true } } }
       case '/api/user/models':
         return { data: { success: true, data: models } }
       case '/api/user/self/groups':
@@ -78,7 +80,6 @@ function installApiFixtures(
           data: {
             success: true,
             data: {
-              auto: { desc: 'Automatic routing', ratio: 'auto' },
               default: { desc: 'Standard access', ratio: 1 },
               vip: { desc: 'Priority access', ratio: 2 },
             },
@@ -103,19 +104,14 @@ function installApiFixtures(
   }
 }
 
-async function renderCreateDrawer(
-  defaultUseAutoGroup = true,
-  models: string[] = []
+async function renderDrawer(
+  models: string[] = [],
+  currentRow?: ApiKey
 ): Promise<void> {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   })
   const freshAt = Date.now() + 60_000
-  queryClient.setQueryData(
-    ['status'],
-    { default_use_auto_group: defaultUseAutoGroup },
-    { updatedAt: freshAt }
-  )
   queryClient.setQueryData(
     ['user-models'],
     { success: true, data: models },
@@ -126,7 +122,6 @@ async function renderCreateDrawer(
     {
       success: true,
       data: {
-        auto: { desc: 'Automatic routing', ratio: 'auto' },
         default: { desc: 'Standard access', ratio: 1 },
         vip: { desc: 'Priority access', ratio: 2 },
       },
@@ -147,7 +142,11 @@ async function renderCreateDrawer(
     <QueryClientProvider client={queryClient}>
       <I18nextProvider i18n={i18n}>
         <ApiKeysProvider>
-          <ApiKeysMutateDrawer open onOpenChange={() => undefined} />
+          <ApiKeysMutateDrawer
+            open
+            currentRow={currentRow}
+            onOpenChange={() => undefined}
+          />
         </ApiKeysProvider>
       </I18nextProvider>
     </QueryClientProvider>
@@ -174,9 +173,7 @@ function findButton(text: string, required = true): HTMLButtonElement | null {
 }
 
 function getControlByLabel(labelText: 'Name' | 'Quantity'): HTMLInputElement
-function getControlByLabel(
-  labelText: 'Group' | 'Model Limits'
-): HTMLButtonElement
+function getControlByLabel(labelText: 'Model Limits'): HTMLButtonElement
 function getControlByLabel(labelText: 'Selected groups'): HTMLElement
 function getControlByLabel(labelText: string): HTMLElement {
   const label = [...document.querySelectorAll<HTMLLabelElement>('label')].find(
@@ -227,106 +224,209 @@ afterEach(() => {
   }
 })
 
-describe('API keys mutate drawer Auto group integration', () => {
-  test('inherits the root Auto order and sends an empty override for every batch-created key', async () => {
-    const createdPayloads: Array<Record<string, unknown>> = []
-    installApiFixtures(createdPayloads)
-    await renderCreateDrawer()
+const storedKey: ApiKey = {
+  id: 3,
+  name: 'existing',
+  key: '',
+  status: 1,
+  remain_quota: 0,
+  used_quota: 0,
+  unlimited_quota: true,
+  expired_time: -1,
+  created_time: 1,
+  accessed_time: 0,
+  group: 'default',
+  auto_groups: [],
+  cross_group_retry: false,
+  model_limits_enabled: false,
+  model_limits: '',
+  allow_ips: '',
+  allow_user_quota_query: true,
+}
 
-    expect(
-      screen.getByRole('button', { name: 'Multiple groups' })
-    ).toHaveAttribute('aria-pressed', 'true')
-    expect(
-      document.body.textContent?.includes('Using global groups (2 groups)')
-    ).toBe(true)
-    expect(
-      [
-        ...document.querySelectorAll('[data-slot="global-auto-order-name"]'),
-      ].map((item) => item.textContent)
-    ).toEqual(['vip', 'default'])
-    expect(findButton('Use global groups', true).disabled).toBe(true)
+function addGroup(description: string) {
+  selectComboboxOption(
+    within(getControlByLabel('Selected groups')).getByRole<HTMLButtonElement>(
+      'combobox'
+    ),
+    description
+  )
+}
 
+describe('API keys mutate drawer explicit group integration', () => {
+  test('starts empty without an Auto entry and blocks saving until a group is selected', async () => {
+    const payloads: Array<Record<string, unknown>> = []
+    installApiFixtures(payloads)
+    await renderDrawer()
+    expect(screen.getByText('0 / 3 groups selected')).toBeVisible()
+    expect(
+      screen.queryByRole('button', { name: 'Single group' })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Multiple groups' })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Use global groups' })
+    ).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('switch', { name: 'Cross-group retry' })
+    ).not.toBeInTheDocument()
+    changeInput(getControlByLabel('Name'), 'explicit')
+    fireEvent.click(findButton('Save changes', true))
+    expect(await screen.findByText('Select at least one group')).toBeVisible()
+    expect(getControlByLabel('Selected groups')).toHaveAttribute(
+      'aria-invalid',
+      'true'
+    )
+    expect(payloads).toHaveLength(0)
+    addGroup('Standard access')
+    fireEvent.click(findButton('Save changes', true))
+    await waitFor(() => expect(payloads).toHaveLength(1))
+    expect(payloads[0]).toMatchObject({
+      group: 'default',
+      auto_groups: [],
+      cross_group_retry: false,
+    })
+  })
+
+  test('saves a single explicit group for every batch-created key', async () => {
+    const payloads: Array<Record<string, unknown>> = []
+    installApiFixtures(payloads)
+    await renderDrawer()
+    addGroup('Priority access')
+    expect(
+      screen.queryByRole('switch', { name: 'Cross-group retry' })
+    ).not.toBeInTheDocument()
     changeInput(getControlByLabel('Name'), 'batch')
     changeInput(getControlByLabel('Quantity'), '2')
     fireEvent.click(findButton('Save changes', true))
-    await waitFor(() => expect(createdPayloads).toHaveLength(2))
-
-    expect(createdPayloads.length).toBe(2)
-    expect(createdPayloads[0]?.name).toBe('batch')
-    for (const payload of createdPayloads) {
-      expect(payload.group).toBe('auto')
-      expect(payload.auto_groups).toEqual([])
-      expect(payload.cross_group_retry).toBe(true)
+    await waitFor(() => expect(payloads).toHaveLength(2))
+    expect(payloads[0]?.name).toBe('batch')
+    for (const payload of payloads) {
+      expect(payload).toMatchObject({
+        group: 'vip',
+        auto_groups: [],
+        cross_group_retry: false,
+      })
     }
   })
 
-  test('preserves an unsaved custom order and mode after Auto to ordinary to Auto changes', async () => {
-    const createdPayloads: Array<Record<string, unknown>> = []
-    installApiFixtures(createdPayloads)
-    await renderCreateDrawer()
-
-    const autoOrderControl = getControlByLabel('Selected groups')
-    const addGroupTrigger = autoOrderControl.querySelector<HTMLButtonElement>(
-      'button[role="combobox"]'
-    )
-    if (!addGroupTrigger) {
-      throw new Error('Expected Selected groups combobox')
-    }
-    selectComboboxOption(addGroupTrigger, 'Priority access')
-
-    expect(
-      document.querySelector('button[aria-label="Remove vip"]')
-    ).toBeTruthy()
-    expect(document.body.textContent?.includes('1 / 3 groups selected')).toBe(
-      true
-    )
-    expect(findButton('Use global groups', true).disabled).toBe(false)
-
-    fireEvent.click(screen.getByRole('button', { name: 'Single group' }))
-    const groupTrigger = getControlByLabel('Group')
-    selectComboboxOption(groupTrigger, 'Standard access')
-    expect(document.querySelector('button[aria-label="Remove vip"]')).toBe(null)
-    fireEvent.click(screen.getByRole('button', { name: 'Multiple groups' }))
-
-    expect(
-      document.querySelector('button[aria-label="Remove vip"]')
-    ).toBeTruthy()
-    expect(document.body.textContent?.includes('1 / 3 groups selected')).toBe(
-      true
-    )
-    expect(findButton('Use global groups', true).disabled).toBe(false)
-
-    changeInput(getControlByLabel('Name'), 'custom')
+  test('saves multiple groups in the edited order with explicit retry selection', async () => {
+    const payloads: Array<Record<string, unknown>> = []
+    installApiFixtures(payloads)
+    await renderDrawer()
+    addGroup('Standard access')
+    addGroup('Priority access')
+    const retry = screen.getByRole('switch', { name: 'Cross-group retry' })
+    expect(retry).toBeChecked()
+    fireEvent.click(retry)
+    fireEvent.click(screen.getByRole('button', { name: 'Move vip up' }))
+    changeInput(getControlByLabel('Name'), 'ordered')
     fireEvent.click(findButton('Save changes', true))
-    await waitFor(() => expect(createdPayloads).toHaveLength(1))
-    expect(createdPayloads[0]?.auto_groups).toEqual(['vip'])
-  })
-
-  test('switches a single group to multiple groups and submits both selected groups on one key', async () => {
-    const createdPayloads: Array<Record<string, unknown>> = []
-    installApiFixtures(createdPayloads)
-    await renderCreateDrawer(false)
-    selectComboboxOption(getControlByLabel('Group'), 'Standard access')
-
-    expect(
-      screen.getByRole('button', { name: 'Single group' })
-    ).toHaveAttribute('aria-pressed', 'true')
-    fireEvent.click(screen.getByRole('button', { name: 'Multiple groups' }))
-    expect(screen.getByRole('button', { name: 'Remove default' })).toBeVisible()
-    const addGroupTrigger = within(
-      getControlByLabel('Selected groups')
-    ).getByRole<HTMLButtonElement>('combobox')
-    selectComboboxOption(addGroupTrigger, 'Priority access')
-    expect(screen.getByRole('button', { name: 'Remove vip' })).toBeVisible()
-
-    changeInput(getControlByLabel('Name'), 'shared-models')
-    fireEvent.click(findButton('Save changes', true))
-    await waitFor(() => expect(createdPayloads).toHaveLength(1))
-    expect(createdPayloads[0]).toMatchObject({
+    await waitFor(() => expect(payloads).toHaveLength(1))
+    expect(payloads[0]).toMatchObject({
       group: 'auto',
-      auto_groups: ['default', 'vip'],
-      cross_group_retry: true,
+      auto_groups: ['vip', 'default'],
+      cross_group_retry: false,
     })
+  })
+
+  test('hides cross-group retry again when the selection is reduced to one group', async () => {
+    const payloads: Array<Record<string, unknown>> = []
+    installApiFixtures(payloads)
+    await renderDrawer()
+    addGroup('Standard access')
+    addGroup('Priority access')
+    expect(
+      screen.getByRole('switch', { name: 'Cross-group retry' })
+    ).toBeChecked()
+    fireEvent.click(screen.getByRole('button', { name: 'Remove default' }))
+    expect(
+      screen.queryByRole('switch', { name: 'Cross-group retry' })
+    ).not.toBeInTheDocument()
+    changeInput(getControlByLabel('Name'), 'single')
+    fireEvent.click(findButton('Save changes', true))
+    await waitFor(() => expect(payloads).toHaveLength(1))
+    expect(payloads[0]).toMatchObject({
+      group: 'vip',
+      auto_groups: [],
+      cross_group_retry: false,
+    })
+  })
+
+  test.each([
+    { group: 'vip', auto_groups: [], selected: ['vip'] },
+    {
+      group: 'auto',
+      auto_groups: ['vip', 'default'],
+      selected: ['vip', 'default'],
+    },
+  ])(
+    'preserves an existing $group key when saved without group edits',
+    async ({ group, auto_groups, selected }) => {
+      const currentRow = {
+        ...storedKey,
+        group,
+        auto_groups,
+        cross_group_retry: true,
+      }
+      installApiFixtures([], [], {}, currentRow)
+      const put = vi
+        .spyOn(api, 'put')
+        .mockResolvedValue({ data: { success: true } })
+      await renderDrawer([], currentRow)
+      for (const selectedGroup of selected) {
+        expect(
+          screen.getByRole('button', { name: `Remove ${selectedGroup}` })
+        ).toBeVisible()
+      }
+      fireEvent.click(findButton('Save changes', true))
+      await waitFor(() =>
+        expect(put).toHaveBeenCalledWith(
+          '/api/token/',
+          expect.objectContaining({
+            id: currentRow.id,
+            group,
+            auto_groups,
+            cross_group_retry: selected.length > 1,
+          })
+        )
+      )
+    }
+  )
+
+  test('retains an unavailable legacy group and rejects saving until it is removed', async () => {
+    const currentRow = {
+      ...storedKey,
+      group: 'auto',
+      auto_groups: ['revoked', 'vip'],
+    }
+    installApiFixtures([], [], {}, currentRow)
+    const put = vi
+      .spyOn(api, 'put')
+      .mockResolvedValue({ data: { success: true } })
+    await renderDrawer([], currentRow)
+    expect(screen.getByText('Unavailable')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Remove revoked' })).toBeVisible()
+    fireEvent.click(findButton('Save changes', true))
+    expect(
+      await screen.findByText(
+        'Some selected groups are unavailable. Choose available groups.'
+      )
+    ).toBeVisible()
+    expect(put).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Remove revoked' }))
+    fireEvent.click(findButton('Save changes', true))
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith(
+        '/api/token/',
+        expect.objectContaining({
+          group: 'vip',
+          auto_groups: [],
+          cross_group_retry: false,
+        })
+      )
+    )
   })
 })
 
@@ -437,7 +537,8 @@ describe('API key expiry across editing sessions', () => {
     async (action) => {
       const payloads: Array<Record<string, unknown>> = []
       installApiFixtures(payloads)
-      await renderCreateDrawer()
+      await renderDrawer()
+      addGroup('Standard access')
       changeInput(getControlByLabel('Name'), 'no-expiry')
       fireEvent.click(screen.getByRole('button', { name: '1 Month' }))
       expect(screen.getByLabelText('Time')).toBeEnabled()
@@ -457,7 +558,7 @@ describe('API keys mutate drawer user quota query switch', () => {
   test('sends false for a new key after the switch, which starts on, is turned off', async () => {
     const createdPayloads: Array<Record<string, unknown>> = []
     installApiFixtures(createdPayloads)
-    await renderCreateDrawer()
+    await renderDrawer()
 
     fireEvent.click(findButton('Advanced Settings', true))
     const quotaQuerySwitch = await screen.findByRole('switch', {
@@ -467,6 +568,7 @@ describe('API keys mutate drawer user quota query switch', () => {
     fireEvent.click(quotaQuerySwitch)
     expect(quotaQuerySwitch).not.toBeChecked()
 
+    addGroup('Standard access')
     changeInput(getControlByLabel('Name'), 'no-user-quota')
     fireEvent.click(findButton('Save changes', true))
     await waitFor(() => expect(createdPayloads).toHaveLength(1))
@@ -483,7 +585,8 @@ describe('API keys mutate drawer GPT speed tier', () => {
       'gpt-4o-audio-preview',
     ]
     installApiFixtures([], models)
-    await renderCreateDrawer(true, models)
+    await renderDrawer(models)
+    addGroup('Standard access')
 
     expect(
       screen.queryByRole('radiogroup', { name: 'GPT speed tier' })
@@ -495,8 +598,9 @@ describe('API keys mutate drawer GPT speed tier', () => {
     const payloads: Array<Record<string, unknown>> = []
     const models = ['openai/gpt-6-astra', 'deepseek-chat']
     installApiFixtures(payloads, models)
-    await renderCreateDrawer(true, models)
+    await renderDrawer(models)
 
+    addGroup('Priority access')
     const follow = await screen.findByRole('radio', { name: 'Follow request' })
     expect(follow).toBeChecked()
     follow.focus()
@@ -517,7 +621,8 @@ describe('API keys mutate drawer GPT speed tier', () => {
     const user = userEvent.setup()
     const models = ['gpt-6-astra', 'deepseek-chat']
     installApiFixtures([], models)
-    await renderCreateDrawer(true, models)
+    await renderDrawer(models)
+    addGroup('Priority access')
     await user.click(await screen.findByRole('radio', { name: 'Lock UF' }))
     expect(screen.getByRole('radio', { name: 'Lock UF' })).toBeChecked()
 
@@ -545,13 +650,14 @@ describe('API keys mutate drawer GPT speed tier', () => {
       default: ['deepseek-chat'],
       vip: ['gpt-6-astra'],
     })
-    await renderCreateDrawer(false, models)
-    selectComboboxOption(getControlByLabel('Group'), 'Priority access')
+    await renderDrawer(models)
+    addGroup('Priority access')
     expect(
       await screen.findByRole('radiogroup', { name: 'GPT speed tier' })
     ).toBeVisible()
 
-    selectComboboxOption(getControlByLabel('Group'), 'Standard access')
+    fireEvent.click(screen.getByRole('button', { name: 'Remove vip' }))
+    addGroup('Standard access')
     await waitFor(() =>
       expect(
         screen.queryByRole('radiogroup', { name: 'GPT speed tier' })

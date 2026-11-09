@@ -43,7 +43,7 @@ await i18n.use(initReactI18next).init({
 
 function CellHarness(props: {
   group: string
-  autoGroups?: string[]
+  autoGroups?: string[] | null
   ratio?: number | string
   crossGroupRetry?: boolean
   shouldReduceMotion?: boolean
@@ -82,7 +82,12 @@ describe('API key group table cell', () => {
 
   test('keeps the group and compact localized multiplier together with one subtle flowing edge', () => {
     const { container } = render(
-      <CellHarness group='auto' ratio='自动' crossGroupRetry />
+      <CellHarness
+        group='auto'
+        autoGroups={['gpt', 'deepseek']}
+        ratio='自动'
+        crossGroupRetry
+      />
     )
     const group = screen.getByText('Multiple groups')
     const multiplier = screen
@@ -103,14 +108,19 @@ describe('API key group table cell', () => {
 
   test('keeps the automatic tag visible but static when reduced motion is requested', () => {
     const { container } = render(
-      <CellHarness group='auto' ratio='Auto' shouldReduceMotion />
+      <CellHarness
+        group='auto'
+        autoGroups={['gpt', 'deepseek']}
+        ratio='Auto'
+        shouldReduceMotion
+      />
     )
     expect(screen.getByText('Auto')).toBeInTheDocument()
     expect(container.querySelector('[data-auto-group-flow-border]')).toBeNull()
   })
 
   test('does not invent a multiplier while automatic ratio data is unavailable', () => {
-    render(<CellHarness group='auto' />)
+    render(<CellHarness group='auto' autoGroups={['gpt', 'deepseek']} />)
     expect(screen.getByText('Multiple groups')).toBeInTheDocument()
     expect(screen.queryByText('Auto')).not.toBeInTheDocument()
   })
@@ -141,18 +151,32 @@ describe('API key group table cell', () => {
     }
   )
 
-  test('labels the user group multiplier as inherited without inventing a numeric value', async () => {
-    render(<CellHarness group='' />)
-    expect(screen.getByText('User Group')).toBeInTheDocument()
-    expect(screen.getByText('Inherited')).toBeInTheDocument()
-    expect(screen.getByText('Inherited').parentElement).toHaveClass(
-      'border-muted-foreground/30',
-      'rounded-full'
-    )
-    expect(screen.queryByText('1x')).not.toBeInTheDocument()
-    await userEvent.tab()
-    expect(await screen.findByText('Follow user group')).toBeVisible()
-  })
+  test.each([
+    { group: '', autoGroups: undefined },
+    { group: '  ', autoGroups: undefined },
+    { group: 'auto', autoGroups: undefined },
+    { group: 'auto', autoGroups: null },
+    { group: 'auto', autoGroups: [] },
+  ])(
+    'warns to select groups instead of inheriting for $group with $autoGroups',
+    (props) => {
+      const { container } = render(<CellHarness {...props} ratio={1} />)
+      const warning = screen.getByText('Select groups')
+      expect(warning).toBeVisible()
+      expect(warning.closest('[data-slot="status-badge"]')).toHaveClass(
+        'text-warning'
+      )
+      expect(screen.queryByText('User Group')).not.toBeInTheDocument()
+      expect(screen.queryByText('Inherited')).not.toBeInTheDocument()
+      expect(screen.queryByText('Follow user group')).not.toBeInTheDocument()
+      expect(screen.queryByText('Use global groups')).not.toBeInTheDocument()
+      expect(screen.queryByText('Multiple groups')).not.toBeInTheDocument()
+      expect(screen.queryByText('1x')).not.toBeInTheDocument()
+      expect(
+        container.querySelector('[data-auto-group-flow-border]')
+      ).toBeNull()
+    }
+  )
 
   test('keeps a long group name and exact multiplier available through keyboard focus', async () => {
     const groupName = 'production-with-a-very-long-custom-group-name'

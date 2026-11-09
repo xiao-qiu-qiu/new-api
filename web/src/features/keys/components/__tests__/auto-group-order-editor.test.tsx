@@ -16,7 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { fireEvent, render, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, test } from 'vitest'
 
 const { useState } = await import('react')
@@ -27,329 +27,137 @@ const { AutoGroupOrderEditor } = await import('../auto-group-order-editor')
 const i18n = createInstance()
 await i18n.use(initReactI18next).init({
   lng: 'en',
-  resources: {
-    en: {
-      translation: {
-        '{{count}} / {{max}} groups selected':
-          '{{count}} / {{max}} groups selected',
-        'Add group': 'Add group',
-        'Selected groups': 'Selected groups',
-        'Drag {{group}} to reorder': 'Drag {{group}} to reorder',
-        'Maximum {{max}} groups selected': 'Maximum {{max}} groups selected',
-        'Move {{group}} down': 'Move {{group}} down',
-        'Move {{group}} up': 'Move {{group}} up',
-        'No available global groups.': 'No available global groups.',
-        'No groups selected. Add a group or use global groups.':
-          'No groups selected. Add a group or use global groups.',
-        'No custom groups. Saving will inherit the complete global Auto order.':
-          'No custom groups. Saving will inherit the complete global Auto order.',
-        'Remove {{group}}': 'Remove {{group}}',
-        'Use global groups': 'Use global groups',
-        Ratio: 'Ratio',
-        'Search...': 'Search...',
-        'No group found.': 'No group found.',
-        'Select a group': 'Select a group',
-        'Using global groups ({{count}} groups)':
-          'Using global groups ({{count}} groups)',
-      },
-    },
-  },
+  resources: { en: { translation: {} } },
 })
 
-const globalOptions = [
-  { value: 'vip', label: 'VIP', desc: 'Priority access', ratio: 3 },
+const options = [
   { value: 'default', label: 'Default', desc: 'Standard access', ratio: 1 },
-  { value: 'team', label: 'Team', desc: 'Shared access', ratio: 2 },
+  { value: 'vip', label: 'VIP', desc: 'Priority access', ratio: 2 },
+  { value: 'team', label: 'Team', desc: 'Shared access', ratio: 3 },
 ]
 
-function Harness(props: { initialGroups?: string[] }) {
+function Harness(props: {
+  initialGroups?: string[]
+  maxCount?: number
+  options?: typeof options
+}) {
   const [groups, setGroups] = useState(
     props.initialGroups ?? ['default', 'vip']
   )
-  const [mode, setMode] = useState<'inherit' | 'custom'>('custom')
   return (
     <I18nextProvider i18n={i18n}>
       <AutoGroupOrderEditor
         value={groups}
-        mode={mode}
-        options={[
-          { value: 'auto', label: 'auto' },
-          { value: 'default', label: 'default', ratio: 1 },
-          { value: 'vip', label: 'vip', ratio: 2 },
-          { value: 'team', label: 'team', ratio: 3 },
-        ]}
-        globalOptions={globalOptions}
-        maxCount={2}
-        onChange={(value) => {
-          setGroups(value.groups)
-          setMode(value.mode)
-        }}
+        options={props.options ?? options}
+        maxCount={props.maxCount ?? 2}
+        onChange={setGroups}
       />
       <output data-testid='order'>{groups.join(',')}</output>
-      <output data-testid='mode'>{mode}</output>
     </I18nextProvider>
   )
-}
-
-function InheritanceHarness(props: { globalOptions?: typeof globalOptions }) {
-  const [groups, setGroups] = useState<string[]>([])
-  const [mode, setMode] = useState<'inherit' | 'custom'>('inherit')
-
-  return (
-    <I18nextProvider i18n={i18n}>
-      <AutoGroupOrderEditor
-        value={groups}
-        mode={mode}
-        options={[{ value: 'auto', label: 'auto' }, ...globalOptions]}
-        globalOptions={props.globalOptions ?? globalOptions}
-        maxCount={2}
-        onChange={(value) => {
-          setGroups(value.groups)
-          setMode(value.mode)
-        }}
-      />
-      <output data-testid='order'>{groups.join(',')}</output>
-      <output data-testid='mode'>{mode}</output>
-    </I18nextProvider>
-  )
-}
-
-function CustomEmptyHarness() {
-  const [groups, setGroups] = useState<string[]>([])
-  const [mode, setMode] = useState<'inherit' | 'custom'>('custom')
-
-  return (
-    <I18nextProvider i18n={i18n}>
-      <AutoGroupOrderEditor
-        value={groups}
-        mode={mode}
-        options={[{ value: 'auto', label: 'auto' }, ...globalOptions]}
-        globalOptions={globalOptions}
-        maxCount={2}
-        onChange={(value) => {
-          setGroups(value.groups)
-          setMode(value.mode)
-        }}
-      />
-      <output data-testid='order'>{groups.join(',')}</output>
-      <output data-testid='mode'>{mode}</output>
-    </I18nextProvider>
-  )
-}
-
-function findButton(container: HTMLElement, label: string): HTMLButtonElement {
-  return within(container).getByRole('button', { name: label })
-}
-
-function getCommandItem(label: string): HTMLElement {
-  const item = [
-    ...document.querySelectorAll<HTMLElement>('[data-slot="command-item"]'),
-  ].find((candidate) => candidate.textContent?.includes(label))
-  if (!item) {
-    throw new Error(`Expected command item containing "${label}"`)
-  }
-  return item
 }
 
 describe('Selected groups editor', () => {
-  test('enforces the limit and exposes accessible reorder controls', () => {
-    const { container } = render(<Harness />)
-
-    const addButton = within(container).getByRole('combobox')
-    expect(addButton).toBeDisabled()
-    expect(container).toHaveTextContent('2 / 2 groups selected')
+  test('enforces the limit and exposes accessible button and keyboard sorting', () => {
+    render(<Harness />)
+    expect(screen.getByRole('combobox')).toBeDisabled()
+    expect(screen.getByText('2 / 2 groups selected')).toBeVisible()
+    expect(screen.getByRole('group', { name: 'Selected groups' })).toBeVisible()
     expect(
-      within(container).getByRole('group', { name: 'Selected groups' })
-    ).toBeInTheDocument()
-    expect(findButton(container, 'Drag default to reorder').type).toBe('button')
-
-    fireEvent.click(findButton(container, 'Move default down'))
-    expect(within(container).getByTestId('order')).toHaveTextContent(
-      'vip,default'
-    )
-
-    fireEvent.keyDown(findButton(container, 'Drag vip to reorder'), {
-      key: 'ArrowDown',
-    })
-    expect(within(container).getByTestId('order')).toHaveTextContent(
-      'default,vip'
-    )
-  })
-
-  test('adds and removes groups, then restores inheritance as an empty value', () => {
-    const { container } = render(<Harness />)
-    fireEvent.click(findButton(container, 'Remove vip'))
-
-    expect(within(container).getByTestId('order')).toHaveTextContent('default')
-    const addButton = within(container).getByRole('combobox')
-    expect(addButton).toBeEnabled()
-
-    fireEvent.click(addButton)
-    fireEvent.click(getCommandItem('team'))
-    expect(within(container).getByTestId('order')).toHaveTextContent(
-      'default,team'
-    )
-    expect(addButton).toBeDisabled()
-
-    fireEvent.click(
-      within(container).getByRole('button', { name: 'Use global groups' })
-    )
-
-    expect(within(container).getByTestId('order')).toBeEmptyDOMElement()
-    expect(within(container).getByTestId('mode')).toHaveTextContent('inherit')
-    expect(container).toHaveTextContent('Using global groups (3 groups)')
-
-    const inheritedItems = container.querySelectorAll(
-      '[data-slot="global-auto-order"] > li'
-    )
-    expect(
-      [...inheritedItems].map(
-        (item) =>
-          item.querySelector('[data-slot="global-auto-order-name"]')
-            ?.textContent
-      )
-    ).toEqual(['VIP', 'Default', 'Team'])
-  })
-
-  test('shows the complete inherited order with metadata beyond the custom limit', () => {
-    const { container } = render(<InheritanceHarness />)
-
-    expect(container).toHaveTextContent('Using global groups (3 groups)')
-    expect(container).not.toHaveTextContent('0 / 2 groups selected')
-
-    const order = container.querySelector<HTMLOListElement>(
-      '[data-slot="global-auto-order"]'
-    )
-    if (!order) {
-      throw new Error('Expected inherited Selected groups')
-    }
-    expect(order).toHaveClass('overflow-y-auto', 'flex-wrap')
-
-    const items = [...order.querySelectorAll('li')]
-    expect(items.length).toBe(3)
-    expect(
-      order.querySelectorAll('[data-slot="global-auto-order-connector"]').length
-    ).toBe(2)
-    expect(
-      items.map((item) => ({
-        index: item.querySelector('[data-slot="global-auto-order-index"]')
-          ?.textContent,
-        name: item.querySelector('[data-slot="global-auto-order-name"]')
-          ?.textContent,
-        title: item
-          .querySelector('[data-slot="global-auto-order-chip"]')
-          ?.getAttribute('title'),
-        description: item.querySelector(
-          '[data-slot="global-auto-order-description"]'
-        )?.textContent,
-        ratio: item.querySelector('[data-slot="badge"]')?.textContent,
-      }))
-    ).toEqual([
-      {
-        index: '1',
-        name: 'VIP',
-        title: 'Priority access',
-        description: 'Priority access',
-        ratio: '3x',
-      },
-      {
-        index: '2',
-        name: 'Default',
-        title: 'Standard access',
-        description: 'Standard access',
-        ratio: '1x',
-      },
-      {
-        index: '3',
-        name: 'Team',
-        title: 'Shared access',
-        description: 'Shared access',
-        ratio: '2x',
-      },
-    ])
-
-    for (const item of items) {
-      const chip = item.querySelector('[data-slot="global-auto-order-chip"]')
-      expect(chip).toBeInTheDocument()
-      const description = item.querySelector(
-        '[data-slot="global-auto-order-description"]'
-      )
-      expect(description).toHaveClass('sr-only')
-    }
-
-    expect(
-      items[0]?.querySelector('[data-slot="global-auto-order-connector"]')
-    ).toBe(null)
-    for (const item of items.slice(1)) {
-      const connector = item.querySelector(
-        '[data-slot="global-auto-order-connector"]'
-      )
-      expect(connector).toHaveAttribute('aria-hidden', 'true')
-    }
-
-    expect(container.querySelector('[aria-label^="Drag "]')).toBe(null)
-    expect(container.querySelector('[aria-label^="Move "]')).toBe(null)
-    expect(container.querySelector('[aria-label^="Remove "]')).toBe(null)
-
-    expect(
-      within(container).getByRole('button', { name: 'Use global groups' })
+      screen.getByRole('button', { name: 'Move default up' })
     ).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Move vip down' })).toBeDisabled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Move default down' }))
+    expect(screen.getByTestId('order')).toHaveTextContent('vip,default')
+    fireEvent.keyDown(
+      screen.getByRole('button', { name: 'Drag vip to reorder' }),
+      { key: 'ArrowDown' }
+    )
+    expect(screen.getByTestId('order')).toHaveTextContent('default,vip')
+    fireEvent.keyDown(
+      screen.getByRole('button', { name: 'Drag vip to reorder' }),
+      { key: 'ArrowUp' }
+    )
+    expect(screen.getByTestId('order')).toHaveTextContent('vip,default')
+    fireEvent.keyDown(
+      screen.getByRole('button', { name: 'Drag vip to reorder' }),
+      { key: 'ArrowUp' }
+    )
+    expect(screen.getByTestId('order')).toHaveTextContent('vip,default')
   })
 
-  test('shows an explicit empty state when the global Auto order has no groups', () => {
-    const { container } = render(<InheritanceHarness globalOptions={[]} />)
-
-    expect(container).toHaveTextContent('Using global groups (0 groups)')
-    expect(container).toHaveTextContent('No available global groups.')
-    expect(container.querySelector('[data-slot="global-auto-order"]')).toBe(
-      null
-    )
-  })
-
-  test('keeps an empty custom order distinct from global inheritance', () => {
-    const { container } = render(<CustomEmptyHarness />)
-
-    expect(within(container).getByTestId('mode')).toHaveTextContent('custom')
-    expect(container).toHaveTextContent(
-      'No groups selected. Add a group or use global groups.'
-    )
-    expect(container.querySelector('[data-slot="global-auto-order"]')).toBe(
-      null
-    )
-
-    const restoreButton = within(container).getByRole('button', {
-      name: 'Use global groups',
-    })
-    expect(restoreButton).toBeEnabled()
-    fireEvent.click(restoreButton)
-
-    expect(within(container).getByTestId('mode')).toHaveTextContent('inherit')
+  test('adds and removes explicit groups without an Auto option', () => {
+    render(<Harness />)
+    fireEvent.click(screen.getByRole('button', { name: 'Remove vip' }))
+    expect(screen.getByTestId('order')).toHaveTextContent('default')
+    const addButton = screen.getByRole('combobox')
+    expect(addButton).toBeEnabled()
+    fireEvent.click(addButton)
     expect(
-      container.querySelector('[data-slot="global-auto-order"]')
-    ).toBeInTheDocument()
+      screen.queryByRole('option', { name: /Standard access/ })
+    ).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('option', { name: /Shared access/ }))
+    expect(screen.getByTestId('order')).toHaveTextContent('default,team')
+    expect(addButton).toBeDisabled()
+    expect(
+      screen.queryByRole('button', { name: 'Use global groups' })
+    ).not.toBeInTheDocument()
   })
 
-  test('adding a group from inheritance explicitly creates a custom order', () => {
-    const { container } = render(<InheritanceHarness />)
-
-    fireEvent.click(within(container).getByRole('combobox'))
-    fireEvent.click(getCommandItem('VIP'))
-
-    expect(within(container).getByTestId('mode')).toHaveTextContent('custom')
-    expect(within(container).getByTestId('order')).toHaveTextContent('vip')
-    expect(container.querySelector('[data-slot="global-auto-order"]')).toBe(
-      null
-    )
+  test('removing the last group leaves an empty explicit selection', () => {
+    render(<Harness initialGroups={['default']} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Remove default' }))
+    expect(screen.getByTestId('order')).toBeEmptyDOMElement()
+    expect(screen.getByText('0 / 2 groups selected')).toBeVisible()
+    expect(screen.getByRole('combobox')).toBeEnabled()
+    expect(
+      screen.queryByRole('button', { name: 'Use global groups' })
+    ).not.toBeInTheDocument()
   })
 
-  test('removing the last custom group does not silently enable inheritance', () => {
-    const { container } = render(<Harness initialGroups={['default']} />)
-    fireEvent.click(findButton(container, 'Remove default'))
+  test('starts empty and appends each explicitly added group in order', () => {
+    render(<Harness initialGroups={[]} />)
+    expect(screen.getByTestId('order')).toBeEmptyDOMElement()
+    fireEvent.click(screen.getByRole('combobox'))
+    fireEvent.click(screen.getByRole('option', { name: /Priority access/ }))
+    expect(screen.getByTestId('order')).toHaveTextContent(/^vip$/)
+    fireEvent.click(screen.getByRole('combobox'))
+    fireEvent.click(screen.getByRole('option', { name: /Standard access/ }))
+    expect(screen.getByTestId('order')).toHaveTextContent('vip,default')
+  })
 
-    expect(within(container).getByTestId('order')).toBeEmptyDOMElement()
-    expect(within(container).getByTestId('mode')).toHaveTextContent('custom')
-    expect(container).toHaveTextContent(
-      'No groups selected. Add a group or use global groups.'
-    )
+  test('shows an unavailable stored group and lets the user remove it', () => {
+    render(<Harness initialGroups={['revoked', 'default']} />)
+    const row = screen
+      .getByRole('button', { name: 'Remove revoked' })
+      .closest('li')
+    if (!row) throw new Error('Expected unavailable group row')
+    expect(within(row).getByText('Unavailable')).toBeVisible()
+    expect(screen.getByTestId('order')).toHaveTextContent('revoked,default')
+    fireEvent.click(screen.getByRole('button', { name: 'Remove revoked' }))
+    expect(screen.queryByText('Unavailable')).not.toBeInTheDocument()
+    expect(screen.getByTestId('order')).toHaveTextContent(/^default$/)
+    expect(screen.getByRole('combobox')).toBeEnabled()
+  })
+
+  test('disables adding when no available options remain without dropping stored groups', () => {
+    render(<Harness initialGroups={['revoked']} options={[]} />)
+    expect(screen.getByRole('combobox')).toBeDisabled()
+    expect(screen.getByText('Unavailable')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Remove revoked' }))
+    expect(screen.getByTestId('order')).toBeEmptyDOMElement()
+    expect(screen.getByRole('combobox')).toBeDisabled()
+  })
+
+  test('retains an order above a lowered limit until groups are removed', () => {
+    render(<Harness initialGroups={['vip', 'default', 'team']} />)
+    expect(screen.getByTestId('order')).toHaveTextContent('vip,default,team')
+    expect(screen.getByText('3 / 2 groups selected')).toBeVisible()
+    expect(screen.getByRole('combobox')).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Remove team' }))
+    expect(screen.getByRole('combobox')).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Remove default' }))
+    expect(screen.getByRole('combobox')).toBeEnabled()
   })
 })
