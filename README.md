@@ -232,6 +232,7 @@ docker compose logs -f new-api
 | Variable | Purpose |
 | --- | --- |
 | `SQL_DSN` | Main database connection; unset uses SQLite |
+| `SQL_STARTUP_TIMEOUT_SECONDS` | Wait up to 120 seconds for the primary MySQL/PostgreSQL connection at startup; `0` disables waiting. Authentication and malformed-DSN errors fail immediately |
 | `LOG_SQL_DSN` | Optional separate log database connection |
 | `REDIS_CONN_STRING` | Redis connection string |
 | `SESSION_SECRET` | Persistent authentication secret; all nodes must use the same value |

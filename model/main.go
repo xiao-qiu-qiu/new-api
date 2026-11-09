@@ -1,6 +1,7 @@
 package model
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/url"
@@ -184,6 +185,9 @@ func chooseDB(envName string, isLog bool) (*gorm.DB, common.DatabaseType, error)
 }
 
 func InitDB() (err error) {
+	if err := waitForPrimaryDatabase(context.Background()); err != nil {
+		return err
+	}
 	db, dbType, err := chooseDB("SQL_DSN", false)
 	if err == nil {
 		common.SetMainDatabaseType(dbType)

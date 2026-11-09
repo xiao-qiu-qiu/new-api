@@ -232,6 +232,7 @@ docker compose logs -f new-api
 | 环境变量 | 用途 |
 | --- | --- |
 | `SQL_DSN` | 主数据库连接串；未设置时使用 SQLite |
+| `SQL_STARTUP_TIMEOUT_SECONDS` | 启动时等待主 MySQL/PostgreSQL 连接，默认最多 120 秒；`0` 关闭等待。认证或连接串格式错误立即报错 |
 | `LOG_SQL_DSN` | 可选的独立日志数据库连接串 |
 | `REDIS_CONN_STRING` | Redis 连接串 |
 | `SESSION_SECRET` | 持久保存的鉴权密钥，所有节点必须一致 |
