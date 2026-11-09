@@ -6,6 +6,10 @@ import { dataUrlToFile } from "@/lib/image-utils";
 import { buildImageReferencePromptText } from "@/lib/image-reference-prompt";
 import { imageToDataUrl } from "@/services/image-storage";
 import { imageSizePresets } from "@/lib/media-size";
+import {
+  isGeminiImageModel,
+  resolveGeminiImageSettings,
+} from "@/lib/gemini-image";
 import { encodeWanxImageEditMask } from "@/lib/canvas/canvas-image-mask";
 import { requestSiteResponsesText } from "./site-agent";
 import type { AiConfig, ModelChannel } from "@/stores/use-config-store";
@@ -145,10 +149,18 @@ function resolveRequestSize(size: string, animated = false) {
   const dimensions = parseImageDimensions(value);
   if (dimensions) {
     if (animated) {
-      if (!Number.isInteger(dimensions.width) || !Number.isInteger(dimensions.height) || dimensions.width <= 0 || dimensions.height <= 0) {
+      if (
+        !Number.isInteger(dimensions.width) ||
+        !Number.isInteger(dimensions.height) ||
+        dimensions.width <= 0 ||
+        dimensions.height <= 0
+      ) {
         throw new Error(apiText("positiveImageDimensions"));
       }
-      if (dimensions.width % IMAGE_SIZE_STEP !== 0 || dimensions.height % IMAGE_SIZE_STEP !== 0) {
+      if (
+        dimensions.width % IMAGE_SIZE_STEP !== 0 ||
+        dimensions.height % IMAGE_SIZE_STEP !== 0
+      ) {
         throw new Error(apiText("imageDimensionStep"));
       }
     } else {
@@ -198,29 +210,59 @@ function imageRequestParameters(
     "image",
   );
   const configuredFormat = config.imageOutputFormat || "png";
-  const outputFormat = IMAGE_OUTPUT_FORMATS.has(configuredFormat) ? configuredFormat : "png";
+  const outputFormat = IMAGE_OUTPUT_FORMATS.has(configuredFormat)
+    ? configuredFormat
+    : "png";
   const animated = outputFormat === "gif";
-  if (animated && !/^gpt-image-2\.6-(?:flare|sunburst)$/i.test(selection.model)) {
-    throw new Error(i18n.t("GIF output requires GPT Image 2.6 Flare or Sunburst."));
+  if (
+    animated &&
+    !/^gpt-image-2\.6-(?:flare|sunburst)$/i.test(selection.model)
+  ) {
+    throw new Error(
+      i18n.t("GIF output requires GPT Image 2.6 Flare or Sunburst."),
+    );
   }
   const frameCount = Number(config.imageFrameCount || "9");
   const frameDuration = Number(config.imageFrameDurationMs || "200");
-  if (animated && (!Number.isInteger(frameCount) || frameCount < 2 || frameCount > 64)) {
+  if (
+    animated &&
+    (!Number.isInteger(frameCount) || frameCount < 2 || frameCount > 64)
+  ) {
     throw new Error(i18n.t("GIF frame count must be an integer from 2 to 64."));
   }
-  if (animated && (!Number.isInteger(frameDuration) || frameDuration < 20 || frameDuration > 2000)) {
-    throw new Error(i18n.t("GIF frame duration must be an integer from 20 to 2000 ms."));
+  if (
+    animated &&
+    (!Number.isInteger(frameDuration) ||
+      frameDuration < 20 ||
+      frameDuration > 2000)
+  ) {
+    throw new Error(
+      i18n.t("GIF frame duration must be an integer from 20 to 2000 ms."),
+    );
   }
-  const size = selection.model.toLowerCase() === "wanx2.1-imageedit"
-    ? undefined
-    : resolveRequestSize(config.size, animated);
-  const background = animated ? undefined : normalizeBackground(config.background);
-  let quality = normalizeQuality(config.quality);
-  if (quality === "xhigh" || quality === "max") quality = "high";
-  if (selection.model === "dall-e-3" && quality) {
-    quality = quality === "high" ? "hd" : "standard";
+  const geminiImage = isGeminiImageModel(selection.model);
+  let size: string | undefined;
+  let quality: string | undefined;
+  if (geminiImage) {
+    const settings = resolveGeminiImageSettings(config.size, config.quality);
+    if (settings.ratio !== "auto") size = settings.ratio;
+    if (settings.scale !== "auto") quality = settings.scale.toUpperCase();
+  } else {
+    size =
+      selection.model.toLowerCase() === "wanx2.1-imageedit"
+        ? undefined
+        : resolveRequestSize(config.size, animated);
+    quality = normalizeQuality(config.quality);
+    if (quality === "xhigh" || quality === "max") quality = "high";
+    if (selection.model === "dall-e-3" && quality) {
+      quality = quality === "high" ? "hd" : "standard";
+    }
+    if (selection.model === "dall-e-2") quality = undefined;
   }
-  if (selection.model === "dall-e-2") quality = undefined;
+  const background =
+    animated || geminiImage
+      ? undefined
+      : normalizeBackground(config.background);
   return {
     ...selection,
     n: Math.max(
@@ -230,7 +272,9 @@ function imageRequestParameters(
     ...(quality ? { quality } : {}),
     ...(size ? { size } : {}),
     ...(background ? { background } : {}),
-    ...(animated ? { frame_count: frameCount, frame_duration_ms: frameDuration } : {}),
+    ...(animated
+      ? { frame_count: frameCount, frame_duration_ms: frameDuration }
+      : {}),
     ...(/gpt-image/i.test(selection.model)
       ? { output_format: outputFormat }
       : { response_format: "b64_json" }),
@@ -264,7 +308,11 @@ export async function requestEdit(
   options?: MediaRequestOptions,
 ): Promise<Array<{ id: string; dataUrl: string }>> {
   if (config.imageOutputFormat === "gif") {
-    throw new Error(i18n.t("GIF output is only available for text-to-image generation. Remove reference images and masks."));
+    throw new Error(
+      i18n.t(
+        "GIF output is only available for text-to-image generation. Remove reference images and masks.",
+      ),
+    );
   }
   const images = references.filter((image) => image.role !== "mask");
   const masks = references.filter((image) => image.role === "mask");
@@ -295,7 +343,15 @@ export async function requestEdit(
     if (String(parameters.model).toLowerCase() === "wanx2.1-imageedit") {
       dataUrl = await encodeWanxImageEditMask(dataUrl, options?.signal);
     }
-    form.set("mask", dataUrlToFile({ ...masks[0], name: "mask.png", type: "image/png", dataUrl }));
+    form.set(
+      "mask",
+      dataUrlToFile({
+        ...masks[0],
+        name: "mask.png",
+        type: "image/png",
+        dataUrl,
+      }),
+    );
   }
   const payload = await requestSiteMediaJson<ImageApiResponse>(
     "/pg/images/edits",
@@ -317,9 +373,9 @@ export async function requestImageQuestion(
     "text",
   );
   const systemPrompt = config.systemPrompt.trim();
-  const model = getSiteContext().channels
-    .find((channel) => channel.id === selection.group)?.models
-    .find((item) => item.name === selection.model);
+  const model = getSiteContext()
+    .channels.find((channel) => channel.id === selection.group)
+    ?.models.find((item) => item.name === selection.model);
   if (model?.chatProtocol === "responses") {
     return requestSiteResponsesText({
       ...selection,

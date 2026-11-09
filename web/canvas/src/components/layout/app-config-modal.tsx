@@ -16,7 +16,8 @@ import { syncAppDataToWebdav, type AppSyncDomainKey, type AppSyncProgressEvent }
 import { testWebdavConnection, WEBDAV_MANIFEST_FILE_NAME } from "@/services/webdav-sync";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
 import { computeMediaSize, inferMediaRatio, inferMediaScale, mediaScaleOptions, parseVideoResolution } from "@/lib/media-size";
-import { createModelChannel, modelOptionsFromChannels, normalizeModelOptionValue, selectableModelsByCapability, useConfigStore, type AiConfig, type ApiCallFormat, type ConfigTabKey, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
+import { isGeminiImageModel, resolveGeminiImageSettings } from "@/lib/gemini-image";
+import { createModelChannel, modelOptionName, modelOptionsFromChannels, normalizeModelOptionValue, selectableModelsByCapability, useConfigStore, type AiConfig, type ApiCallFormat, type ConfigTabKey, type ModelCapability, type ModelChannel } from "@/stores/use-config-store";
 
 type ModelGroup = {
     capability: ModelCapability;
@@ -70,6 +71,9 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "preferenc
     const editingChannel = config.channels.find((channel) => channel.id === editingChannelId) || null;
     const locale = i18n.resolvedLanguage as AppLocale;
     const imageResolutionOptions = mediaScaleOptions.map((value) => ({ value, label: value === "auto" ? t("settingsPanels.common.auto") : value.toUpperCase() }));
+    const geminiImageSettings = isGeminiImageModel(modelOptionName(config.imageModel || config.model))
+        ? resolveGeminiImageSettings(config.size, config.quality)
+        : undefined;
     useEffect(() => setActiveTab(initialTab), [initialTab]);
 
     const saveConfig = (nextConfig: AiConfig) => {
@@ -246,7 +250,14 @@ export function AppConfigPanel({ showDoneButton = false, initialTab = "preferenc
                                         />
                                     </Form.Item>
                                     <Form.Item label={t("config.preferences.imageResolution")} className="mb-4">
-                                        <Select value={inferMediaScale(config.size)} options={imageResolutionOptions} onChange={(scale) => updateConfig("size", computeMediaSize(scale, inferMediaRatio(config.size)))} />
+                                        <Select value={geminiImageSettings?.scale ?? inferMediaScale(config.size)} options={imageResolutionOptions} onChange={(scale) => {
+                                            if (geminiImageSettings) {
+                                                updateConfig("quality", scale === "auto" ? "auto" : scale.toUpperCase());
+                                                updateConfig("size", geminiImageSettings.ratio);
+                                                return;
+                                            }
+                                            updateConfig("size", computeMediaSize(scale, inferMediaRatio(config.size)));
+                                        }} />
                                     </Form.Item>
                                     <Form.Item label={t("config.preferences.videoResolution")} className="mb-4">
                                         <Select value={parseVideoResolution(config.vquality)} options={videoResolutionOptions} onChange={(value) => updateConfig("vquality", value)} />

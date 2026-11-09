@@ -1,5 +1,9 @@
 import i18n from "@/i18n";
 import {
+  isGeminiImageModel,
+  resolveGeminiImageSettings,
+} from "@/lib/gemini-image";
+import {
   inferMediaRatio,
   inferMediaScale,
   mediaRatioOptions,
@@ -37,7 +41,14 @@ export function imageQualityLabel(value: string) {
     : value;
 }
 
-export function imageSizeLabel(size: string) {
+export function imageSizeLabel(size: string, model = "", quality = "auto") {
+  if (isGeminiImageModel(model)) {
+    const { scale, ratio } = resolveGeminiImageSettings(size, quality);
+    const ratioLabel =
+      ratio === "auto" ? i18n.t("settingsPanels.common.auto") : ratio;
+    if (scale === "auto") return ratioLabel;
+    return `${scale.toUpperCase()} · ${ratioLabel}`;
+  }
   const scale = inferMediaScale(size);
   const ratio = inferMediaRatio(size);
   if (ratio === "auto" || size === "auto") {
@@ -45,4 +56,14 @@ export function imageSizeLabel(size: string) {
   }
   if (scale === "auto") return ratio;
   return `${scale} · ${ratio}`;
+}
+
+export function imageSettingsLabel(
+  size: string,
+  model: string,
+  quality: string,
+) {
+  const sizeLabel = imageSizeLabel(size, model, quality);
+  if (isGeminiImageModel(model)) return sizeLabel;
+  return `${imageQualityLabel(quality)} · ${sizeLabel}`;
 }

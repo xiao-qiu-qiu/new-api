@@ -3,11 +3,19 @@ import { ConfigProvider, Switch } from "antd";
 import { useTranslation } from "react-i18next";
 
 import { qualityOptions } from "@/lib/image-settings-options";
+import { GEMINI_IMAGE_RATIOS, isGeminiImageModel, resolveGeminiImageSettings } from "@/lib/gemini-image";
 import type { CanvasTheme } from "@/lib/canvas-theme";
 import { computeMediaSize, inferMediaRatio, inferMediaScale, mediaRatioOptions, mediaScaleOptions, readMediaDimensions } from "@/lib/media-size";
 import { modelOptionName, type AiConfig } from "@/stores/use-config-store";
 
 const DIMENSION_STEP = 16;
+const geminiRatioOptions = [
+    ...GEMINI_IMAGE_RATIOS.map((value) => {
+        const [width, height] = value.split(":").map(Number);
+        return { value, width, height };
+    }),
+    { value: "auto", width: 0, height: 0 },
+];
 
 type ImageSettingsPanelProps = {
     config: AiConfig;
@@ -22,18 +30,28 @@ type ImageSettingsPanelProps = {
 export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[320px] space-y-4 rounded-2xl px-1 py-0.5", maxCount = 15, quickCount = 10 }: ImageSettingsPanelProps) {
     const { t } = useTranslation();
     const [snapDimensionToStep, setSnapDimensionToStep] = useState(true);
-    const quality = config.quality || "auto";
+    const quality = qualityOptions.some((item) => item.value === config.quality) ? config.quality : "auto";
     const count = Math.max(1, Math.min(maxCount, Math.floor(Math.abs(Number(config.count)) || 1)));
     const activeSize = config.size || "auto";
     const transparentBackground = config.background === "transparent";
     const outputFormat = config.imageOutputFormat || "png";
     const animated = outputFormat === "gif";
     const supportsGif = /^gpt-image-2\.6-(?:flare|sunburst)$/i.test(modelOptionName(config.model || config.imageModel));
-    const selectedScale = inferMediaScale(activeSize);
-    const selectedRatio = inferMediaRatio(activeSize);
+    const gemini = isGeminiImageModel(modelOptionName(config.model || config.imageModel));
+    const geminiSettings = gemini ? resolveGeminiImageSettings(activeSize, config.quality) : undefined;
+    const selectedScale = geminiSettings?.scale ?? inferMediaScale(activeSize);
+    const selectedRatio = geminiSettings?.ratio ?? inferMediaRatio(activeSize);
+    const ratioOptions = gemini ? geminiRatioOptions : mediaRatioOptions;
     const dimensions = readMediaDimensions(activeSize, selectedScale, selectedRatio);
-    const applySize = (scale: string, ratio: string) => onConfigChange("size", computeMediaSize(scale, ratio));
-    const selectScale = (scale: string) => applySize(scale, selectedRatio === "auto" ? "1:1" : selectedRatio);
+    const applySize = (scale: string, ratio: string) => {
+        if (gemini) {
+            onConfigChange("quality", scale === "auto" ? "auto" : scale.toUpperCase());
+            onConfigChange("size", ratio);
+            return;
+        }
+        onConfigChange("size", computeMediaSize(scale, ratio));
+    };
+    const selectScale = (scale: string) => applySize(scale, !gemini && selectedRatio === "auto" ? "1:1" : selectedRatio);
     const selectRatio = (ratio: string) => applySize(selectedScale, ratio);
     const updateDimension = (key: "width" | "height", value: number | null) => {
         const next = Math.max(1, Math.floor(value || dimensions[key] || 1024));
@@ -80,7 +98,7 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         <CountInput value={Number(config.imageFrameDurationMs || "200")} min={20} max={2000} step={10} theme={theme} label={t("Frame duration (ms)")} onChange={(value) => onConfigChange("imageFrameDurationMs", String(value ?? 200))} />
                     </div>
                 </div> : null}
-                <div className="space-y-2.5">
+                {!gemini ? <div className="space-y-2.5">
                     <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.quality")}</SettingTitle>
                     <div className="grid grid-cols-3 gap-2.5">
                         {qualityOptions.map((item) => (
@@ -89,8 +107,8 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                             </OptionPill>
                         ))}
                     </div>
-                </div>
-                <div className="space-y-2.5">
+                </div> : null}
+                {!gemini ? <div className="space-y-2.5">
                     <div className="flex items-center justify-between gap-3">
                         <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.size")}</SettingTitle>
                         <div className="flex items-center gap-2">
@@ -107,13 +125,13 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         <span className="text-lg opacity-45">↔</span>
                         <DimensionInput prefix="H" value={dimensions.height} disabled={selectedRatio === "auto"} theme={theme} alignToStep={snapDimensionToStep} onChange={(value) => updateDimension("height", value)} />
                     </div>
-                </div>
+                </div> : null}
                 <div className="space-y-2.5">
                     <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.resolution")}</SettingTitle>
                     <div className="grid grid-cols-4 gap-2.5">
                         {mediaScaleOptions.map((value) => (
                             <OptionPill key={value} selected={selectedScale === value} theme={theme} onClick={() => selectScale(value)}>
-                                {value === "auto" ? t("settingsPanels.common.auto") : value}
+                                {value === "auto" ? t("settingsPanels.common.auto") : value.toUpperCase()}
                             </OptionPill>
                         ))}
                     </div>
@@ -121,10 +139,11 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                 <div className="space-y-2.5">
                     <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.aspectRatio")}</SettingTitle>
                     <div className="grid grid-cols-4 gap-2.5">
-                        {mediaRatioOptions.map((item) => (
+                        {ratioOptions.map((item) => (
                             <button
                                 key={item.value}
                                 type="button"
+                                aria-pressed={selectedRatio === item.value}
                                 className="flex h-[72px] cursor-pointer flex-col items-center justify-center gap-1.5 rounded-xl border bg-transparent text-sm transition hover:opacity-80"
                                 style={{ borderColor: selectedRatio === item.value ? theme.node.text : theme.node.stroke, background: "transparent", color: theme.node.text }}
                                 onMouseDown={(event) => event.stopPropagation()}
@@ -136,7 +155,7 @@ export function ImageSettingsPanel({ config, onConfigChange, theme, showTitle = 
                         ))}
                     </div>
                 </div>
-                {!animated ? <div className="flex items-center justify-between gap-3">
+                {!animated && !gemini ? <div className="flex items-center justify-between gap-3">
                     <div className="space-y-0.5">
                         <SettingTitle color={theme.node.muted}>{t("settingsPanels.image.transparent")}</SettingTitle>
                         <div className="text-xs" style={{ color: theme.node.muted, opacity: 0.75 }}>
@@ -183,6 +202,7 @@ function OptionPill({ selected, disabled, theme, onClick, children }: { selected
     return (
         <button
             type="button"
+            aria-pressed={selected}
             disabled={disabled}
             className="h-9 cursor-pointer rounded-full border px-2 text-sm transition hover:opacity-80 disabled:cursor-not-allowed disabled:opacity-35"
             style={{ background: "transparent", borderColor: selected ? theme.node.text : theme.node.stroke, color: theme.node.text }}
