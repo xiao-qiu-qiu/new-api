@@ -110,7 +110,7 @@ export const GroupRatioForm = memo(function GroupRatioForm(
   const jsonFields: { name: JsonGroupField; label: string }[] = [
     { name: 'GroupRatio', label: t('Multiplier groups') },
     { name: 'UserUsableGroups', label: t('Selectable groups') },
-    { name: 'UserGroups', label: t('User group default multiplier groups') },
+    { name: 'UserGroups', label: t('User groups') },
     { name: 'TopupGroupRatio', label: t('Top-up group ratios') },
     { name: 'GroupGroupRatio', label: t('Special ratio rules') },
     { name: 'SpecialPricingRules', label: t('Special pricing rules') },
@@ -291,7 +291,7 @@ export const GroupRatioForm = memo(function GroupRatioForm(
               <h3 className='text-sm font-semibold'>{t('User groups')}</h3>
               <p className='text-muted-foreground text-sm leading-6'>
                 {t(
-                  'User groups define account membership, top-up ratios and a default multiplier group. Assign them in user management or subscription plans.'
+                  'User groups define account membership and top-up ratios. Assign them in user management or subscription plans.'
                 )}
               </p>
             </section>
@@ -305,9 +305,7 @@ export const GroupRatioForm = memo(function GroupRatioForm(
                 )}
               </p>
               <p className='text-muted-foreground text-sm leading-6'>
-                {t(
-                  'A token with no group uses its user group’s default multiplier group. Auto tries the configured multiplier groups in order.'
-                )}
+                {t('Each token must select one or more multiplier groups.')}
               </p>
             </section>
             <section className='space-y-2'>

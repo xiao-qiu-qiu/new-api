@@ -622,29 +622,27 @@ func TokenAuth() func(c *gin.Context) {
 		userGroup := userCache.Group
 		groupSettings := setting.PinGroupSettings(c)
 		tokenGroup := token.Group
-		if tokenGroup != "" {
-			// check common.UserUsableGroups[userGroup]
+		if tokenGroup == "" {
+			abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgAuthTokenGroupRequired))
+			return
+		}
+		if tokenGroup == "auto" {
+			groups, err := token.GetAutoGroups()
+			if err != nil || service.ValidateTokenAutoGroups(groupSettings, userGroup, groups) != nil {
+				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgAuthTokenAutoGroupsInvalid))
+				return
+			}
+		} else {
 			if _, ok := groupSettings.Usable(userGroup)[tokenGroup]; !ok {
 				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgAuthTokenGroupForbidden, map[string]any{"Group": tokenGroup}))
 				return
 			}
-			// check group in common.GroupRatio
 			if !groupSettings.ContainsRatio(tokenGroup) {
-				if tokenGroup != "auto" {
-					abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgAuthTokenGroupDeprecated, map[string]any{"Group": tokenGroup}))
-					return
-				}
-			}
-			userGroup = tokenGroup
-		}
-		if tokenGroup == "" {
-			userGroup = groupSettings.DefaultGroup(userGroup)
-			if !groupSettings.ContainsRatio(userGroup) {
-				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgAuthTokenGroupDeprecated, map[string]any{"Group": userGroup}))
+				abortWithOpenAiMessage(c, http.StatusForbidden, i18n.T(c, i18n.MsgAuthTokenGroupDeprecated, map[string]any{"Group": tokenGroup}))
 				return
 			}
 		}
-		common.SetContextKey(c, constant.ContextKeyUsingGroup, userGroup)
+		common.SetContextKey(c, constant.ContextKeyUsingGroup, tokenGroup)
 
 		err = SetupContextForToken(c, token, parts...)
 		if err != nil {

@@ -28,7 +28,32 @@ func GetUserAutoGroup(userGroup string) []string {
 
 func FilterUserTokenAutoGroups(userGroup string, groups []string) []string {
 	snapshot := setting.CaptureGroupSettings()
-	return snapshot.FilterAutoGroups(userGroup, groups, snapshot.MaxTokenAutoGroups)
+	if ValidateTokenAutoGroups(snapshot, userGroup, groups) != nil {
+		return []string{}
+	}
+	return groups
+}
+
+// ValidateTokenAutoGroups rejects an invalid selection as a whole; filtering it
+// would silently change the token's routing scope or priority order.
+func ValidateTokenAutoGroups(snapshot *setting.GroupSettingsSnapshot, userGroup string, groups []string) error {
+	if len(groups) == 0 {
+		return common.NewMessage("Select at least one group for this token")
+	}
+	if len(groups) > snapshot.MaxTokenAutoGroups {
+		return common.NewMessage("A token can select at most {{max}} groups", map[string]any{"max": snapshot.MaxTokenAutoGroups})
+	}
+	seen := make(map[string]struct{}, len(groups))
+	for _, group := range groups {
+		if _, exists := seen[group]; exists {
+			return common.NewMessage("Group {{group}} is duplicated", map[string]any{"group": group})
+		}
+		seen[group] = struct{}{}
+		if !snapshot.Selectable(userGroup, group) {
+			return common.NewMessage("Group {{group}} is unavailable or unauthorized", map[string]any{"group": group})
+		}
+	}
+	return nil
 }
 
 // GetRequestAutoGroups uses the configuration generation captured at authentication.
@@ -36,13 +61,21 @@ func GetRequestAutoGroups(c *gin.Context, userGroup string) []string {
 	snapshot := setting.RequestGroupSettings(c)
 	value, ok := common.GetContextKey(c, constant.ContextKeyTokenAutoGroups)
 	if !ok {
-		return snapshot.FilterAutoGroups(userGroup, snapshot.AutoGroups, len(snapshot.AutoGroups))
+		return []string{}
 	}
 	groups, ok := value.([]string)
 	if !ok {
 		return []string{}
 	}
-	return snapshot.FilterAutoGroups(userGroup, groups, snapshot.MaxTokenAutoGroups)
+	// The session playground binds its selected global snapshot explicitly;
+	// the per-key selection limit does not apply to that independent mode.
+	if common.GetContextKeyBool(c, constant.ContextKeyIsPlayground) {
+		return snapshot.FilterAutoGroups(userGroup, groups, len(groups))
+	}
+	if ValidateTokenAutoGroups(snapshot, userGroup, groups) != nil {
+		return []string{}
+	}
+	return groups
 }
 
 // GetGroupsEnabledModels 按 groups 顺序获取各分组启用的模型并去重

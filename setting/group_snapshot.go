@@ -89,7 +89,7 @@ func RequestGroupSettings(c *gin.Context) *GroupSettingsSnapshot {
 }
 
 func (s *GroupSettingsSnapshot) DefaultGroup(userGroup string) string {
-	if group, exists := s.UserGroups[userGroup]; exists {
+	if group := s.UserGroups[userGroup]; group != "" {
 		return group
 	}
 	if userGroup != "" && userGroup != "auto" && s.ContainsRatio(userGroup) {
@@ -116,16 +116,6 @@ func (s *GroupSettingsSnapshot) Usable(userGroup string) map[string]string {
 			delete(groups, group)
 		} else {
 			groups[strings.TrimPrefix(target, "+:")] = description
-		}
-	}
-	group := s.DefaultGroup(userGroup)
-	if s.ContainsRatio(group) {
-		if _, exists := groups[group]; !exists {
-			description, exists := s.UsableGroups[group]
-			if !exists {
-				description = group
-			}
-			groups[group] = description
 		}
 	}
 	return groups

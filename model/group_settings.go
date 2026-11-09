@@ -118,6 +118,9 @@ func UpdateGroupSettingsOptions(values map[string]string) error {
 		}
 	}
 	for name, route := range groups {
+		if route == "" {
+			continue
+		}
 		if _, exists := ratios[route]; !exists {
 			_, previouslyAvailable := oldRatios[route]
 			if previouslyAvailable || oldGroups[name] != route {

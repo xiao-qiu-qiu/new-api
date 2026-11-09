@@ -8,9 +8,10 @@ import (
 	"github.com/QuantumNous/new-api/common"
 )
 
-// UserGroups maps account groups to their default routing/billing group.
-// It deliberately does not define prices or the set of routing groups.
-var userGroups = map[string]string{"default": "default"}
+// UserGroups registers account identities. Values may be empty; non-empty
+// values preserve legacy defaults for historical tasks and non-Key consumers.
+// This registry does not grant access to routing groups or define their prices.
+var userGroups = map[string]string{"default": ""}
 var userGroupsMutex sync.RWMutex
 var userGroupsConfigured bool
 
@@ -19,7 +20,7 @@ var userGroupsConfigured bool
 func ResetUserGroups() {
 	userGroupsMutex.Lock()
 	defer userGroupsMutex.Unlock()
-	userGroups = map[string]string{"default": "default"}
+	userGroups = map[string]string{"default": ""}
 	userGroupsConfigured = false
 }
 
@@ -45,15 +46,17 @@ func UserGroups2JSONString() string {
 }
 
 func ParseUserGroups(value string) (map[string]string, error) {
-	var groups map[string]string
-	if err := common.UnmarshalJsonStr(value, &groups); err != nil || groups == nil {
-		return nil, common.NewMessage("User groups must map user group names to default ratio groups")
+	var decoded map[string]*string
+	if err := common.UnmarshalJsonStr(value, &decoded); err != nil || decoded == nil {
+		return nil, common.NewMessage("Invalid parameters")
 	}
-	for name, route := range groups {
+	groups := make(map[string]string, len(decoded))
+	for name, route := range decoded {
 		if name == "" || name == "auto" || name == "*" || name != strings.TrimSpace(name) || utf8.RuneCountInString(name) > 64 ||
-			route == "" || route == "auto" || route != strings.TrimSpace(route) {
-			return nil, common.NewMessage("User groups must map user group names to default ratio groups")
+			route == nil || *route == "auto" || *route != strings.TrimSpace(*route) {
+			return nil, common.NewMessage("Invalid parameters")
 		}
+		groups[name] = *route
 	}
 	return groups, nil
 }
@@ -70,8 +73,8 @@ func UpdateUserGroupsByJSONString(value string) error {
 	return nil
 }
 
-// GetUserDefaultRatioGroup preserves legacy same-name routing until explicitly
-// overridden. Account-only groups inherit the ordinary default route.
+// GetUserDefaultRatioGroup retains historical defaults for non-Key consumers.
+// Key selection uses only explicitly available routing groups.
 func GetUserDefaultRatioGroup(userGroup string) string {
 	return CaptureGroupSettings().DefaultGroup(userGroup)
 }

@@ -38,16 +38,16 @@ func newRequestAutoGroupsContext() *gin.Context {
 	return ctx
 }
 
-func TestGetRequestAutoGroupsInheritedListIsNotLimited(t *testing.T) {
+func TestGetRequestAutoGroupsDoesNotInheritGlobalList(t *testing.T) {
 	configureRequestAutoGroupsTest(t)
 	ctx := newRequestAutoGroupsContext()
 
 	groups := GetRequestAutoGroups(ctx, "default")
 
-	assert.Equal(t, []string{"vip", "default", "svip"}, groups)
+	assert.Empty(t, groups)
 }
 
-func TestGetRequestAutoGroupsFiltersBeforeApplyingCurrentLimit(t *testing.T) {
+func TestGetRequestAutoGroupsRejectsInvalidSelectionWithoutFiltering(t *testing.T) {
 	configureRequestAutoGroupsTest(t)
 	ctx := newRequestAutoGroupsContext()
 	common.SetContextKey(ctx, constant.ContextKeyTokenAutoGroups, []string{"revoked", "vip", "default", "svip"})
@@ -55,9 +55,21 @@ func TestGetRequestAutoGroupsFiltersBeforeApplyingCurrentLimit(t *testing.T) {
 
 	groups := GetRequestAutoGroups(ctx, "default")
 
-	assert.Equal(t, []string{"vip", "default"}, groups)
+	assert.Empty(t, groups, "an invalid group invalidates the whole selection")
+	common.SetContextKey(ctx, constant.ContextKeyTokenAutoGroups, []string{"vip", "default"})
+	assert.Equal(t, []string{"vip", "default"}, GetRequestAutoGroups(ctx, "default"))
 	require.NoError(t, setting.UpdateMaxTokenAutoGroups("1"))
-	assert.Equal(t, []string{"vip"}, GetRequestAutoGroups(ctx, "default"))
+	assert.Empty(t, GetRequestAutoGroups(ctx, "default"), "the current limit must not silently truncate a token")
+}
+
+func TestGetRequestAutoGroupsPlaygroundUsesExplicitSessionSnapshot(t *testing.T) {
+	configureRequestAutoGroupsTest(t)
+	ctx := newRequestAutoGroupsContext()
+	common.SetContextKey(ctx, constant.ContextKeyIsPlayground, true)
+	assert.Empty(t, GetRequestAutoGroups(ctx, "default"), "even session requests require an explicit snapshot")
+	common.SetContextKey(ctx, constant.ContextKeyTokenAutoGroups, []string{"vip", "default", "svip"})
+	require.NoError(t, setting.UpdateAutoGroupsByJsonString(`[]`))
+	assert.Equal(t, []string{"vip", "default", "svip"}, GetRequestAutoGroups(ctx, "default"), "the per-key limit does not truncate the session selection")
 }
 
 func TestGetRequestAutoGroupsDoesNotFallBackAfterPermissionChange(t *testing.T) {

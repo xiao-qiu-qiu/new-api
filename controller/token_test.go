@@ -520,6 +520,7 @@ func TestGetTokenMasksKeyInResponse(t *testing.T) {
 }
 
 func TestUpdateTokenMasksKeyInResponse(t *testing.T) {
+	configureTokenAutoGroupsTest(t, "5", `[]`)
 	db := setupTokenControllerTestDB(t)
 	token := seedToken(t, db, 1, "editable-token", "yzab1234cdef5678")
 
@@ -535,7 +536,7 @@ func TestUpdateTokenMasksKeyInResponse(t *testing.T) {
 		"cross_group_retry":    false,
 	}
 
-	ctx, recorder := newAuthenticatedContext(t, http.MethodPut, "/api/token/", body, 1)
+	ctx, recorder := newTokenAutoGroupsAuthenticatedContext(t, http.MethodPut, "/api/token/", body, 1)
 	UpdateToken(ctx)
 
 	response := decodeAPIResponse(t, recorder)
@@ -590,6 +591,7 @@ func TestGetTokenKeyRequiresOwnershipAndReturnsFullKey(t *testing.T) {
 }
 
 func TestTokenAllowUserQuotaQueryOnCreateAndUpdate(t *testing.T) {
+	configureTokenAutoGroupsTest(t, "5", `[]`)
 	for _, tc := range []struct {
 		name   string
 		target string
@@ -607,21 +609,21 @@ func TestTokenAllowUserQuotaQueryOnCreateAndUpdate(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := setupTokenControllerTestDB(t)
-			body := map[string]any{"name": "quota-query", "expired_time": -1, "unlimited_quota": true, "status": common.TokenStatusEnabled}
+			body := map[string]any{"name": "quota-query", "expired_time": -1, "unlimited_quota": true, "status": common.TokenStatusEnabled, "group": "default"}
 			if tc.field != nil {
 				body["allow_user_quota_query"] = tc.field
 			}
 			var recorder *httptest.ResponseRecorder
 			if tc.stored == nil {
 				var ctx *gin.Context
-				ctx, recorder = newAuthenticatedContext(t, http.MethodPost, tc.target, body, 1)
+				ctx, recorder = newTokenAutoGroupsAuthenticatedContext(t, http.MethodPost, tc.target, body, 1)
 				AddToken(ctx)
 			} else {
 				token := seedToken(t, db, 1, "quota-query", "quota-query-key")
 				require.NoError(t, db.Model(token).Update("allow_user_quota_query", *tc.stored).Error)
 				body["id"] = token.Id
 				var ctx *gin.Context
-				ctx, recorder = newAuthenticatedContext(t, http.MethodPut, tc.target, body, 1)
+				ctx, recorder = newTokenAutoGroupsAuthenticatedContext(t, http.MethodPut, tc.target, body, 1)
 				UpdateToken(ctx)
 			}
 			response := decodeAPIResponse(t, recorder)
@@ -642,6 +644,7 @@ func TestTokenAllowUserQuotaQueryOnCreateAndUpdate(t *testing.T) {
 }
 
 func TestTokenOpenAITierPolicyCRUD(t *testing.T) {
+	configureTokenAutoGroupsTest(t, "5", `[]`)
 	for _, tc := range []struct {
 		name, stored, want                  string
 		field                               any
@@ -666,7 +669,7 @@ func TestTokenOpenAITierPolicyCRUD(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			db := setupTokenControllerTestDB(t)
-			body := map[string]any{"name": "tier-token", "expired_time": -1, "unlimited_quota": true, "status": common.TokenStatusEnabled, "model_limits_enabled": true, "model_limits": "allowed-model"}
+			body := map[string]any{"name": "tier-token", "expired_time": -1, "unlimited_quota": true, "status": common.TokenStatusEnabled, "model_limits_enabled": true, "model_limits": "allowed-model", "group": "default"}
 			if tc.field != nil || tc.name == "create null" {
 				body["openai_tier_policy"] = tc.field
 			}
@@ -686,7 +689,7 @@ func TestTokenOpenAITierPolicyCRUD(t *testing.T) {
 				require.NoError(t, db.Model(token).Update("openai_tier_policy", tc.stored).Error)
 				body["id"] = token.Id
 			}
-			ctx, recorder := newAuthenticatedContext(t, method, target, body, 1)
+			ctx, recorder := newTokenAutoGroupsAuthenticatedContext(t, method, target, body, 1)
 			if tc.create {
 				AddToken(ctx)
 			} else {

@@ -359,7 +359,6 @@ export const GroupRatioVisualEditor = memo(function GroupRatioVisualEditor({
         <UserGroupsEditor
           userGroups={userGroups}
           topupGroupRatio={topupGroupRatio}
-          groupOptions={registryNames}
           onChange={(field, value) => {
             if (field === 'UserGroups') {
               const nextGroups = parseUsableMap(value)

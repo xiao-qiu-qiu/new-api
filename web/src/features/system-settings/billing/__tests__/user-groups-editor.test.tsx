@@ -33,7 +33,6 @@ function Fixture() {
       <UserGroupsEditor
         userGroups={values.UserGroups}
         topupGroupRatio={values.TopupGroupRatio}
-        groupOptions={['standard', 'premium']}
         onChange={(field, value) =>
           setValues((previous) => ({ ...previous, [field]: value }))
         }
@@ -70,6 +69,11 @@ test('adding a named group and confirming deletion only changes the user group c
   )
   await user.click(within(dialog).getByRole('button', { name: 'Add' }))
   expect(screen.getByText('new-members')).toBeInTheDocument()
+  expect(
+    JSON.parse(
+      JSON.parse(screen.getByTestId('values').textContent ?? '').UserGroups
+    )
+  ).toEqual({ members: 'standard', 'new-members': '' })
   await user.click(
     screen.getByRole('button', { name: 'Delete user group new-members' })
   )
@@ -95,7 +99,6 @@ test.each(['null', '[]', '{"members":null}'])(
       <UserGroupsEditor
         userGroups={userGroups}
         topupGroupRatio='{}'
-        groupOptions={['standard']}
         onChange={onChange}
       />
     )
@@ -142,7 +145,7 @@ test('duplicate and reserved names are rejected without creating a group', async
   render(<Fixture />)
   await user.click(screen.getByRole('button', { name: 'Add user group' }))
   const input = screen.getByRole('textbox', { name: 'User group name' })
-  for (const name of ['members', 'auto']) {
+  for (const name of ['members', 'auto', '*']) {
     await user.clear(input)
     await user.type(input, name)
     await user.click(
@@ -176,30 +179,41 @@ test('deletion removes its recharge override while retaining unrelated overrides
   expect(screen.getByRole('table', { name: 'User groups' })).toBeInTheDocument()
 })
 
-test('the default billing group can be changed by keyboard without changing recharge overrides', async () => {
-  const user = userEvent.setup()
+test('identity editing exposes no routing selector and preserves legacy mappings when recharge ratios change', () => {
   render(<Fixture />)
-  screen
-    .getByRole('combobox', { name: 'Default billing group for members' })
-    .focus()
-  await user.keyboard('{Enter}{End}{Enter}')
+  expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
+  expect(screen.queryByText('Default billing group')).not.toBeInTheDocument()
+  fireEvent.change(screen.getByRole('spinbutton'), {
+    target: { value: '0.5' },
+  })
   const values = JSON.parse(screen.getByTestId('values').textContent ?? '')
-  expect(JSON.parse(values.UserGroups)).toEqual({ members: 'premium' })
+  expect(JSON.parse(values.UserGroups)).toEqual({ members: 'standard' })
   expect(JSON.parse(values.TopupGroupRatio)).toEqual({
-    members: 1.25,
+    members: 0.5,
     legacy: 2,
   })
 })
 
-test('adding is disabled when no real billing groups are available', () => {
+test('a pure identity can be created with no multiplier groups by keyboard', async () => {
+  const user = userEvent.setup()
+  const onChange = vi.fn()
   render(
     <UserGroupsEditor
       userGroups='{}'
       topupGroupRatio='{}'
-      groupOptions={['auto']}
-      onChange={() => {}}
+      onChange={onChange}
     />
   )
-  expect(screen.getByRole('button', { name: 'Add user group' })).toBeDisabled()
+  const add = screen.getByRole('button', { name: 'Add user group' })
+  expect(add).toBeEnabled()
   expect(screen.getByText('No user groups')).toBeInTheDocument()
+  add.focus()
+  await user.keyboard('{Enter}')
+  await user.type(
+    screen.getByRole('textbox', { name: 'User group name' }),
+    'members{Enter}'
+  )
+  expect(onChange).toHaveBeenCalledOnce()
+  expect(onChange.mock.calls[0][0]).toBe('UserGroups')
+  expect(JSON.parse(onChange.mock.calls[0][1])).toEqual({ members: '' })
 })

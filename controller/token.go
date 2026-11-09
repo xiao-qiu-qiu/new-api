@@ -2,6 +2,7 @@ package controller
 
 import (
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -91,37 +92,29 @@ func getTokenRequestUserGroup(c *gin.Context) (string, error) {
 	return model.GetUserGroup(c.GetInt("id"), false)
 }
 
-func setTokenAutoGroups(c *gin.Context, token *model.Token, groups []string) bool {
-	if len(groups) == 0 {
-		if err := token.SetAutoGroups(nil); err != nil {
-			common.ApiError(c, err)
-			return false
-		}
-		return true
-	}
-
-	maxCount := setting.GetMaxTokenAutoGroups()
-	if len(groups) > maxCount {
-		common.ApiErrorT(c, "A token can select at most {{max}} Auto groups", map[string]any{"max": maxCount})
+func setTokenGroups(c *gin.Context, token *model.Token, groups []string) bool {
+	if token.Group == "" {
+		common.ApiErrorT(c, "Select at least one group for this token")
 		return false
 	}
-
 	userGroup, err := getTokenRequestUserGroup(c)
 	if err != nil {
 		common.ApiError(c, err)
 		return false
 	}
-	seen := make(map[string]struct{}, len(groups))
-	for _, group := range groups {
-		if _, ok := seen[group]; ok {
-			common.ApiErrorT(c, "Auto group {{group}} is duplicated", map[string]any{"group": group})
+	snapshot := setting.CaptureGroupSettings()
+	if token.Group == "auto" {
+		if err := service.ValidateTokenAutoGroups(snapshot, userGroup, groups); err != nil {
+			common.ApiError(c, err)
 			return false
 		}
-		seen[group] = struct{}{}
-		if !service.IsUserSelectableGroup(userGroup, group) {
-			common.ApiErrorT(c, "Auto group {{group}} is unavailable or unauthorized", map[string]any{"group": group})
+	} else {
+		if !snapshot.Selectable(userGroup, token.Group) {
+			common.ApiErrorT(c, "Group {{group}} is unavailable or unauthorized", map[string]any{"group": token.Group})
 			return false
 		}
+		token.CrossGroupRetry = false
+		groups = nil
 	}
 
 	if err := token.SetAutoGroups(groups); err != nil {
@@ -183,9 +176,17 @@ func GetTokenAutoGroups(c *gin.Context) {
 		common.ApiError(c, err)
 		return
 	}
+	snapshot := setting.CaptureGroupSettings()
+	groups := make([]string, 0)
+	for group := range snapshot.Usable(userGroup) {
+		if snapshot.Selectable(userGroup, group) {
+			groups = append(groups, group)
+		}
+	}
+	slices.Sort(groups)
 	common.ApiSuccess(c, gin.H{
-		"groups":    service.GetUserAutoGroup(userGroup),
-		"max_count": setting.GetMaxTokenAutoGroups(),
+		"groups":    groups,
+		"max_count": snapshot.MaxTokenAutoGroups,
 	})
 }
 
@@ -343,13 +344,8 @@ func AddToken(c *gin.Context) {
 		common.ApiErrorT(c, "Maximum number of tokens reached ({{max}})", map[string]any{"max": maxTokens})
 		return
 	}
-	if token.Group == "auto" {
-		if !setTokenAutoGroups(c, &token, request.AutoGroups.Groups) {
-			return
-		}
-	} else {
-		token.CrossGroupRetry = false
-		_ = token.SetAutoGroups(nil)
+	if !setTokenGroups(c, &token, request.AutoGroups.Groups) {
+		return
 	}
 	key, err := common.GenerateKey()
 	if err != nil {
@@ -463,6 +459,17 @@ func UpdateToken(c *gin.Context) {
 	if statusOnly != "" {
 		cleanToken.Status = token.Status
 	} else {
+		groups := request.AutoGroups.Groups
+		if token.Group == "auto" && !request.AutoGroups.Set && cleanToken.Group == "auto" {
+			groups, err = cleanToken.GetAutoGroups()
+			if err != nil {
+				common.ApiErrorT(c, "Select at least one group for this token")
+				return
+			}
+		}
+		if !setTokenGroups(c, &token, groups) {
+			return
+		}
 		// If you add more fields, please also update token.Update()
 		cleanToken.Name = token.Name
 		cleanToken.ExpiredTime = token.ExpiredTime
@@ -479,14 +486,7 @@ func UpdateToken(c *gin.Context) {
 		}
 		cleanToken.Group = token.Group
 		cleanToken.CrossGroupRetry = token.CrossGroupRetry
-		if token.Group != "auto" {
-			cleanToken.CrossGroupRetry = false
-			_ = cleanToken.SetAutoGroups(nil)
-		} else if request.AutoGroups.Set {
-			if !setTokenAutoGroups(c, cleanToken, request.AutoGroups.Groups) {
-				return
-			}
-		}
+		cleanToken.AutoGroups = token.AutoGroups
 	}
 	err = cleanToken.Update()
 	if err != nil {

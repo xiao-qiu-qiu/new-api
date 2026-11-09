@@ -35,19 +35,10 @@ import {
   FieldLabel,
 } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select'
 
 export type UserGroupsEditorProps = {
   userGroups: string
   topupGroupRatio: string
-  groupOptions: string[]
   onChange: (field: string, value: string) => void
 }
 
@@ -82,7 +73,8 @@ export function UserGroupsEditor(props: UserGroupsEditorProps) {
         t('User group name cannot exceed 64 characters')
       )
       .refine(
-        (name) => name !== 'auto' && !Object.hasOwn(userGroups, name),
+        (name) =>
+          name !== 'auto' && name !== '*' && !Object.hasOwn(userGroups, name),
         t('User group name already exists or is reserved')
       ),
   })
@@ -90,10 +82,6 @@ export function UserGroupsEditor(props: UserGroupsEditorProps) {
     resolver: zodResolver(schema),
     defaultValues: { name: '' },
   })
-  const options = [...new Set(props.groupOptions)].filter(
-    (name) => name !== 'auto'
-  )
-  const initialGroup = options.includes('default') ? 'default' : options[0]
   if (invalid) {
     return (
       <Alert variant='destructive'>
@@ -112,7 +100,6 @@ export function UserGroupsEditor(props: UserGroupsEditorProps) {
         <Button
           type='button'
           variant='outline'
-          disabled={!initialGroup}
           onClick={() => {
             form.reset()
             setAdding(true)
@@ -123,10 +110,7 @@ export function UserGroupsEditor(props: UserGroupsEditorProps) {
       </div>
       <StaticDataTable
         tableProps={{ 'aria-label': t('User groups') }}
-        data={Object.entries(userGroups).map(([name, group]) => ({
-          name,
-          group,
-        }))}
+        data={Object.keys(userGroups).map((name) => ({ name }))}
         getRowKey={(row) => row.name}
         emptyContent={
           <EmptyState title={t('No user groups')} className='min-h-28' />
@@ -199,46 +183,6 @@ export function UserGroupsEditor(props: UserGroupsEditorProps) {
             },
           },
           {
-            id: 'default',
-            header: t('Default billing group'),
-            cell: (row) => (
-              <Select
-                value={row.group}
-                onValueChange={(value) => {
-                  if (value !== null) {
-                    props.onChange(
-                      'UserGroups',
-                      JSON.stringify(
-                        { ...userGroups, [row.name]: value },
-                        null,
-                        2
-                      )
-                    )
-                  }
-                }}
-              >
-                <SelectTrigger
-                  className='w-full min-w-36'
-                  aria-label={t('Default billing group for {{group}}', {
-                    group: row.name,
-                  })}
-                  aria-invalid={!options.includes(row.group)}
-                >
-                  <SelectValue>{row.group || t('Select a group')}</SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectGroup>
-                    {options.map((group) => (
-                      <SelectItem key={group} value={group}>
-                        {group}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
-            ),
-          },
-          {
             id: 'actions',
             header: t('Actions'),
             cell: (row) => (
@@ -279,14 +223,9 @@ export function UserGroupsEditor(props: UserGroupsEditorProps) {
         <form
           id={formId}
           onSubmit={form.handleSubmit((values) => {
-            if (!initialGroup) return
             props.onChange(
               'UserGroups',
-              JSON.stringify(
-                { ...userGroups, [values.name]: initialGroup },
-                null,
-                2
-              )
+              JSON.stringify({ ...userGroups, [values.name]: '' }, null, 2)
             )
             setAdding(false)
           })}

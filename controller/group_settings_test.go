@@ -44,6 +44,35 @@ func TestGroupSettingsLifecycle(t *testing.T) {
 	}
 }
 
+func TestUserGroupIdentityAndRouteSelection(t *testing.T) {
+	groups, err := setting.ParseUserGroups(`{"default":"","members":"","legacy":"private"}`)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"default": "", "members": "", "legacy": "private"}, groups)
+	for _, invalid := range []string{`null`, `[]`, `{"members":null}`, `{"members":1}`, `{"auto":""}`, `{"*":""}`, `{" members":""}`, `{"members":"auto"}`, `{"members":" private"}`} {
+		_, err := setting.ParseUserGroups(invalid)
+		assert.Error(t, err, invalid)
+	}
+
+	snapshot := &setting.GroupSettingsSnapshot{
+		UserGroups:          groups,
+		Ratios:              map[string]float64{"default": 1, "members": 2, "private": 3, "public": 4},
+		UsableGroups:        map[string]string{"public": "Public", "auto": "Automatic"},
+		SpecialUsableGroups: map[string]map[string]string{"members": {"+:default": "Default"}},
+	}
+	assert.Equal(t, "private", snapshot.DefaultGroup("legacy"), "historical non-Key consumers retain explicit mappings")
+	assert.Equal(t, "members", snapshot.DefaultGroup("members"), "pure identities retain the historical same-name fallback outside Key selection")
+	assert.Equal(t, "default", snapshot.DefaultGroup("missing"))
+	assert.Equal(t, "default", snapshot.DefaultGroup("default"))
+	assert.Equal(t, map[string]string{"public": "Public", "auto": "Automatic"}, snapshot.Usable("legacy"))
+	assert.Equal(t, map[string]string{"public": "Public", "auto": "Automatic", "default": "Default"}, snapshot.Usable("members"))
+	assert.False(t, snapshot.Selectable("legacy", "private"))
+	assert.False(t, snapshot.Selectable("members", "members"))
+	assert.Equal(t, []string{"public"}, snapshot.FilterAutoGroups("members", []string{"members", "private", "public"}, 3))
+	snapshot.UsableGroups["private"] = "Private"
+	snapshot.SpecialUsableGroups["legacy"] = map[string]string{"-:private": ""}
+	assert.NotContains(t, snapshot.Usable("legacy"), "private", "legacy defaults cannot undo an explicit visibility removal")
+}
+
 func TestSpecialPricingResolution(t *testing.T) {
 	rules, err := setting.ParseSpecialPricingRules(`[
 		{"user_group":"*","model":"gpt-image-2","price":0.1,"billing_unit":"request"},
@@ -190,7 +219,7 @@ func runGroupSettingsLifecycle(t *testing.T) {
 	require.NoError(t, db.Create(&model.UserSubscription{UserId: legacy.Id, PlanId: plan.Id, Status: "active", PrevUserGroup: "snapshot_return"}).Error)
 	groups, err := model.GetUserGroupRegistry()
 	require.NoError(t, err)
-	assert.Equal(t, map[string]string{"default": "default", "legacy": "legacy", "plan_member": "default", "plan_return": "default", "snapshot_return": "default", "topup_only": "default", "special_source": "default"}, groups)
+	assert.Equal(t, map[string]string{"default": "", "legacy": "legacy", "plan_member": "default", "plan_return": "default", "snapshot_return": "default", "topup_only": "default", "special_source": "default"}, groups)
 	assert.NotContains(t, groups, "route_only")
 	assert.False(t, setting.UserGroupsConfigured(), "a read must not persist an inferred registry")
 
@@ -238,7 +267,71 @@ func runGroupSettingsLifecycle(t *testing.T) {
 	require.NoError(t, model.UpdateGroupSettingsOptions(map[string]string{"TopupGroupRatio": `{"default":1,"topup_only":1,"student":0.8}`}))
 	assert.NotContains(t, ratio_setting.GetGroupRatioCopy(), "student")
 	assert.NotContains(t, service.GetUserUsableGroups("student"), "student")
-	assert.Contains(t, service.GetUserUsableGroups("student"), "standard")
+	assert.NotContains(t, service.GetUserUsableGroups("student"), "standard", "an identity's legacy default does not grant Key routing access")
+	t.Run("pure identity persistence and reference protection", func(t *testing.T) {
+		withIdentity := maps.Clone(groups)
+		withIdentity["identity_only"] = ""
+		encoded, err := common.Marshal(withIdentity)
+		require.NoError(t, err)
+		ctx, recorder := newAuthenticatedContext(t, http.MethodPut, "/api/group/settings", map[string]any{"options": map[string]string{
+			"UserGroups": string(encoded), "TopupGroupRatio": `{"default":1,"topup_only":1,"student":0.8,"identity_only":0.75}`,
+		}}, 1)
+		UpdateGroupSettings(ctx)
+		require.True(t, decodeAPIResponse(t, recorder).Success, recorder.Body.String())
+		for range 2 {
+			model.InitOptionMap()
+			assert.Equal(t, withIdentity, setting.GetUserGroupsCopy())
+			assert.Equal(t, "standard", setting.GetUserDefaultRatioGroup("student"))
+			assert.Equal(t, "default", setting.GetUserDefaultRatioGroup("identity_only"))
+			assert.Equal(t, 0.75, common.GetTopupGroupRatio("identity_only"))
+		}
+		var persisted model.Option
+		require.NoError(t, db.Where(&model.Option{Key: "UserGroups"}).First(&persisted).Error)
+		assert.JSONEq(t, string(encoded), persisted.Value)
+		identityUser := model.User{Username: "identity-only", Group: "identity_only", AffCode: "identity-only"}
+		require.NoError(t, db.Create(&identityUser).Error)
+		ctx, recorder = newAuthenticatedContext(t, http.MethodGet, "/api/user/self/groups", nil, identityUser.Id)
+		GetUserGroups(ctx)
+		var response struct {
+			Success bool                      `json:"success"`
+			Data    map[string]map[string]any `json:"data"`
+		}
+		require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+		require.True(t, response.Success)
+		assert.Len(t, response.Data, 2)
+		assert.Contains(t, response.Data, "default")
+		assert.Contains(t, response.Data, "route_only")
+		assert.NotContains(t, response.Data, "identity_only")
+		assert.NotContains(t, response.Data, "auto", "real routes are available without enabling the compatibility Auto entry")
+		require.NoError(t, db.AutoMigrate(&model.Ability{}))
+		require.NoError(t, db.Create(&[]model.Ability{
+			{Group: "default", Model: "identity-public-a", ChannelId: 1, Enabled: true},
+			{Group: "default", Model: "identity-shared", ChannelId: 1, Enabled: true},
+			{Group: "route_only", Model: "identity-public-b", ChannelId: 1, Enabled: true},
+			{Group: "route_only", Model: "identity-shared", ChannelId: 1, Enabled: true},
+			{Group: "standard", Model: "identity-private", ChannelId: 1, Enabled: true},
+			{Group: "identity_only", Model: "identity-same-name", ChannelId: 1, Enabled: true},
+		}).Error)
+		for _, tc := range []struct {
+			query  string
+			models []string
+		}{
+			{"", []string{"identity-public-a", "identity-public-b", "identity-shared"}},
+			{"?group=route_only", []string{"identity-public-b", "identity-shared"}},
+			{"?group=standard", []string{}},
+		} {
+			ctx, recorder = newAuthenticatedContext(t, http.MethodGet, "/api/user/models"+tc.query, nil, identityUser.Id)
+			GetUserModels(ctx)
+			assert.ElementsMatch(t, tc.models, decodeUserModelsResponse(t, recorder), tc.query)
+		}
+		encoded, err = common.Marshal(groups)
+		require.NoError(t, err)
+		restore := map[string]string{"UserGroups": string(encoded), "TopupGroupRatio": `{"default":1,"topup_only":1,"student":0.8}`}
+		assert.ErrorContains(t, model.UpdateGroupSettingsOptions(restore), "User group is still referenced")
+		assert.Equal(t, withIdentity, setting.GetUserGroupsCopy())
+		require.NoError(t, db.Delete(&identityUser).Error)
+		require.NoError(t, model.UpdateGroupSettingsOptions(restore))
+	})
 	require.NoError(t, model.ValidateUserGroup("student"))
 	assert.Error(t, model.ValidateUserGroup("route_only"))
 	require.NoError(t, model.UpdateGroupSettingsOptions(map[string]string{"GroupRatio": `{"default":1,"legacy":2,"standard":0,"route_only":4}`, "GroupGroupRatio": `{"student":{"standard":0}}`}))
@@ -435,14 +528,15 @@ func runGroupSettingsLifecycle(t *testing.T) {
 	assert.NotContains(t, effective, "topup_only")
 	assert.Equal(t, "standard", effective["student"])
 
-	// Real API-key authentication resolves defaults without changing billing identity.
+	// Real API-key authentication keeps selected routes separate from billing identity.
+	require.NoError(t, model.UpdateGroupSettingsOptions(map[string]string{"UserUsableGroups": `{"default":"Default","standard":"Standard","route_only":"Route"}`}))
 	student := model.User{Username: "student-account", Password: "placeholder", Group: "student", Status: common.UserStatusEnabled, AffCode: "group-student"}
 	require.NoError(t, db.Create(&student).Error)
 	for _, tc := range []struct {
 		name, group, route string
 		status             int
 	}{
-		{"default", "", "standard", http.StatusOK},
+		{"missing selection forbidden", "", "", http.StatusForbidden},
 		{"explicit", "route_only", "route_only", http.StatusOK},
 		{"account group forbidden", "student", "", http.StatusForbidden},
 		{"unknown forbidden", "missing", "", http.StatusForbidden},
@@ -471,14 +565,16 @@ func runGroupSettingsLifecycle(t *testing.T) {
 		replacementGroups["student"] = "replacement"
 		encoded, err := common.Marshal(replacementGroups)
 		require.NoError(t, err)
-		token := model.Token{UserId: student.Id, Key: "snapshottestkey", Status: common.TokenStatusEnabled, UnlimitedQuota: true, ExpiredTime: -1}
+		token := model.Token{UserId: student.Id, Key: "snapshottestkey", Group: "standard", Status: common.TokenStatusEnabled, UnlimitedQuota: true, ExpiredTime: -1}
 		require.NoError(t, db.Create(&token).Error)
 		router := gin.New()
 		router.GET("/v1/models", middleware.TokenAuth(), func(c *gin.Context) {
 			require.Equal(t, "standard", common.GetContextKeyString(c, constant.ContextKeyUsingGroup))
+			require.NoError(t, db.Delete(&token).Error, "release the Key's route reference after authentication")
 			require.NoError(t, model.UpdateGroupSettingsOptions(map[string]string{
 				"UserGroups": string(encoded), "GroupRatio": `{"default":1,"legacy":2,"replacement":7,"route_only":4}`,
-				"GroupGroupRatio": `{"student":{"replacement":0.75}}`, "TopupGroupRatio": `{"default":1,"student":0.8}`,
+				"UserUsableGroups": `{"default":"Default","replacement":"Replacement","route_only":"Route"}`,
+				"GroupGroupRatio":  `{"student":{"replacement":0.75}}`, "TopupGroupRatio": `{"default":1,"student":0.8}`,
 				"SpecialPricingRules": `[{"user_group":"student","model":"gpt-image-*","price":0.09,"billing_unit":"image"}]`,
 			}))
 			live := setting.CaptureGroupSettings()

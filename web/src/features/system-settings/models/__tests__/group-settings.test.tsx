@@ -403,9 +403,7 @@ describe('group settings workspace', () => {
     expect(screen.queryByText('Top-up group ratios')).not.toBeInTheDocument()
     await user.click(screen.getByRole('tab', { name: 'User groups' }))
     expect(screen.getByText('Top-up group ratios')).toBeVisible()
-    expect(
-      screen.getByText('User group default multiplier groups')
-    ).toBeVisible()
+    expect(screen.getByRole('textbox', { name: 'User groups' })).toBeVisible()
     expect(screen.queryByText('Selectable groups')).not.toBeInTheDocument()
   })
 

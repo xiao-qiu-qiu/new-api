@@ -52,6 +52,10 @@ func PreparePlaygroundRelay() gin.HandlerFunc {
 
 		common.SetContextKey(c, constant.ContextKeyUsingGroup, group)
 		common.SetContextKey(c, constant.ContextKeyIsPlayground, true)
+		if group == "auto" {
+			common.SetContextKey(c, constant.ContextKeyTokenAutoGroups,
+				groupSettings.FilterAutoGroups(userGroup, groupSettings.AutoGroups, len(groupSettings.AutoGroups)))
+		}
 		if err := SetupContextForToken(c, &model.Token{
 			UserId: c.GetInt("id"),
 			Name:   fmt.Sprintf("playground-%s", group),
