@@ -191,6 +191,7 @@ export interface LogOtherData {
   login_method?: string
   user_agent?: string
   request_path?: string
+  native_compaction_v2?: boolean
   request_conversion?: string[]
   ws?: boolean
   audio?: boolean

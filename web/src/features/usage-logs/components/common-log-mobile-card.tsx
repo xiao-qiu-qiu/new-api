@@ -225,6 +225,7 @@ export function CommonLogMobileCard<TData>(props: {
                   compact
                   className='min-h-5 max-w-full min-w-0 justify-end'
                   isStream={log.is_stream}
+                  nativeCompactionV2={other?.native_compaction_v2 === true}
                   isTask={other?.is_task === true}
                   isSyncTask={other?.task_sync === true}
                   tokensPerSecond={getTokensPerSecond(

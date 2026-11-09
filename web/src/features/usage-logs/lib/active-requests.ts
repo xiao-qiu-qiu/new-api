@@ -39,6 +39,7 @@ export interface ActiveRequest {
   updated_at: number
   status: 'processing' | 'waiting' | 'streaming' | 'retrying' | 'draining'
   is_stream: boolean
+  native_compaction_v2?: boolean
   attempt: number
   client_gone: boolean
 }

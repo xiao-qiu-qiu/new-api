@@ -26,6 +26,7 @@ import { toIntlLocale } from '@/i18n/languages'
 import { formatNumber, formatTimestampToDate } from '@/lib/format'
 
 import type { ActiveUsageLog } from '../lib/active-requests'
+import { StreamTpsCell } from './timing-metrics-cell'
 import { useUsageLogsContext } from './usage-logs-provider'
 
 type ObservedRequest = ActiveUsageLog['active_request']
@@ -137,6 +138,13 @@ export function ActiveRequestCell(props: {
       )
     case 'use_time':
       return <ActiveRequestElapsed request={props.request} />
+    case 'is_stream':
+      return (
+        <StreamTpsCell
+          isStream={props.request.is_stream}
+          nativeCompactionV2={props.request.native_compaction_v2 === true}
+        />
+      )
     case 'content':
       return <ActiveRequestID request={props.request} />
     case 'prompt_tokens':
@@ -184,6 +192,13 @@ export function ActiveRequestMobileCard<TData>(props: {
         </span>
         <ActiveRequestElapsed request={props.request} />
       </div>
+      {props.cells.has('is_stream') && (
+        <StreamTpsCell
+          compact
+          isStream={props.request.is_stream}
+          nativeCompactionV2={props.request.native_compaction_v2 === true}
+        />
+      )}
       <div className='grid min-w-0 grid-cols-2 gap-2'>
         {metadata.map((field) => {
           const cell = props.cells.get(field.id)

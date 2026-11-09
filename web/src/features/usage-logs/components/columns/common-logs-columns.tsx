@@ -754,6 +754,7 @@ export function useCommonLogsColumns(
           return (
             <StreamTpsCell
               isStream={log.is_stream}
+              nativeCompactionV2={other?.native_compaction_v2 === true}
               isTask={other?.is_task === true}
               isSyncTask={other?.task_sync === true}
               tokensPerSecond={tokensPerSecond}

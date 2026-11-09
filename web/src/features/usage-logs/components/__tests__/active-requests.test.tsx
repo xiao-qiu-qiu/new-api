@@ -152,6 +152,22 @@ it('keeps channel and user details out of the self mobile view', () => {
   expect(screen.getByText('example-token')).toBeVisible()
 })
 
+it.each([false, true])(
+  'shows the native compaction label while the request is still pending (mobile=%s)',
+  (mobile) => {
+    renderFixture(mobile, false, {
+      ...activeLog,
+      active_request: {
+        ...activeLog.active_request,
+        native_compaction_v2: true,
+      },
+    })
+    expect(screen.getByText('Stream')).toBeVisible()
+    expect(screen.getByText('Compaction')).toBeVisible()
+    expect(screen.getByText('Waiting for first response')).toBeVisible()
+  }
+)
+
 it('hides request IDs with the existing sensitive-data switch', async () => {
   const user = userEvent.setup()
   renderFixture(true)

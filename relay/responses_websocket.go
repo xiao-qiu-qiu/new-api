@@ -342,6 +342,7 @@ routeAttempt:
 		info = relaycommon.GenRelayInfoResponses(c, &create.Request)
 		service.MarkMediaGenerationRequest(c, info)
 		info.IsStream = true
+		info.CaptureNativeCompactionV2(create.Request.Input)
 		common.SetContextKey(c, appconstant.ContextKeyIsStream, true)
 		if apiErr = PrepareRequestBilling(c, info); apiErr != nil {
 			return apiErr
@@ -377,6 +378,7 @@ routeAttempt:
 				info = relaycommon.GenRelayInfoResponses(c, &create.Request)
 				service.MarkMediaGenerationRequest(c, info)
 				info.IsStream = true
+				info.CaptureNativeCompactionV2(create.Request.Input)
 				common.SetContextKey(c, appconstant.ContextKeyIsStream, true)
 				if apiErr = PrepareRequestBilling(c, info); apiErr != nil {
 					return apiErr

@@ -19,6 +19,7 @@ import (
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/active_requests"
 	relaychannel "github.com/QuantumNous/new-api/relay/channel"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
@@ -630,7 +631,7 @@ func newTestWebSocketPair(t *testing.T) (*websocket.Conn, *websocket.Conn, func(
 	return target, serverConn, cleanup
 }
 
-func TestResponsesWSChannelConcurrencyPerCreate(t *testing.T) {
+func TestResponsesWSRequestMetadataAndConcurrencyPerCreate(t *testing.T) {
 	require.NoError(t, i18n.Init())
 	database := setupRelayChannelDB(t)
 	require.NoError(t, database.AutoMigrate(&model.User{}))
@@ -685,6 +686,9 @@ func TestResponsesWSChannelConcurrencyPerCreate(t *testing.T) {
 			common.SetContextKey(call, common.RequestIdKey, requestID)
 			common.SetContextKey(call, constant.ContextKeyUserId, user.Id)
 			common.SetContextKey(call, constant.ContextKeyUsingGroup, "default")
+			handle := active_requests.Start(active_requests.Record{RequestID: requestID, UserID: user.Id})
+			defer handle.Finish()
+			active_requests.SetContext(call, handle)
 			service.GetChannelConstraints(call).AddPin(appdto.ChannelPin{ChannelId: channel.Id, Source: appdto.PinSourceToken})
 			return run(call)
 		})
@@ -704,7 +708,11 @@ func TestResponsesWSChannelConcurrencyPerCreate(t *testing.T) {
 	for index, status := range []string{"completed", "failed", "cancelled"} {
 		streamID := fmt.Sprintf("stream-%d", index)
 		responseID := fmt.Sprintf("resp-%d", index)
-		create := fmt.Sprintf(`{"type":"response.create","stream_id":%q,"model":%q,"input":"hi"}`, streamID, modelName)
+		input := `[{"type":"compaction_trigger"}]`
+		if index == 2 {
+			input = `[{"type":"compaction","encrypted_content":"history"}]`
+		}
+		create := fmt.Sprintf(`{"type":"response.create","stream_id":%q,"model":%q,"input":%s}`, streamID, modelName, input)
 		require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(create)))
 		if peer == nil {
 			select {
@@ -720,12 +728,18 @@ func TestResponsesWSChannelConcurrencyPerCreate(t *testing.T) {
 		_, body, err := peer.ReadMessage()
 		require.NoError(t, err)
 		var forwarded struct {
-			Type     string `json:"type"`
-			StreamID string `json:"stream_id"`
+			Type     string            `json:"type"`
+			StreamID string            `json:"stream_id"`
+			Input    common.RawMessage `json:"input"`
 		}
 		require.NoError(t, common.Unmarshal(body, &forwarded))
 		assert.Equal(t, "response.create", forwarded.Type)
 		assert.Equal(t, streamID, forwarded.StreamID, "a previously rejected create must not reach upstream")
+		assert.JSONEq(t, input, string(forwarded.Input))
+		active, err := active_requests.Query(t.Context(), active_requests.Filter{UserID: user.Id})
+		require.NoError(t, err)
+		require.Len(t, active.Items, 1)
+		assert.Equal(t, index < 2, active.Items[0].NativeCompactionV2, "implicit streaming is classified on fresh and reused sockets without leaking into the next ordinary create")
 		created := fmt.Sprintf(`{"type":"response.created","stream_id":%q,"response":{"id":%q,"model":%q}}`, streamID, responseID, modelName)
 		require.NoError(t, peer.WriteMessage(websocket.TextMessage, []byte(created)))
 		require.NoError(t, client.SetReadDeadline(time.Now().Add(5*time.Second)))

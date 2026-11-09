@@ -21,6 +21,7 @@ import { useTranslation } from 'react-i18next'
 
 import {
   dotColorMap,
+  StatusBadge,
   textColorMap,
   type StatusVariant,
 } from '@/components/status-badge'
@@ -159,6 +160,7 @@ export function TimingMetricsCell(props: TimingMetricsCellProps) {
 
 interface StreamTpsCellProps {
   isStream: boolean
+  nativeCompactionV2?: boolean
   compact?: boolean
   /** Task logs are asynchronous jobs; stream vs non-stream does not apply. */
   isTask?: boolean
@@ -190,36 +192,47 @@ export function StreamTpsCell(props: StreamTpsCellProps) {
         props.className
       )}
     >
-      <span
-        className={cn(
-          'inline-flex items-center gap-1 font-medium',
-          props.isStream ? 'text-info' : 'text-muted-foreground'
-        )}
-      >
-        {streamLabel}
-        {showStreamError && (
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger
-                render={<CircleAlert className='text-destructive size-3' />}
-              />
-              <TooltipContent>
-                <div className='space-y-0.5 text-xs'>
-                  <p>
-                    {t('Stream Status')}: {t('Error')}
-                  </p>
-                  <p>{props.streamStatus?.end_reason || 'unknown'}</p>
-                  {(props.streamStatus?.error_count ?? 0) > 0 && (
+      <div className='flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5'>
+        <span
+          className={cn(
+            'inline-flex items-center gap-1 font-medium',
+            props.isStream ? 'text-info' : 'text-muted-foreground'
+          )}
+        >
+          {streamLabel}
+          {showStreamError && (
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger
+                  render={<CircleAlert className='text-destructive size-3' />}
+                />
+                <TooltipContent>
+                  <div className='space-y-0.5 text-xs'>
                     <p>
-                      {t('Soft Errors')}: {props.streamStatus?.error_count}
+                      {t('Stream Status')}: {t('Error')}
                     </p>
-                  )}
-                </div>
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
+                    <p>{props.streamStatus?.end_reason || 'unknown'}</p>
+                    {(props.streamStatus?.error_count ?? 0) > 0 && (
+                      <p>
+                        {t('Soft Errors')}: {props.streamStatus?.error_count}
+                      </p>
+                    )}
+                  </div>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
+        </span>
+        {props.nativeCompactionV2 === true && (
+          <StatusBadge
+            label={t('Compaction')}
+            variant='teal'
+            type='text'
+            copyable={false}
+            className='text-xs'
+          />
         )}
-      </span>
+      </div>
       {(!props.compact ||
         (props.isStream && props.tokensPerSecond != null)) && (
         <span className='text-muted-foreground/60 px-0.5 tabular-nums'>

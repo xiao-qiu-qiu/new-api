@@ -193,6 +193,9 @@ type RelayInfo struct {
 	ImageQuotaBeforeGroup float64
 
 	Request dto.Request
+	// NativeCompactionV2 captures the client's streaming Responses trigger once,
+	// before channel overrides or retries can mutate the request.
+	NativeCompactionV2 bool
 
 	// RequestConversionChain records request format conversions in order, e.g.
 	// ["openai", "openai_responses"] or ["openai", "claude"].
@@ -530,6 +533,7 @@ func GenRelayInfoResponses(c *gin.Context, request *dto.OpenAIResponsesRequest) 
 	info := genBaseRelayInfo(c, request)
 	info.RelayMode = relayconstant.RelayModeResponses
 	info.RelayFormat = types.RelayFormatOpenAIResponses
+	info.CaptureNativeCompactionV2(request.Input)
 
 	info.ResponsesUsageInfo = &ResponsesUsageInfo{
 		BuiltInTools: make(map[string]*BuildInToolInfo),
@@ -544,6 +548,31 @@ func GenRelayInfoResponses(c *gin.Context, request *dto.OpenAIResponsesRequest) 
 		}
 	}
 	return info
+}
+
+// CaptureNativeCompactionV2 records the request's native compaction intent.
+// WebSocket callers set their implicit stream state before capturing it.
+func (info *RelayInfo) CaptureNativeCompactionV2(input json.RawMessage) {
+	if !info.IsStream || info.NativeCompactionV2 {
+		return
+	}
+	items := ojson.GetBytesNoCopy(input, "@this")
+	if !items.IsArray() {
+		return
+	}
+	items.ForEach(func(_, item ojson.Result) bool {
+		if !item.IsObject() {
+			return true
+		}
+		itemType := item.Get("type")
+		if itemType.Type == ojson.String && itemType.String() == "compaction_trigger" {
+			info.NativeCompactionV2 = true
+		}
+		return !info.NativeCompactionV2
+	})
+	if info.NativeCompactionV2 {
+		info.ActiveRequest.SetNativeCompactionV2(true)
+	}
 }
 
 func GenRelayInfoGemini(c *gin.Context, request dto.Request) *RelayInfo {

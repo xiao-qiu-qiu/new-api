@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/active_requests"
 	"github.com/QuantumNous/new-api/pkg/cachex"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
@@ -607,4 +608,146 @@ func TestRequestPolicyEventsReachLogAdminInfo(t *testing.T) {
 	other := model.NewLogOther()
 	AppendRelayLogAdminInfo(untouched, nil, other)
 	assert.NotContains(t, other.Snapshot()["admin_info"], "request_policy", "requests without decisions do not carry an empty record")
+}
+
+func TestNativeCompactionV2RequestMetadata(t *testing.T) {
+	previousDB, previousLogDB := model.DB, model.LOG_DB
+	previousMainType, previousLogType := common.MainDatabaseType(), common.LogDatabaseType()
+	previousMemory, previousRedis := common.MemoryCacheEnabled, common.RedisEnabled
+	previousConsume, previousError := common.LogConsumeEnabled, constant.ErrorLogEnabled
+	previousDisable, previousExport := common.AutomaticDisableChannelEnabled, common.DataExportEnabled
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, err := database.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(1)
+	t.Cleanup(func() {
+		model.DB, model.LOG_DB = previousDB, previousLogDB
+		common.SetDatabaseTypes(previousMainType, previousLogType)
+		common.MemoryCacheEnabled, common.RedisEnabled = previousMemory, previousRedis
+		common.LogConsumeEnabled, constant.ErrorLogEnabled = previousConsume, previousError
+		common.AutomaticDisableChannelEnabled, common.DataExportEnabled = previousDisable, previousExport
+		require.NoError(t, sqlDB.Close())
+	})
+	require.NoError(t, database.AutoMigrate(&model.User{}, &model.Log{}))
+	model.DB, model.LOG_DB = database, database
+	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
+	common.MemoryCacheEnabled, common.RedisEnabled = false, false
+	common.LogConsumeEnabled, constant.ErrorLogEnabled = true, true
+	common.AutomaticDisableChannelEnabled, common.DataExportEnabled = false, false
+
+	for i, tc := range []struct {
+		name        string
+		input       string
+		stream      *bool
+		relayFormat types.RelayFormat
+		want        bool
+	}{
+		{name: "native trigger", input: `[{"type":"compaction_trigger","encrypted_content":"private-ciphertext"}]`, stream: common.GetPointer(true), want: true},
+		{name: "trigger after history", input: `[{"type":"compaction"},{"type":"message","content":"history"},{"type":"compaction_trigger"}]`, stream: common.GetPointer(true), want: true},
+		{name: "mixed top-level values", input: `[null,42,"compaction_trigger",{"type":"compaction_trigger"}]`, stream: common.GetPointer(true), want: true},
+		{name: "ordinary request", input: `[{"type":"message","content":"hello"}]`, stream: common.GetPointer(true)},
+		{name: "non-streaming", input: `[{"type":"compaction_trigger"}]`, stream: common.GetPointer(false)},
+		{name: "omitted stream", input: `[{"type":"compaction_trigger"}]`},
+		{name: "historical compaction", input: `[{"type":"compaction","encrypted_content":"private-ciphertext"}]`, stream: common.GetPointer(true)},
+		{name: "historical summary", input: `[{"type":"compaction_summary"}]`, stream: common.GetPointer(true)},
+		{name: "text mention", input: `[{"type":"message","content":"compaction_trigger"}]`, stream: common.GetPointer(true)},
+		{name: "nested trigger", input: `[{"type":"message","content":[{"type":"compaction_trigger"}]}]`, stream: common.GetPointer(true)},
+		{name: "nested array", input: `[[{"type":"compaction_trigger"}]]`, stream: common.GetPointer(true)},
+		{name: "stringified object", input: `["{\"type\":\"compaction_trigger\"}"]`, stream: common.GetPointer(true)},
+		{name: "object input", input: `{"type":"compaction_trigger"}`, stream: common.GetPointer(true)},
+		{name: "string input", input: `"compaction_trigger"`, stream: common.GetPointer(true)},
+		{name: "missing input", stream: common.GetPointer(true)},
+		{name: "null input", input: `null`, stream: common.GetPointer(true)},
+		{name: "empty input", input: `[]`, stream: common.GetPointer(true)},
+		{name: "case-sensitive type", input: `[{"type":"Compaction_trigger"}]`, stream: common.GetPointer(true)},
+		{name: "exact type key", input: `[{"Type":"compaction_trigger"}]`, stream: common.GetPointer(true)},
+		{name: "whitespace in type", input: `[{"type":"compaction_trigger "}]`, stream: common.GetPointer(true)},
+		{name: "numeric type", input: `[{"type":1}]`, stream: common.GetPointer(true)},
+		{name: "array type", input: `[{"type":["compaction_trigger"]}]`, stream: common.GetPointer(true)},
+		{name: "object type", input: `[{"type":{"type":"compaction_trigger"}}]`, stream: common.GetPointer(true)},
+		{name: "chat format", input: `[{"type":"compaction_trigger"}]`, stream: common.GetPointer(true), relayFormat: types.RelayFormatOpenAI},
+		{name: "legacy compact", input: `[{"type":"compaction_trigger"}]`, stream: common.GetPointer(true), relayFormat: types.RelayFormatOpenAIResponsesCompaction},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			user := &model.User{Username: fmt.Sprintf("compaction-%02d", i), AffCode: fmt.Sprintf("nc%04d", i), Group: "default"}
+			require.NoError(t, database.Create(user).Error)
+			requestID := common.NewRequestId()
+			path := "/v1/responses"
+			format := tc.relayFormat
+			if format == "" {
+				format = types.RelayFormatOpenAIResponses
+			}
+			var request kitdto.Request = &kitdto.OpenAIResponsesRequest{Model: "compaction-metadata", Input: common.RawMessage(tc.input), Stream: tc.stream}
+			if format == types.RelayFormatOpenAIResponsesCompaction {
+				path = "/v1/responses/compact"
+				request = &kitdto.OpenAIResponsesCompactionRequest{Model: "compaction-metadata", Input: common.RawMessage(tc.input)}
+			}
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, path, nil)
+			// A capability header alone must never classify an ordinary request.
+			c.Request.Header.Set("OpenAI-Beta", "remote_compaction_v2")
+			c.Set(common.RequestIdKey, requestID)
+			c.Set("id", user.Id)
+			c.Set("username", user.Username)
+			c.Set("original_model", "compaction-metadata")
+			c.Set("group", "default")
+			handle := active_requests.Start(active_requests.Record{RequestID: requestID, UserID: user.Id})
+			require.NotNil(t, handle)
+			defer handle.Finish()
+			active_requests.SetContext(c, handle)
+			info, err := relaycommon.GenRelayInfo(c, format, request, nil)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, info.NativeCompactionV2)
+			result, err := active_requests.Query(t.Context(), active_requests.Filter{RequestID: requestID})
+			require.NoError(t, err)
+			require.Len(t, result.Items, 1)
+			assert.Equal(t, tc.want, result.Items[0].NativeCompactionV2, "the first snapshot includes the request flag")
+
+			// Channel overrides and retries must preserve the original classification.
+			if responses, ok := request.(*kitdto.OpenAIResponsesRequest); ok {
+				responses.Input = common.RawMessage(`[]`)
+				responses.Stream = common.GetPointer(false)
+			}
+			info.InitChannelMeta(c)
+			info.InitChannelMeta(c)
+			handle.SetChannel(2, "retry-channel", "default")
+			handle.SetAttempt(2)
+			handle.SetState(active_requests.StatusRetrying)
+			assert.Equal(t, tc.want, info.NativeCompactionV2)
+			result, err = active_requests.Query(t.Context(), active_requests.Filter{RequestID: requestID})
+			require.NoError(t, err)
+			require.Len(t, result.Items, 1)
+			assert.Equal(t, tc.want, result.Items[0].NativeCompactionV2)
+			encoded, err := common.Marshal(result.Items[0])
+			require.NoError(t, err)
+			var snapshot map[string]any
+			require.NoError(t, common.Unmarshal(encoded, &snapshot))
+			assert.Equal(t, tc.want, snapshot["native_compaction_v2"] == true)
+			if !tc.want {
+				assert.NotContains(t, snapshot, "native_compaction_v2")
+			}
+			assert.NotContains(t, string(encoded), "private-ciphertext")
+
+			other := GenerateTextOtherInfo(c, info, 1, 1, 1, 0, 1, 0, 1)
+			model.RecordConsumeLog(c, user.Id, model.RecordConsumeLogParams{ModelName: info.OriginModelName, IsStream: info.IsStream, Other: other})
+			apiErr := types.NewOpenAIError(errors.New("upstream failed"), types.ErrorCodeBadResponseStatusCode, http.StatusBadGateway)
+			ProcessChannelError(c, types.ChannelError{ChannelId: 2}, apiErr, info)
+			logs, total, err := model.GetUserLogs(user.Id, model.LogFilter{}, 0, 10)
+			require.NoError(t, err)
+			require.EqualValues(t, 2, total)
+			require.Len(t, logs, 2)
+			assert.ElementsMatch(t, []int{model.LogTypeConsume, model.LogTypeError}, []int{logs[0].Type, logs[1].Type})
+			for _, log := range logs {
+				var public map[string]any
+				require.NoError(t, common.UnmarshalJsonStr(log.Other, &public))
+				assert.Equal(t, tc.want, public["native_compaction_v2"] == true, "log type %d", log.Type)
+				if !tc.want {
+					assert.NotContains(t, public, "native_compaction_v2")
+				}
+				assert.NotContains(t, public, "admin_info", "the flag remains visible after removing admin metadata")
+				assert.NotContains(t, log.Other, "private-ciphertext")
+			}
+		})
+	}
 }

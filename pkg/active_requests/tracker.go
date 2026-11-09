@@ -25,21 +25,22 @@ const (
 )
 
 type Record struct {
-	RequestID   string `json:"request_id"`
-	UserID      int    `json:"user_id"`
-	Username    string `json:"username"`
-	TokenID     int    `json:"token_id"`
-	TokenName   string `json:"token_name"`
-	ModelName   string `json:"model_name"`
-	Group       string `json:"group"`
-	Channel     int    `json:"channel"`
-	ChannelName string `json:"channel_name"`
-	StartedAt   int64  `json:"started_at"`
-	UpdatedAt   int64  `json:"updated_at"`
-	Status      string `json:"status"`
-	IsStream    bool   `json:"is_stream"`
-	Attempt     int    `json:"attempt"`
-	ClientGone  bool   `json:"client_gone"`
+	RequestID          string `json:"request_id"`
+	UserID             int    `json:"user_id"`
+	Username           string `json:"username"`
+	TokenID            int    `json:"token_id"`
+	TokenName          string `json:"token_name"`
+	ModelName          string `json:"model_name"`
+	Group              string `json:"group"`
+	Channel            int    `json:"channel"`
+	ChannelName        string `json:"channel_name"`
+	StartedAt          int64  `json:"started_at"`
+	UpdatedAt          int64  `json:"updated_at"`
+	Status             string `json:"status"`
+	IsStream           bool   `json:"is_stream"`
+	NativeCompactionV2 bool   `json:"native_compaction_v2,omitempty"`
+	Attempt            int    `json:"attempt"`
+	ClientGone         bool   `json:"client_gone"`
 }
 
 // Handle is independent of Gin and request cancellation. The forwarding owner
@@ -191,6 +192,10 @@ func (h *Handle) SetChannel(channel int, name, group string) {
 
 func (h *Handle) SetStream(stream bool) {
 	h.update(func(record *Record) { record.IsStream = stream })
+}
+
+func (h *Handle) SetNativeCompactionV2(nativeCompaction bool) {
+	h.update(func(record *Record) { record.NativeCompactionV2 = nativeCompaction })
 }
 
 func (h *Handle) SetAttempt(attempt int) {

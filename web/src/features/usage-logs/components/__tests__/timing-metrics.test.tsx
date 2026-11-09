@@ -54,17 +54,22 @@ function renderTiming(options: {
   mobile?: boolean
   isStream?: boolean
   frtMs?: number
+  type?: number
+  nativeCompactionV2?: boolean
 }) {
   const log = usageLogSchema.parse({
     id: 1,
     user_id: 1,
     created_at: 1,
-    type: 2,
+    type: options.type ?? 2,
     content: '',
     use_time: 10,
     completion_tokens: 200,
     is_stream: options.isStream ?? true,
-    other: JSON.stringify({ frt: options.frtMs }),
+    other: JSON.stringify({
+      frt: options.frtMs,
+      native_compaction_v2: options.nativeCompactionV2,
+    }),
   })
   return render(
     <QueryClientProvider
@@ -113,3 +118,26 @@ it('uses total-duration average for non-streaming logs even if they contain frt'
   expect(screen.getByText('20 t/s')).toBeVisible()
   expect(screen.queryByText('First response')).not.toBeInTheDocument()
 })
+
+it.each([
+  { mobile: false, type: 2 },
+  { mobile: true, type: 2 },
+  { mobile: false, type: 5 },
+  { mobile: true, type: 5 },
+])(
+  'shows compaction alongside the transport for native requests (mobile=$mobile, type=$type)',
+  (options) => {
+    renderTiming({ ...options, nativeCompactionV2: true })
+    expect(screen.getByText('Stream')).toBeVisible()
+    expect(screen.getByText('Compaction')).toBeVisible()
+  }
+)
+
+it.each([undefined, false])(
+  'keeps ordinary and older logs without a compaction label when the marker is %s',
+  (nativeCompactionV2) => {
+    renderTiming({ nativeCompactionV2 })
+    expect(screen.getByText('Stream')).toBeVisible()
+    expect(screen.queryByText('Compaction')).not.toBeInTheDocument()
+  }
+)
