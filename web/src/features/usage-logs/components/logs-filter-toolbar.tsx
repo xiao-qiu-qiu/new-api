@@ -179,16 +179,19 @@ export function LogsFilterToolbar<TData>(props: LogsFilterToolbarProps<TData>) {
                 onClick={props.onSearch}
                 disabled={props.searchLoading}
                 aria-busy={props.searchLoading}
-                className='min-w-24'
+                aria-label={t('Search')}
+                className='relative'
               >
                 <Loader2
                   aria-hidden='true'
                   className={cn(
-                    'size-4',
+                    'absolute inset-0 m-auto size-4',
                     props.searchLoading ? 'animate-spin' : 'invisible'
                   )}
                 />
-                {t('Search')}
+                <span className={cn(props.searchLoading && 'invisible')}>
+                  {t('Search')}
+                </span>
               </Button>
               {props.actionEnd}
               <DataTableViewOptions table={props.table} />
@@ -245,16 +248,19 @@ export function LogsFilterToolbar<TData>(props: LogsFilterToolbarProps<TData>) {
                 onClick={handleMobileSearch}
                 disabled={props.searchLoading}
                 aria-busy={props.searchLoading}
-                className='min-w-24'
+                aria-label={t('Search')}
+                className='relative'
               >
                 <Loader2
                   aria-hidden='true'
                   className={cn(
-                    'size-4',
+                    'absolute inset-0 m-auto size-4',
                     props.searchLoading ? 'animate-spin' : 'invisible'
                   )}
                 />
-                {t('Search')}
+                <span className={cn(props.searchLoading && 'invisible')}>
+                  {t('Search')}
+                </span>
               </Button>
             </DrawerFooter>
           </div>
@@ -309,16 +315,19 @@ export function LogsFilterToolbar<TData>(props: LogsFilterToolbarProps<TData>) {
             onClick={props.onSearch}
             disabled={props.searchLoading}
             aria-busy={props.searchLoading}
-            className='min-w-24'
+            aria-label={t('Search')}
+            className='relative'
           >
             <Loader2
               aria-hidden='true'
               className={cn(
-                'size-4',
+                'absolute inset-0 m-auto size-4',
                 props.searchLoading ? 'animate-spin' : 'invisible'
               )}
             />
-            {t('Search')}
+            <span className={cn(props.searchLoading && 'invisible')}>
+              {t('Search')}
+            </span>
           </Button>
           {props.actionEnd}
           <DataTableViewOptions table={props.table} />

@@ -674,7 +674,7 @@ export function useCommonLogsColumns(
                     copyText={sensitiveVisible ? log.token_name : undefined}
                     size='sm'
                     showDot={false}
-                    className='border-border/60 bg-muted/30 text-foreground h-6 max-w-full gap-1.5 overflow-hidden rounded-md border px-2 py-0.5 [font-family:var(--font-body)]'
+                    className='border-border/60 bg-muted/30 text-foreground h-6 max-w-full gap-1.5 overflow-hidden rounded-md border px-2 py-px [font-family:var(--font-body)] leading-5 [&>span]:leading-5'
                   />
                 </TooltipTrigger>
                 {sensitiveVisible && tokenName.length > 16 && (
@@ -685,14 +685,14 @@ export function useCommonLogsColumns(
               </Tooltip>
             </TooltipProvider>
             {(group || groupRatio != null) && (
-              <span className='block max-w-full truncate text-xs leading-none'>
+              <span className='block max-w-full truncate text-xs leading-5'>
                 {group ? (
                   <GroupBadge
                     group={group}
                     label={sensitiveVisible ? undefined : '••••'}
                     type='text'
                     size='sm'
-                    className='inline align-baseline text-xs leading-none [&>span]:leading-none'
+                    className='inline align-baseline text-xs leading-5 [&>span]:leading-5'
                   />
                 ) : null}
                 {group && groupRatio != null ? ' ' : null}

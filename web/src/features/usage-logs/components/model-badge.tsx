@@ -97,14 +97,24 @@ function ModelBadgeContent(props: ModelBadgeProps & { copyable: boolean }) {
       showDot={!provider?.icon}
       autoColor={provider?.icon ? undefined : props.modelName}
       className={cn(
-        'border-border/60 bg-muted/30 h-auto min-h-6 min-w-0 max-w-full flex-1 basis-16 gap-1.5 rounded-md border px-2 py-px [font-family:var(--font-body)]',
+        'border-border/60 bg-muted/30 h-auto min-h-6 max-w-none gap-1.5 rounded-md border px-2 py-px [font-family:var(--font-body)]',
         provider?.icon && 'text-foreground',
         props.wrapText && 'h-auto min-h-6 max-w-full py-px whitespace-normal',
         props.className
       )}
     >
-      <span className='flex max-w-full min-w-0 flex-1 flex-wrap items-center gap-x-1.5 gap-y-1'>
-        <span className='flex min-w-0 flex-1 basis-16 items-center gap-1.5'>
+      <span
+        className={cn(
+          'flex flex-nowrap items-center gap-1.5',
+          props.wrapText ? 'max-w-full min-w-0' : 'max-w-none'
+        )}
+      >
+        <span
+          className={cn(
+            'flex items-center gap-1.5',
+            props.wrapText ? 'min-w-0' : 'shrink-0'
+          )}
+        >
           {provider?.icon && (
             <span
               className='flex h-[18px] w-[18px] shrink-0 items-center justify-center'
@@ -120,10 +130,10 @@ function ModelBadgeContent(props: ModelBadgeProps & { copyable: boolean }) {
                 render={
                   <span
                     className={cn(
-                      'min-w-0 flex-1',
+                      'min-w-0 leading-5',
                       props.wrapText
                         ? 'line-clamp-2 leading-5 [overflow-wrap:anywhere]'
-                        : 'truncate'
+                        : 'whitespace-nowrap'
                     )}
                   />
                 }
@@ -259,7 +269,7 @@ export function ModelBadge(props: ModelBadgeProps) {
         aria-label={modelLabel}
         aria-haspopup='dialog'
         onClick={props.onInspect}
-        className='h-auto min-h-8 max-w-full min-w-0 flex-wrap justify-start gap-1 px-0 py-0 text-left font-normal whitespace-normal'
+        className='h-auto min-h-8 max-w-full min-w-0 flex-nowrap justify-start gap-1 px-0 py-0 text-left font-normal whitespace-normal'
       >
         {content}
       </Button>
@@ -274,7 +284,8 @@ export function ModelBadge(props: ModelBadgeProps) {
             variant='ghost'
             aria-label={modelLabel}
             className={cn(
-              'h-auto max-w-full min-w-0 flex-wrap justify-start gap-1 p-0 font-normal'
+              'h-auto flex-nowrap justify-start gap-1 p-0 font-normal',
+              props.wrapText ? 'max-w-full min-w-0' : 'max-w-none'
             )}
           />
         }

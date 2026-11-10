@@ -156,7 +156,7 @@ it('keeps the table interactive and the search button idle during a background r
   await waitFor(() => expect(client.isFetching({ queryKey: ['logs'] })).toBe(1))
   expect(screen.getByRole('button', { name: 'Search' })).toBeEnabled()
   const table = screen.getByRole('table')
-  expect(table).toHaveStyle({ tableLayout: 'fixed' })
+  expect(table).toHaveStyle({ tableLayout: 'auto' })
   expect(table.closest('.pointer-events-none')).toBeNull()
   expect(table.closest('.opacity-60')).toBeNull()
   await act(async () => {
