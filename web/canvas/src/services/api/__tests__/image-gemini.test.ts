@@ -147,6 +147,9 @@ test.each(settings)(
     const [path, init] = siteFetch.mock.calls[0];
     expect(path).toBe("/pg/images/generations");
     expect(init?.method).toBe("POST");
+    expect(new Headers(init?.headers).get("X-Playground-Image-Stream")).toBe(
+      "true",
+    );
     const payload = JSON.parse(String(init?.body));
     expect(payload).toEqual({
       model: models[0],
@@ -173,6 +176,9 @@ test.each(settings)(
     const [path, init] = siteFetch.mock.calls[0];
     expect(path).toBe("/pg/images/edits");
     expect(init?.method).toBe("POST");
+    expect(new Headers(init?.headers).get("X-Playground-Image-Stream")).toBe(
+      "true",
+    );
     expect(init?.body).toBeInstanceOf(FormData);
     const form = init?.body as FormData;
     expect(

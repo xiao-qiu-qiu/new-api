@@ -112,6 +112,22 @@ const reference = {
 };
 const json = (value: unknown, status = 200) => Response.json(value, { status });
 
+function imageStream(...chunks: Array<string | Uint8Array>): Response {
+  return new Response(
+    new ReadableStream({
+      start(controller) {
+        for (const chunk of chunks) {
+          controller.enqueue(
+            typeof chunk === "string" ? new TextEncoder().encode(chunk) : chunk,
+          );
+        }
+        controller.close();
+      },
+    }),
+    { headers: { "Content-Type": "text/event-stream; charset=utf-8" } },
+  );
+}
+
 function videoContractConfig(
   model: string,
   overrides: Partial<AiConfig> = {},
@@ -163,6 +179,9 @@ test("image generation accepts empty credentials and duplicate capabilities whil
     output_format: "png",
   });
   expect(new Headers(init?.headers).has("Authorization")).toBe(false);
+  expect(new Headers(init?.headers).get("X-Playground-Image-Stream")).toBe(
+    "true",
+  );
   expect(await fetchChannelModels(channels[0])).toEqual([
     "gpt-image-2",
     "sora-2",
@@ -188,8 +207,216 @@ test("image edits preserve uploaded references and allow the browser to set the 
       form.getAll(references.length === 1 ? "image" : "image[]"),
     ).toHaveLength(references.length);
     expect(new Headers(init?.headers).has("Content-Type")).toBe(false);
+    expect(new Headers(init?.headers).get("X-Playground-Image-Stream")).toBe(
+      "true",
+    );
+    expect(form.has("stream")).toBe(false);
   }
 });
+
+test("image SSE ignores heartbeats and partials and preserves multiple URL/base64 results across UTF-8 and CRLF chunk boundaries", async () => {
+  const text =
+    ': PING\r\n\r\nevent: image_generation.partial_image\r\ndata: {"type":"image_generation.partial_image","b64_json":"partial"}\r\n\r\n' +
+    'event: image_generation.completed\r\ndata: {"type":"image_generation.completed",\r\ndata: "url":"https://cdn.example/树.png"}\r\n\r\n' +
+    ': PING\n\ndata: {"type":"image_generation.completed","b64_json":"/9j/aW1hZ2U="}\n\ndata: [DONE]';
+  const bytes = new TextEncoder().encode(text);
+  const utf8 = bytes.indexOf(0xe6);
+  siteFetch.mockResolvedValueOnce(
+    imageStream(
+      bytes.slice(0, 7),
+      bytes.slice(7, utf8 + 1),
+      bytes.slice(utf8 + 1, utf8 + 2),
+      bytes.slice(utf8 + 2, -4),
+      bytes.slice(-4),
+    ),
+  );
+
+  const images = await requestGeneration(config, "A tree");
+
+  expect(images.map((image) => image.dataUrl)).toEqual([
+    "https://cdn.example/树.png",
+    "data:image/jpeg;base64,/9j/aW1hZ2U=",
+  ]);
+  expect(new Set(images.map((image) => image.id)).size).toBe(2);
+  expect(siteFetch).toHaveBeenCalledTimes(1);
+});
+
+test("image edit SSE accepts event completion names and retains base64 MIME detection", async () => {
+  siteFetch.mockResolvedValueOnce(
+    imageStream(
+      ': PING\n\nevent: image_edit.partial_image\ndata: {"b64_json":"partial"}\n\n',
+      'event: image_edit.completed\ndata: {"b64_json":"R0lGODlhAQABAIA="}\n\n',
+      'data: {"type":"image_edit.completed","url":"https://cdn.example/edit.png"}\n\n',
+      "data: [DONE]\n\n",
+    ),
+  );
+
+  const images = await requestEdit(config, "Edit", [reference]);
+
+  expect(images.map((image) => image.dataUrl)).toEqual([
+    "data:image/gif;base64,R0lGODlhAQABAIA=",
+    "https://cdn.example/edit.png",
+  ]);
+});
+
+test.each([
+  'event: error\ndata: {"error":{"message":"Image rejected","code":"provider_error"}}\n\n',
+  'data: {"type":"error","message":"Image rejected"}\n\n',
+  'data: {"type":"upstream_error","message":"Image rejected"}\n\n',
+  'event: upstream_error\ndata: {"message":"Image rejected"}\n\n',
+  'data: {"error":{"message":"Image rejected"}}\n\n',
+])(
+  "image SSE preserves server errors after a completed image: %s",
+  async (failure) => {
+    siteFetch.mockResolvedValueOnce(
+      imageStream(
+        'data: {"type":"image_generation.completed","b64_json":"aW1hZ2U="}\n\n',
+        failure,
+        "data: [DONE]\n\n",
+      ),
+    );
+
+    await expect(requestGeneration(config, "A tree")).rejects.toThrow(
+      "Image rejected",
+    );
+    expect(siteFetch).toHaveBeenCalledTimes(1);
+  },
+);
+
+test.each([
+  ": PING\n\n",
+  'data: {"type":"image_generation.completed","b64_json":"aW1hZ2U="}\n\n',
+  "data: {broken\n\ndata: [DONE]\n\n",
+  "data: null\n\ndata: [DONE]\n\n",
+])(
+  "truncated or invalid image SSE rejects instead of returning partial success: %s",
+  async (stream) => {
+    siteFetch.mockResolvedValueOnce(imageStream(stream));
+    await expect(requestGeneration(config, "A tree")).rejects.toThrow();
+  },
+);
+
+test("image SSE completion with only partial images reports the existing no-image error", async () => {
+  siteFetch.mockResolvedValueOnce(
+    imageStream(
+      'data: {"type":"image_generation.partial_image","b64_json":"partial"}\n\n',
+      "data: [DONE]\n\n",
+    ),
+  );
+  await expect(requestGeneration(config, "A tree")).rejects.toThrow(
+    "The API did not return an image.",
+  );
+});
+
+test("image SSE transport failure rejects collected images and releases the reader", async () => {
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(
+        new TextEncoder().encode(
+          'data: {"type":"image_generation.completed","b64_json":"aW1hZ2U="}\n\n',
+        ),
+      );
+    },
+    pull(controller) {
+      controller.error(new TypeError("Image connection lost"));
+    },
+  });
+  siteFetch.mockResolvedValueOnce(
+    new Response(body, { headers: { "Content-Type": "text/event-stream" } }),
+  );
+
+  await expect(requestGeneration(config, "A tree")).rejects.toThrow(
+    "Image connection lost",
+  );
+  expect(body.locked).toBe(false);
+  expect(siteFetch).toHaveBeenCalledTimes(1);
+});
+
+test("image SSE stops and releases the response body at DONE without waiting for the server to close", async () => {
+  const cancel = vi.fn();
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(
+        new TextEncoder().encode(
+          'data: {"type":"image_generation.completed","b64_json":"aW1hZ2U="}\n\ndata: [DONE]\n\n',
+        ),
+      );
+    },
+    cancel,
+  });
+  siteFetch.mockResolvedValueOnce(
+    new Response(body, { headers: { "Content-Type": "text/event-stream" } }),
+  );
+
+  const images = await requestGeneration(config, "A tree");
+
+  expect(images[0].dataUrl).toBe(reference.dataUrl);
+  expect(cancel).toHaveBeenCalledTimes(1);
+  expect(body.locked).toBe(false);
+});
+
+test.each(["cancel", "timeout"] as const)(
+  "image SSE %s interrupts a blocked body read and releases the reader",
+  async (mode) => {
+    vi.useFakeTimers();
+    const ready = Promise.withResolvers<void>();
+    const cancel = vi.fn();
+    const controller = new AbortController();
+    const body = new ReadableStream({
+      start(stream) {
+        stream.enqueue(new TextEncoder().encode(": PING\n\n"));
+      },
+      pull() {
+        ready.resolve();
+      },
+      cancel,
+    });
+    siteFetch.mockResolvedValueOnce(
+      new Response(body, { headers: { "Content-Type": "text/event-stream" } }),
+    );
+    const outcome = requestGeneration(config, "A tree", {
+      signal: controller.signal,
+    }).catch((error: unknown) => error);
+    await ready.promise;
+
+    if (mode === "cancel") controller.abort();
+    else {
+      await vi.advanceTimersByTimeAsync(9 * 60_000);
+      expect(cancel).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(60_000);
+    }
+
+    const error = await outcome;
+    if (mode === "cancel") {
+      expect(error).toMatchObject({ name: "AbortError" });
+    } else {
+      expect(error).toMatchObject({
+        message: "Media request timed out. Try again.",
+      });
+    }
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(body.locked).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(siteFetch).toHaveBeenCalledTimes(1);
+  },
+);
+
+test.each(["/pg/videos", "/pg/audio/speech"])(
+  "generic JSON media requests retain their payload and headers at %s",
+  async (path) => {
+    const payload = { id: "media", status: "queued" };
+    siteFetch.mockResolvedValueOnce(json(payload));
+
+    expect(
+      await requestSiteMediaJson(path, { method: "POST", body: "{}" }),
+    ).toEqual(payload);
+    expect(
+      new Headers(siteFetch.mock.calls[0][1]?.headers).has(
+        "X-Playground-Image-Stream",
+      ),
+    ).toBe(false);
+  },
+);
 
 test("image questions retain multimodal messages and accumulate UTF-8 SSE deltas split across chunks", async () => {
   const bytes = new TextEncoder().encode(
@@ -565,21 +792,51 @@ test("multiple video reference images retain frame metadata in the gateway task 
 });
 
 test("video requests preserve model duration, resolution and ratio limits while forwarding reference audio", async () => {
-  const videoConfig = { ...videoContractConfig("doubao-seedance-2-0-260128"), videoSeconds: "45", vquality: "1080", size: "2:3" };
-  videoConfig.channels[0].models.push({ name: "limited-audio-video", capability: "video", videoCapabilities: {
-    durations: [15, 45], max_duration_seconds: 60, resolutions: ["1080p"], aspect_ratios: ["2:3"], max_reference_audio: 1,
-  } });
+  const videoConfig = {
+    ...videoContractConfig("doubao-seedance-2-0-260128"),
+    videoSeconds: "45",
+    vquality: "1080",
+    size: "2:3",
+  };
+  videoConfig.channels[0].models.push({
+    name: "limited-audio-video",
+    capability: "video",
+    videoCapabilities: {
+      durations: [15, 45],
+      max_duration_seconds: 60,
+      resolutions: ["1080p"],
+      aspect_ratios: ["2:3"],
+      max_reference_audio: 1,
+    },
+  });
   videoConfig.model = "media group::limited-audio-video";
-  siteFetch.mockResolvedValueOnce(json({ id: "audio-reference", status: "queued" }));
-  const audios = [{ id: "voice", name: "voice.wav", type: "audio/wav", url: "data:audio/wav;base64,dm9pY2U=" }];
+  siteFetch.mockResolvedValueOnce(
+    json({ id: "audio-reference", status: "queued" }),
+  );
+  const audios = [
+    {
+      id: "voice",
+      name: "voice.wav",
+      type: "audio/wav",
+      url: "data:audio/wav;base64,dm9pY2U=",
+    },
+  ];
   await createVideoGenerationTask(videoConfig, "Animate", [], { audios });
   expect(JSON.parse(String(siteFetch.mock.calls[0][1]?.body))).toMatchObject({
-    seconds: "45", size: "1080x1620", metadata: {
-      ratio: "2:3", resolution: "1080p", audios: [audios[0].url],
+    seconds: "45",
+    size: "1080x1620",
+    metadata: {
+      ratio: "2:3",
+      resolution: "1080p",
+      audios: [audios[0].url],
     },
   });
   siteFetch.mockClear();
-  await expect(createVideoGenerationTask(videoConfig, "Animate", [], { audios: [...audios, { ...audios[0], id: "second" }] })).rejects.toThrow("up to 1 reference audio");
+  await expect(
+    createVideoGenerationTask(videoConfig, "Animate", [], {
+      audios: [...audios, { ...audios[0], id: "second" }],
+    }),
+  ).rejects.toThrow("up to 1 reference audio");
   expect(siteFetch).not.toHaveBeenCalled();
 });
 

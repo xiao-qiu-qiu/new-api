@@ -19,7 +19,7 @@ function interruptedStream(): Error {
 }
 
 /** SSE line framing and UTF-8 decoding remain incremental across arbitrary transport boundaries. */
-async function* siteSseEvents(response: Response, signal: AbortSignal): AsyncGenerator<SseEvent> {
+export async function* siteSseEvents(response: Response, signal: AbortSignal): AsyncGenerator<SseEvent> {
     if (!response.body) throw interruptedStream();
     const reader = response.body.getReader();
     const decoder = new TextDecoder();

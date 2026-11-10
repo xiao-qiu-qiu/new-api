@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/QuantumNous/new-api/common"
@@ -176,6 +177,17 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 
 	statusCodeMappingStr := c.GetString("status_code_mapping")
 
+	// Canvas can receive an SSE response while the upstream still receives its
+	// original synchronous image request. Keep waiting for headers and the full
+	// image body alive; StartStreamKeepAlive hands off at the first event write.
+	streamPlaygroundImage := info.IsPlayground && !info.IsStream &&
+		c.GetHeader("X-Playground-Image-Stream") == "true" &&
+		(info.ApiType == constant.APITypeOpenAI || info.ApiType == constant.APITypeNewAPI)
+	if streamPlaygroundImage {
+		stopKeepAlive := helper.StartStreamKeepAlive(c, 20*time.Second)
+		defer stopKeepAlive()
+	}
+
 	resp, err := adaptor.DoRequest(c, info, requestBody)
 	if err != nil {
 		return types.NewOpenAIError(err, types.ErrorCodeDoRequestFailed, http.StatusInternalServerError)
@@ -197,6 +209,9 @@ func ImageHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *type
 		}
 	}
 
+	if streamPlaygroundImage {
+		info.IsStream = true
+	}
 	usage, newAPIError := adaptor.DoResponse(c, httpResp, info)
 	if newAPIError != nil {
 		// reset status code 重置状态码

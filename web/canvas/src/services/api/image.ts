@@ -21,10 +21,11 @@ import type { ReferenceImage } from "@/types/image";
 import {
   assertMediaPayload,
   requestSiteMedia,
-  requestSiteMediaJson,
+  requestSiteMediaImage,
   resolveSiteMediaModel,
   siteMediaModels,
   type MediaRequestOptions,
+  type ImageApiResponse,
 } from "./site-media";
 
 const apiText = (key: string, options?: Record<string, unknown>) =>
@@ -40,11 +41,6 @@ export type AiTextMessage = {
       >;
 };
 
-type ImageApiResponse = {
-  data?: Record<string, unknown> | Array<Record<string, unknown>>;
-  images?: Array<Record<string, unknown>>;
-  results?: Array<Record<string, unknown>>;
-};
 type ChatPayload = {
   choices?: Array<{
     delta?: { content?: string | null };
@@ -290,7 +286,7 @@ export async function requestGeneration(
   prompt: string,
   options?: MediaRequestOptions,
 ): Promise<Array<{ id: string; dataUrl: string }>> {
-  const payload = await requestSiteMediaJson<ImageApiResponse>(
+  const payload = await requestSiteMediaImage(
     "/pg/images/generations",
     {
       method: "POST",
@@ -360,7 +356,7 @@ export async function requestEdit(
       }),
     );
   }
-  const payload = await requestSiteMediaJson<ImageApiResponse>(
+  const payload = await requestSiteMediaImage(
     "/pg/images/edits",
     { method: "POST", body: form },
     options,

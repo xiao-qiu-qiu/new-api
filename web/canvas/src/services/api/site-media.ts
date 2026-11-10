@@ -7,9 +7,15 @@ import {
   type AiConfig,
   type ModelCapability,
 } from "@/stores/use-config-store";
+import { siteSseEvents } from "./site-agent-stream";
 
 export type MediaRequestOptions = { signal?: AbortSignal };
 export type SiteMediaModel = { model: string; group: string };
+export type ImageApiResponse = {
+  data?: Record<string, unknown> | Array<Record<string, unknown>>;
+  images?: Array<Record<string, unknown>>;
+  results?: Array<Record<string, unknown>>;
+};
 
 export class SiteMediaHttpError extends Error {
   constructor(
@@ -104,7 +110,7 @@ export function assertMediaPayload(payload: unknown): void {
 export async function requestSiteMedia<T>(
   path: string,
   init: RequestInit,
-  read: (response: Response) => Promise<T>,
+  read: (response: Response, signal: AbortSignal) => Promise<T>,
   options?: MediaRequestOptions,
 ): Promise<T> {
   const controller = new AbortController();
@@ -148,7 +154,7 @@ export async function requestSiteMedia<T>(
         }),
       );
     }
-    const result = await read(response);
+    const result = await read(response, signal);
     signal.throwIfAborted();
     return result;
   } catch (error) {
@@ -178,6 +184,73 @@ export function requestSiteMediaJson<T>(
       const payload: T = await response.json();
       assertMediaPayload(payload);
       return payload;
+    },
+    options,
+  );
+}
+
+/** Negotiate the canvas transport without changing upstream image parameters. */
+export function requestSiteMediaImage(
+  path: string,
+  init: RequestInit,
+  options?: MediaRequestOptions,
+): Promise<ImageApiResponse> {
+  const headers = new Headers(init.headers);
+  headers.set("X-Playground-Image-Stream", "true");
+  return requestSiteMedia(
+    path,
+    { ...init, headers },
+    async (response, signal) => {
+      if (
+        !response.headers
+          .get("content-type")
+          ?.toLowerCase()
+          .includes("text/event-stream")
+      ) {
+        const payload: ImageApiResponse = await response.json();
+        assertMediaPayload(payload);
+        return payload;
+      }
+
+      const failureMessage = i18n.t("apiErrors.requestFailed");
+      if (!response.body) throw new Error(failureMessage);
+      const images: Array<Record<string, unknown>> = [];
+      let done = false;
+      for await (const event of siteSseEvents(response, signal)) {
+        if (event.data.trim() === "[DONE]") {
+          done = true;
+          break;
+        }
+        let payload: unknown;
+        try {
+          payload = JSON.parse(event.data);
+        } catch {
+          throw new Error(failureMessage);
+        }
+        if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+          throw new Error(failureMessage);
+        }
+        const image = payload as Record<string, unknown>;
+        assertMediaPayload(image);
+        if (
+          event.event === "error" ||
+          event.event === "upstream_error" ||
+          image.type === "error" ||
+          image.type === "upstream_error"
+        ) {
+          throw new Error(mediaErrorMessage(image) || failureMessage);
+        }
+        const type = image.type || event.event;
+        if (
+          type === "image_generation.completed" ||
+          type === "image_edit.completed"
+        ) {
+          images.push(image);
+        }
+      }
+      // A closed connection can otherwise turn an incomplete multi-image result into success.
+      if (!done) throw new Error(failureMessage);
+      return { data: images };
     },
     options,
   );
