@@ -19,6 +19,16 @@ For commercial licensing, please contact support@quantumnous.com
 // Static translation keys that don't get picked up by the t('...') regex.
 // These cover dynamic labels (e.g. constants, configs) that are passed into t at runtime.
 export const STATIC_I18N_KEYS = [
+  'Error log searches are only available to administrators',
+  'Invalid log search parameters',
+  'Invalid log pagination',
+  'Too many log queries. Try again shortly.',
+  'Log query timed out. Narrow the time range and try again.',
+  'Log query was canceled',
+  'Error log searches cannot exceed 24 hours',
+  'Invalid log cursor. Run the search again.',
+  'Error filters are only available to administrators.',
+  'Error searches are limited to 24 hours. Shorten the time range.',
   'Channel concurrency limit must be an integer between 0 and 1000000',
   // Portable homepage package copy.
   'Homepage packages',

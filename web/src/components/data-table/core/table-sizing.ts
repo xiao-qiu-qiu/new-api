@@ -22,7 +22,8 @@ import type * as React from 'react'
 import { isContentSizedColumn } from './content-sized-columns'
 
 export function getTableSizeStyle<TData>(
-  table: TanstackTable<TData>
+  table: TanstackTable<TData>,
+  layout: 'auto' | 'fixed' = 'auto'
 ): React.CSSProperties {
   const width = table
     .getVisibleLeafColumns()
@@ -31,7 +32,7 @@ export function getTableSizeStyle<TData>(
 
   return {
     minWidth: `max(100%, ${width}px)`,
-    tableLayout: 'auto',
+    tableLayout: layout,
     width: '100%',
   }
 }

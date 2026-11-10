@@ -55,6 +55,7 @@ interface LogsFilterToolbarProps<TData> {
   hasAdvancedActiveFilters?: boolean
   advancedFilterCount?: number
   searchLoading?: boolean
+  searchError?: string
   onReset: () => void
   onSearch: () => void
   className?: string
@@ -178,8 +179,15 @@ export function LogsFilterToolbar<TData>(props: LogsFilterToolbarProps<TData>) {
                 onClick={props.onSearch}
                 disabled={props.searchLoading}
                 aria-busy={props.searchLoading}
+                className='min-w-24'
               >
-                {props.searchLoading && <Loader2 className='animate-spin' />}
+                <Loader2
+                  aria-hidden='true'
+                  className={cn(
+                    'size-4',
+                    props.searchLoading ? 'animate-spin' : 'invisible'
+                  )}
+                />
                 {t('Search')}
               </Button>
               {props.actionEnd}
@@ -211,6 +219,11 @@ export function LogsFilterToolbar<TData>(props: LogsFilterToolbarProps<TData>) {
               </DrawerDescription>
             </DrawerHeader>
             <div className='flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-4 py-3'>
+              {props.searchError && (
+                <p role='alert' className='text-destructive text-sm'>
+                  {props.searchError}
+                </p>
+              )}
               {props.mobileFilters ?? (
                 <>
                   {props.primaryFilters}
@@ -231,13 +244,26 @@ export function LogsFilterToolbar<TData>(props: LogsFilterToolbarProps<TData>) {
                 type='button'
                 onClick={handleMobileSearch}
                 disabled={props.searchLoading}
+                aria-busy={props.searchLoading}
+                className='min-w-24'
               >
-                {props.searchLoading && <Loader2 className='animate-spin' />}
+                <Loader2
+                  aria-hidden='true'
+                  className={cn(
+                    'size-4',
+                    props.searchLoading ? 'animate-spin' : 'invisible'
+                  )}
+                />
                 {t('Search')}
               </Button>
             </DrawerFooter>
           </div>
         </DrawerContent>
+        {props.searchError && !mobileFiltersOpen && (
+          <p role='alert' className='text-destructive px-2 text-sm'>
+            {props.searchError}
+          </p>
+        )}
       </Drawer>
     )
   }
@@ -282,14 +308,27 @@ export function LogsFilterToolbar<TData>(props: LogsFilterToolbarProps<TData>) {
             type='button'
             onClick={props.onSearch}
             disabled={props.searchLoading}
+            aria-busy={props.searchLoading}
+            className='min-w-24'
           >
-            {props.searchLoading && <Loader2 className='animate-spin' />}
+            <Loader2
+              aria-hidden='true'
+              className={cn(
+                'size-4',
+                props.searchLoading ? 'animate-spin' : 'invisible'
+              )}
+            />
             {t('Search')}
           </Button>
           {props.actionEnd}
           <DataTableViewOptions table={props.table} />
         </div>
       </div>
+      {props.searchError && (
+        <p role='alert' className='text-destructive mt-2 text-sm'>
+          {props.searchError}
+        </p>
+      )}
     </div>
   )
 }

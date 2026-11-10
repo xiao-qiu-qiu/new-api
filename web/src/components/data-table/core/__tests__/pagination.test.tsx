@@ -30,7 +30,12 @@ import { DataTablePagination } from '../pagination'
 const rows = [{ id: 1 }, { id: 2 }, { id: 3 }]
 const emptyRows: { id: number }[] = []
 
-function Fixture(props: { empty?: boolean; compact?: boolean }) {
+function Fixture(props: {
+  empty?: boolean
+  compact?: boolean
+  totalExact?: boolean
+  hasMore?: boolean
+}) {
   const table = useReactTable({
     data: props.empty ? emptyRows : rows,
     columns: [{ accessorKey: 'id' }],
@@ -38,7 +43,14 @@ function Fixture(props: { empty?: boolean; compact?: boolean }) {
     getPaginationRowModel: getPaginationRowModel(),
     initialState: { pagination: { pageIndex: 0, pageSize: 2 } },
   })
-  return <DataTablePagination table={table} compact={props.compact} />
+  return (
+    <DataTablePagination
+      table={table}
+      compact={props.compact}
+      totalExact={props.totalExact}
+      hasMore={props.hasMore}
+    />
+  )
 }
 it('moves between pages in compact mode and disables the boundary actions', async () => {
   const user = userEvent.setup()
@@ -64,4 +76,21 @@ it('shows a valid empty page with navigation disabled', () => {
 it('keeps page size selection available in the default layout', () => {
   render(<Fixture />)
   expect(screen.getByRole('combobox')).toBeVisible()
+})
+
+it('shows only sequential navigation when the server has not counted the result', () => {
+  render(<Fixture totalExact={false} hasMore />)
+  expect(screen.queryByText('Total:')).not.toBeInTheDocument()
+  expect(
+    screen.queryByRole('button', { name: 'Go to last page' })
+  ).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Go to next page' })).toBeEnabled()
+  expect(
+    screen.getByRole('button', { name: 'Go to previous page' })
+  ).toBeDisabled()
+})
+
+it('disables next-page navigation when a cursor search reaches its last page', () => {
+  render(<Fixture totalExact={false} hasMore={false} />)
+  expect(screen.getByRole('button', { name: 'Go to next page' })).toBeDisabled()
 })

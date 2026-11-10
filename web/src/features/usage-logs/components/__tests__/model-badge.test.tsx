@@ -330,9 +330,80 @@ it('keeps reasoning effort and the service tier inline while copying only the mo
   expect(screen.getByLabelText('Speed Tier: ultrafast')).toHaveTextContent(
     'ultrafast'
   )
-  expect(container.firstElementChild).toHaveClass('h-6', 'whitespace-nowrap')
+  expect(container.firstElementChild).toHaveClass(
+    'min-h-6',
+    'whitespace-nowrap'
+  )
   await user.click(screen.getByText('gpt-6-astra'))
   expect(copy).toHaveBeenCalledWith('gpt-6-astra')
+})
+
+it('truncates a long model name in a fixed column and reveals its full name in a tooltip', async () => {
+  const user = userEvent.setup()
+  const model =
+    'gpt-6-astra-with-a-long-provider-suffix-and-dated-version-2026-11-11'
+  const { container } = render(
+    <div style={{ width: 150 }}>
+      <ModelBadge
+        modelName={model}
+        reasoningEffort='xhigh'
+        serviceTier='fast'
+      />
+    </div>
+  )
+  const name = screen.getByText(model)
+  expect(name).toHaveClass('min-w-0', 'truncate')
+  expect(container.querySelector('[data-slot="status-badge"]')).toHaveClass(
+    'max-w-full',
+    'min-w-0'
+  )
+  expect(screen.getByLabelText('Reasoning Effort: xhigh')).toHaveClass(
+    'shrink-0'
+  )
+  expect(screen.getByLabelText('Speed Tier: fast')).toHaveClass('shrink-0')
+  await user.hover(name)
+  expect(await screen.findByRole('tooltip')).toHaveTextContent(model)
+})
+
+it('wraps status badges within a narrow model column without truncating their labels', () => {
+  render(
+    <div style={{ width: 150 }}>
+      <ModelBadge
+        modelName='gpt-6-astra-with-a-long-name'
+        reasoningEffort='xhigh'
+        outboundServiceTier='priority'
+        observedServiceTier='default'
+        serviceTier='default'
+      />
+    </div>
+  )
+  const effort = screen.getByLabelText('Reasoning Effort: xhigh')
+  expect(effort.parentElement).toHaveClass('min-w-0', 'max-w-full', 'flex-wrap')
+  expect(screen.getByLabelText('Sent Speed Tier: fast')).toHaveClass('shrink-0')
+  expect(screen.getByLabelText('Upstream Response Tier: default')).toHaveClass(
+    'shrink-0'
+  )
+})
+
+it('keeps the response mismatch marker compact beside a long model name', () => {
+  const model = 'requested-model-with-a-long-provider-and-version-suffix'
+  const returned = 'unexpected-response-model-with-another-long-suffix'
+  render(
+    <div style={{ width: 150 }}>
+      <ModelBadge
+        modelName={model}
+        responseModel={{
+          requested_model: model,
+          upstream_model: model,
+          returned_model: returned,
+        }}
+      />
+    </div>
+  )
+  const marker = screen.getByLabelText(`Response model: ${returned}`)
+  expect(marker).toHaveClass('shrink-0')
+  expect(marker).toHaveAttribute('title', `Response model: ${returned}`)
+  expect(marker).not.toHaveTextContent(returned)
 })
 
 it('hides the default speed tier while keeping reasoning effort visible', () => {
@@ -451,7 +522,7 @@ it('opens the mismatch evidence with the keyboard and shows all three models', a
       }}
     />
   )
-  expect(screen.getByText(`Response model: ${returned}`)).toBeVisible()
+  expect(screen.getByLabelText(`Response model: ${returned}`)).toBeVisible()
   await user.tab()
   expect(
     screen.getByRole('button', {

@@ -22,7 +22,7 @@ import {
   useQueryClient,
   type UseQueryResult,
 } from '@tanstack/react-query'
-import { useSyncExternalStore } from 'react'
+import { useEffect, useEffectEvent, useSyncExternalStore } from 'react'
 
 import {
   getActiveRequests,
@@ -97,6 +97,16 @@ export function useActiveRequests(
     !params.request_result &&
     visible
 
+  const cancelHiddenPoll = useEffectEvent(() => {
+    if (!isPageVisible()) {
+      void queryClient.cancelQueries({ queryKey, exact: true })
+    }
+  })
+  useEffect(() => {
+    cancelHiddenPoll()
+    return focusManager.subscribe(cancelHiddenPoll)
+  }, [])
+
   return useQuery({
     queryKey,
     enabled: shouldEnable,
@@ -115,6 +125,9 @@ export function useActiveRequests(
       )
       signal.throwIfAborted()
       const previous = queryClient.getQueryData<ActiveRequestSnapshot>(queryKey)
+      // Visibility can change before React commits the disabled observer.
+      // Retain the last accepted snapshot so resuming still detects handoff.
+      if (!isPageVisible()) return previous
       const requestIds = new Set(snapshot.items.map((item) => item.request_id))
       if (previous?.items.some((item) => !requestIds.has(item.request_id))) {
         // Keep the previous active rows until the visible persisted logs finish
@@ -130,7 +143,9 @@ export function useActiveRequests(
       }
       return snapshot
     },
-    refetchInterval: 2000,
+    retry: false,
+    refetchInterval: (query) =>
+      query.state.status === 'error' ? 60_000 : 2000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     staleTime: 0,

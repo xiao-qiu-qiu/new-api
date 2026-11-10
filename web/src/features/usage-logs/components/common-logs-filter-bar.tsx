@@ -16,11 +16,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useQueryClient, useIsFetching, useQuery } from '@tanstack/react-query'
+import { useQueryClient, useQuery } from '@tanstack/react-query'
 import { useNavigate, getRouteApi } from '@tanstack/react-router'
 import type { Table } from '@tanstack/react-table'
 import { Eye, EyeOff } from 'lucide-react'
-import { useState, useCallback, useMemo } from 'react'
+import { useState, useCallback, useMemo, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { Badge } from '@/components/ui/badge'
@@ -42,10 +42,18 @@ import {
 import { getGroups } from '@/features/channels/api'
 import { useMediaQuery } from '@/hooks'
 import { getUserGroups } from '@/lib/api'
+import { handleServerError } from '@/lib/handle-server-error'
 import { requireServerSuccess } from '@/lib/server-error-message'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { LOG_TYPE_ALL_VALUE, LOG_TYPE_FILTERS } from '../constants'
 import { buildSearchParams } from '../lib/filter'
+import {
+  getLogQueryValidationError,
+  getLogStatsParams,
+  getLogStatsQueryKey,
+  requiresLogScanBudget,
+} from '../lib/log-query'
 import { getDefaultTimeRange } from '../lib/utils'
 import type { CommonLogFilters } from '../types'
 import { CommonLogsStats } from './common-logs-stats'
@@ -120,6 +128,8 @@ function buildSearchSourceKey(values: {
 
 interface CommonLogsFilterBarProps<TData> {
   table: Table<TData>
+  onRefresh?: () => Promise<unknown>
+  isRefreshing?: boolean
 }
 
 export function CommonLogsFilterBar<TData>(
@@ -130,9 +140,17 @@ export function CommonLogsFilterBar<TData>(
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const searchParams = route.useSearch()
-  const { isAdminView: isAdmin } = useLogsViewScope()
+  const {
+    isAdminView: isAdmin,
+    canManageScope,
+    viewAccess,
+  } = useLogsViewScope()
+  const userId = useAuthStore((state) => state.auth.user?.id)
   const { sensitiveVisible, setSensitiveVisible } = useUsageLogsContext()
-  const fetchingLogs = useIsFetching({ queryKey: ['logs'] })
+  const [manualLoading, setManualLoading] = useState(false)
+  const [validationError, setValidationError] = useState<string>()
+  const manualPending = useRef(false)
+  const searchLoading = manualLoading || Boolean(props.isRefreshing)
   const { data: adminGroups } = useQuery({
     queryKey: ['groups'],
     queryFn: async () => requireServerSuccess(await getGroups()),
@@ -213,6 +231,7 @@ export function CommonLogsFilterBar<TData>(
 
   const handleChange = useCallback(
     (field: keyof CommonLogFilters, value: Date | string | undefined) => {
+      setValidationError(undefined)
       setDraft((current) => {
         const base =
           current.sourceKey === searchState.sourceKey ? current : searchState
@@ -227,26 +246,112 @@ export function CommonLogsFilterBar<TData>(
   )
 
   const handleApply = useCallback(
-    (nextFilters: CommonLogFilters = filters) => {
+    async (nextFilters: CommonLogFilters = filters) => {
+      if (manualPending.current || props.isRefreshing) return
       const filterParams = buildSearchParams(nextFilters, 'common')
-      const nextSearch = { ...filterParams, type: [logType], page: 1 }
+      const nextSearch = {
+        ...filterParams,
+        type: [logType],
+        page: 1,
+        pageSize: searchParams.pageSize,
+      }
+      const error = getLogQueryValidationError(nextSearch, canManageScope)
+      setValidationError(error)
+      if (error) return
       setDraft({
         sourceKey: buildSearchSourceKey(nextSearch),
         filters: nextFilters,
         logType,
       })
-      navigate({
-        to: '/usage-logs/$section',
-        params: { section: 'common' },
-        search: nextSearch,
-      })
-      queryClient.invalidateQueries({ queryKey: ['logs'] })
-      queryClient.invalidateQueries({ queryKey: ['usage-logs-stats'] })
+      manualPending.current = true
+      setManualLoading(true)
+      try {
+        const currentSearch = {
+          ...buildSearchParams(searchState.filters, 'common'),
+          type: [searchState.logType],
+        }
+        if (
+          JSON.stringify(getLogStatsParams(nextSearch, isAdmin)) !==
+          JSON.stringify(getLogStatsParams(currentSearch, isAdmin))
+        ) {
+          await navigate({
+            to: '/usage-logs/$section',
+            params: { section: 'common' },
+            search: nextSearch,
+          })
+          return
+        }
+
+        // The table owns its current query key (including cursor and scope).
+        if (props.onRefresh) {
+          await props.onRefresh()
+        } else {
+          const matchingQueries = queryClient.getQueryCache().findAll({
+            queryKey: ['logs', 'common', viewAccess],
+            type: 'active',
+            predicate: (query) =>
+              query.queryKey.at(-1) === userId &&
+              query.queryKey[3] ===
+                props.table.getState().pagination.pageIndex + 1 &&
+              query.queryKey[4] ===
+                props.table.getState().pagination.pageSize &&
+              JSON.stringify(
+                getLogStatsParams(
+                  query.queryKey[6] as Record<string, unknown>,
+                  isAdmin
+                )
+              ) === JSON.stringify(getLogStatsParams(searchParams, isAdmin)),
+          })
+          await Promise.all(
+            matchingQueries.map((query) =>
+              queryClient.refetchQueries(
+                { queryKey: query.queryKey, exact: true },
+                { throwOnError: true }
+              )
+            )
+          )
+        }
+        // Heavy statistics remain a separate, explicit operation.
+        if (!requiresLogScanBudget(searchParams)) {
+          await queryClient.refetchQueries(
+            {
+              queryKey: getLogStatsQueryKey(
+                searchParams,
+                isAdmin,
+                viewAccess,
+                userId
+              ),
+              exact: true,
+              type: 'active',
+            },
+            { throwOnError: true }
+          )
+        }
+      } catch (error) {
+        handleServerError(error)
+      } finally {
+        manualPending.current = false
+        setManualLoading(false)
+      }
     },
-    [filters, logType, navigate, queryClient]
+    [
+      filters,
+      logType,
+      searchParams,
+      searchState,
+      canManageScope,
+      navigate,
+      props,
+      queryClient,
+      viewAccess,
+      userId,
+      isAdmin,
+    ]
   )
 
   const handleReset = useCallback(() => {
+    if (manualPending.current || props.isRefreshing) return
+    setValidationError(undefined)
     const { start, end } = getDefaultTimeRange()
     const resetFilters: CommonLogFilters = { startTime: start, endTime: end }
     const resetSearch = {
@@ -265,16 +370,18 @@ export function CommonLogsFilterBar<TData>(
       params: { section: 'common' },
       search: {
         page: 1,
+        pageSize: searchParams.pageSize,
         ...resetSearch,
       },
     })
-    queryClient.invalidateQueries({ queryKey: ['logs'] })
-    queryClient.invalidateQueries({ queryKey: ['usage-logs-stats'] })
-  }, [navigate, queryClient])
+  }, [navigate, props.isRefreshing, searchParams.pageSize])
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
-      if (e.key === 'Enter') handleApply()
+      if (e.key === 'Enter') {
+        e.preventDefault()
+        void handleApply()
+      }
     },
     [handleApply]
   )
@@ -285,13 +392,14 @@ export function CommonLogsFilterBar<TData>(
     !!filters.channel ||
     !!filters.requestId ||
     !!filters.upstreamRequestId ||
-    !!filters.errorKeyword ||
-    !!filters.errorCode
+    (canManageScope && (!!filters.errorKeyword || !!filters.errorCode))
 
   const hasTypeFilter = logType !== LOG_TYPE_ALL_VALUE
   const hasAdditionalFilters =
     !!filters.model ||
     !!filters.group ||
+    !!filters.errorKeyword ||
+    !!filters.errorCode ||
     !!filters.requestResult ||
     hasTypeFilter ||
     hasExpandedFilters
@@ -302,8 +410,8 @@ export function CommonLogsFilterBar<TData>(
     isAdmin ? filters.channel : undefined,
     filters.requestId,
     filters.upstreamRequestId,
-    filters.errorKeyword,
-    filters.errorCode,
+    canManageScope ? filters.errorKeyword : undefined,
+    canManageScope ? filters.errorCode : undefined,
   ].filter(Boolean).length
   const sensitiveInputClass = sensitiveVisible
     ? undefined
@@ -468,7 +576,7 @@ export function CommonLogsFilterBar<TData>(
       </Select>
     </LogsFilterField>
   )
-  const requestResultFilter = (
+  const requestResultFilter = canManageScope && (
     <LogsFilterField>
       <Select
         items={requestResultItems}
@@ -496,24 +604,28 @@ export function CommonLogsFilterBar<TData>(
   )
   const advancedFilters = (
     <>
-      <LogsFilterField wide>
-        <LogsFilterInput
-          aria-label={t('Error keyword')}
-          placeholder={t('Error keyword')}
-          value={filters.errorKeyword || ''}
-          onChange={(e) => handleChange('errorKeyword', e.target.value)}
-          onKeyDown={handleKeyDown}
-        />
-      </LogsFilterField>
-      <LogsFilterField>
-        <LogsFilterInput
-          aria-label={t('Error code (exact match)')}
-          placeholder={t('Error code (exact match)')}
-          value={filters.errorCode || ''}
-          onChange={(e) => handleChange('errorCode', e.target.value)}
-          onKeyDown={handleKeyDown}
-        />
-      </LogsFilterField>
+      {canManageScope && (
+        <>
+          <LogsFilterField wide>
+            <LogsFilterInput
+              aria-label={t('Error keyword')}
+              placeholder={t('Error keyword')}
+              value={filters.errorKeyword || ''}
+              onChange={(e) => handleChange('errorKeyword', e.target.value)}
+              onKeyDown={handleKeyDown}
+            />
+          </LogsFilterField>
+          <LogsFilterField>
+            <LogsFilterInput
+              aria-label={t('Error code (exact match)')}
+              placeholder={t('Error code (exact match)')}
+              value={filters.errorCode || ''}
+              onChange={(e) => handleChange('errorCode', e.target.value)}
+              onKeyDown={handleKeyDown}
+            />
+          </LogsFilterField>
+        </>
+      )}
       <LogsFilterField>
         <LogsFilterInput
           aria-label={t('Token Name')}
@@ -596,15 +708,18 @@ export function CommonLogsFilterBar<TData>(
         [
           filters.model,
           filters.group,
-          filters.requestResult,
+          canManageScope ? filters.requestResult : undefined,
           hasTypeFilter,
         ].filter(Boolean).length + expandedFilterCount
       }
       hasAdvancedActiveFilters={hasExpandedFilters}
       advancedFilterCount={expandedFilterCount}
       hasActiveFilters={hasAdditionalFilters}
-      onSearch={() => handleApply()}
-      searchLoading={fetchingLogs > 0}
+      onSearch={() => {
+        void handleApply()
+      }}
+      searchLoading={searchLoading}
+      searchError={validationError ? t(validationError) : undefined}
       onReset={handleReset}
     />
   )

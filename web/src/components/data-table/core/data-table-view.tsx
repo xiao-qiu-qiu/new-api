@@ -137,6 +137,8 @@ function SplitHeaderTableView<TData>({
       )}
     >
       <div
+        ref={props.scrollContainerRef}
+        onScroll={props.onScroll}
         className={cn(
           'min-h-0 flex-1 overflow-auto',
           '**:data-[slot=table-header]:[--table-header-bg:var(--table-header)]',
@@ -238,7 +240,7 @@ function getTableSizing<TData>(props: DataTableViewProps<TData>): {
 
   return {
     colgroup: <DataTableColgroup table={props.table} />,
-    style: getTableSizeStyle(props.table),
+    style: getTableSizeStyle(props.table, props.tableLayout),
   }
 }
 

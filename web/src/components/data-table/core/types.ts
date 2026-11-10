@@ -56,6 +56,9 @@ export type DataTableViewProps<TData> = {
   getColumnClassName?: DataTableColumnClassName
   pinnedColumns?: DataTablePinnedColumn[]
   applyHeaderSize?: boolean
+  tableLayout?: 'auto' | 'fixed'
+  scrollContainerRef?: React.Ref<HTMLDivElement>
+  onScroll?: React.UIEventHandler<HTMLDivElement>
   tableClassName?: string
   tableHeaderClassName?: string
   tableHeaderRowClassName?: string

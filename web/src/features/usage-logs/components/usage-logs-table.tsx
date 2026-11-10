@@ -16,10 +16,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { useQuery } from '@tanstack/react-query'
+import { hashKey, useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
-import type { ColumnDef } from '@tanstack/react-table'
-import { useCallback } from 'react'
+import type {
+  ColumnDef,
+  OnChangeFn,
+  PaginationState,
+} from '@tanstack/react-table'
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import {
@@ -27,6 +31,7 @@ import {
   DataTableRow,
   useDataTable,
 } from '@/components/data-table'
+import { Button } from '@/components/ui/button'
 import {
   getAdminPlans,
   getSelfSubscriptionFull,
@@ -46,12 +51,14 @@ import {
 } from '../constants'
 import type { UsageLog } from '../data/schema'
 import { useActiveRequests } from '../hooks/use-active-requests'
+import { useLogReadingSnapshot } from '../hooks/use-log-reading-snapshot'
 import { getActiveRequest, mergeActiveLogs } from '../lib/active-requests'
 import { shouldShowBillingSource } from '../lib/billing-source'
 import { useColumnsByCategory } from '../lib/columns'
 import { parseLogOther } from '../lib/format'
+import { hasLogErrorFilters, isLiveLogQuery } from '../lib/log-query'
 import { fetchLogsByCategory } from '../lib/utils'
-import type { LogCategory } from '../types'
+import type { GetLogsResponse, LogCategory } from '../types'
 import { CommonLogsFilterBar } from './common-logs-filter-bar'
 import { TaskLogsFilterBar } from './task-logs-filter-bar'
 import { UsageLogsMobileList } from './usage-logs-mobile-card'
@@ -103,6 +110,16 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
   } = useLogsViewScope()
   const isMobile = useMediaQuery('(max-width: 640px)')
   const searchParams = route.useSearch()
+  const navigate = route.useNavigate()
+  const scrollContainerRef = useRef<HTMLDivElement>(null)
+  const [isRefreshing, setIsRefreshing] = useState(false)
+  const [cursorHistory, setCursorHistory] = useState<{
+    scope: string
+    pages: Record<number, string>
+  }>({ scope: '', pages: {} })
+  const errorSearch =
+    logCategory === 'common' && hasLogErrorFilters(searchParams)
+  const liveQuery = logCategory === 'common' && isLiveLogQuery(searchParams)
   const userId = useAuthStore((state) => state.auth.user?.id)
   const { data: showBillingSource = false } = useQuery({
     queryKey: ['usage-log-billing-source', isAdmin, userId],
@@ -166,19 +183,49 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     ],
   })
 
-  const { data, isLoading, isFetching } = useQuery({
-    queryKey: [
-      'logs',
-      logCategory,
-      viewAccess,
-      pagination.pageIndex + 1,
-      pagination.pageSize,
-      columnFilters,
-      searchParams,
-      t,
-      userId,
-    ],
-    queryFn: async () => {
+  const queryKey = [
+    'logs',
+    logCategory,
+    viewAccess,
+    pagination.pageIndex + 1,
+    pagination.pageSize,
+    columnFilters,
+    searchParams,
+    userId,
+  ]
+  const queryScope = hashKey(queryKey)
+  const [settledScope, setSettledScope] = useState(queryScope)
+  const cursorScope = hashKey([
+    logCategory,
+    viewAccess,
+    userId,
+    {
+      ...searchParams,
+      page: undefined,
+      cursor: undefined,
+    },
+  ])
+  const [previousCursorScope, setPreviousCursorScope] = useState(cursorScope)
+  const resetCursor =
+    previousCursorScope !== cursorScope &&
+    errorSearch &&
+    (Boolean(searchParams.cursor) || pagination.pageIndex > 0)
+  useLayoutEffect(() => {
+    if (previousCursorScope === cursorScope) return
+    if (resetCursor) {
+      void navigate({
+        search: (previous) => ({ ...previous, page: 1, cursor: undefined }),
+      })
+    } else {
+      setPreviousCursorScope(cursorScope)
+    }
+  }, [cursorScope, previousCursorScope, resetCursor, navigate])
+  const logQuery = useQuery({
+    queryKey,
+    enabled: !resetCursor,
+    queryFn: async ({
+      signal,
+    }): Promise<NonNullable<GetLogsResponse['data']>> => {
       const result = await fetchLogsByCategory({
         logCategory,
         isAdmin,
@@ -186,13 +233,20 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
         pageSize: pagination.pageSize,
         searchParams,
         columnFilters,
+        signal,
       })
 
       if (!result?.success) {
         throw createServerError(result, t('Failed to load logs'))
       }
 
-      return result.data || DEFAULT_LOGS_DATA
+      return (
+        result.data ?? {
+          ...DEFAULT_LOGS_DATA,
+          page: pagination.pageIndex + 1,
+          page_size: pagination.pageSize,
+        }
+      )
     },
     placeholderData: (previousData, previousQuery) => {
       if (
@@ -204,13 +258,17 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
       }
       return undefined
     },
-    refetchInterval:
-      logCategory === 'common' && pagination.pageIndex === 0 ? 30_000 : false,
+    retry: false,
+    refetchInterval: (query) =>
+      liveQuery && pagination.pageIndex === 0 && query.state.status !== 'error'
+        ? 30_000
+        : false,
     refetchIntervalInBackground: false,
   })
+  const { data, isLoading, isFetching } = logQuery
+  if (!isFetching && settledScope !== queryScope) setSettledScope(queryScope)
 
-  const showActive =
-    logCategory === 'common' && pagination.pageIndex === 0 && userId != null
+  const showActive = liveQuery && pagination.pageIndex === 0 && userId != null
   const activeQuery = useActiveRequests({
     enabled: showActive,
     isAdmin,
@@ -221,10 +279,71 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
   })
   const active =
     showActive && !activeQuery.isError ? activeQuery.data : undefined
-  const logs =
-    logCategory === 'common'
-      ? mergeActiveLogs((data?.items || []) as UsageLog[], active)
-      : data?.items || []
+  const incomingLogs = useMemo(() => {
+    const items = data?.items ?? DEFAULT_LOGS_DATA.items
+    return logCategory === 'common'
+      ? mergeActiveLogs(items as UsageLog[], active)
+      : (items as UsageLog[])
+  }, [data?.items, active, logCategory])
+  const reading = useLogReadingSnapshot({
+    logs: incomingLogs,
+    scope: queryScope,
+    enabled:
+      logCategory === 'common' && !logQuery.isPlaceholderData && !resetCursor,
+  })
+  const logs = reading.logs
+  useLayoutEffect(() => {
+    if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = 0
+  }, [queryScope])
+
+  const resumeUpdates = () => {
+    reading.resume()
+    if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = 0
+  }
+  const refreshLogs = async () => {
+    if (isRefreshing) return
+    setIsRefreshing(true)
+    try {
+      const result = await logQuery.refetch({ cancelRefetch: false })
+      if (!result.isError) resumeUpdates()
+    } finally {
+      setIsRefreshing(false)
+    }
+  }
+  const changePage: OnChangeFn<PaginationState> = (update) => {
+    if (!errorSearch) {
+      onPaginationChange(update)
+      return
+    }
+    const next = typeof update === 'function' ? update(pagination) : update
+    const pages = cursorHistory.scope === cursorScope ? cursorHistory.pages : {}
+    let pageIndex = next.pageIndex
+    let cursor: string | undefined
+    if (next.pageSize !== pagination.pageSize) pageIndex = 0
+    if (pageIndex > 0) {
+      cursor =
+        pageIndex === pagination.pageIndex + 1
+          ? data?.next_cursor
+          : pages[pageIndex]
+      if (!cursor || isFetching) return
+    }
+    setCursorHistory({
+      scope: cursorScope,
+      pages: {
+        ...pages,
+        [pagination.pageIndex]: searchParams.cursor ?? '',
+        [pageIndex]: cursor ?? '',
+      },
+    })
+    void navigate({
+      search: (previous) => ({
+        ...previous,
+        page: pageIndex + 1,
+        pageSize: next.pageSize,
+        cursor,
+      }),
+    })
+  }
   const columns = useColumnsByCategory(
     logCategory,
     isAdmin,
@@ -250,12 +369,15 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
         ? `active:${request.request_id}`
         : `log:${row.request_id ?? ''}:${row.id ?? index}`
     },
-    onPaginationChange,
+    onPaginationChange: changePage,
     onColumnFiltersChange,
     manualPagination: true,
     manualFiltering: true,
     totalCount: data?.total || 0,
-    ensurePageInRange,
+    pageCount: errorSearch
+      ? pagination.pageIndex + 1 + (data?.has_more ? 1 : 0)
+      : undefined,
+    ensurePageInRange: errorSearch ? undefined : ensurePageInRange,
   })
 
   const isCommon = logCategory === 'common'
@@ -264,9 +386,27 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
     <DataTablePage
       table={table}
       compactPagination={isMobile && isCommon}
+      paginationTotalExact={!errorSearch}
+      paginationHasMore={errorSearch ? (data?.has_more ?? false) : undefined}
+      paginationDisabled={errorSearch && isFetching}
+      paginationCanPrevious={
+        errorSearch
+          ? pagination.pageIndex > 0 &&
+            (pagination.pageIndex === 1 ||
+              (cursorHistory.scope === cursorScope &&
+                cursorHistory.pages[pagination.pageIndex - 1] !== undefined))
+          : undefined
+      }
       columns={columns as ColumnDef<Record<string, unknown>>[]}
       isLoading={isLoadingData}
       isFetching={isFetching}
+      dimOnRefetch={!isCommon}
+      tableLayout={isCommon ? 'fixed' : 'auto'}
+      scrollContainerRef={scrollContainerRef}
+      onScroll={(event) => {
+        if (event.currentTarget.scrollTop > 24) reading.pause()
+        else reading.resume()
+      }}
       emptyTitle={t('No Logs Found')}
       emptyDescription={t(
         'No usage logs available. Logs will appear here once API calls are made.'
@@ -274,7 +414,8 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
       skeletonKeyPrefix='usage-log-skeleton'
       applyHeaderSize
       tableClassName={cn(
-        '[&_[data-slot=table]]:text-[13px] [&_[data-slot=table]_td]:text-[13px] [&_[data-slot=table]_td_*]:text-[13px] [&_[data-slot=table]_th]:text-[13px] [&_[data-slot=table]_th_*]:text-[13px]'
+        '[&_[data-slot=table]]:text-[13px] [&_[data-slot=table]_td]:text-[13px] [&_[data-slot=table]_td_*]:text-[13px] [&_[data-slot=table]_th]:text-[13px] [&_[data-slot=table]_th_*]:text-[13px]',
+        isCommon && '[&_td]:overflow-hidden'
       )}
       mobile={
         <UsageLogsMobileList
@@ -286,24 +427,47 @@ export function UsageLogsTable({ logCategory }: UsageLogsTableProps) {
       toolbar={
         isCommon ? (
           <>
-            <CommonLogsFilterBar table={table} />
-            {showActive && activeQuery.isError && (
-              <p role='status' className='text-warning text-xs'>
-                {t('Live request status is temporarily unavailable')}
-              </p>
-            )}
-            {active != null && active.total > 0 && (
-              <p role='status' className='text-info text-xs'>
-                {active.total > active.items.length
-                  ? t('Showing {{shown}} of {{total}} in-progress requests', {
-                      shown: formatNumber(active.items.length, locale),
-                      total: formatNumber(active.total, locale),
-                    })
-                  : t('In progress: {{total}}', {
-                      total: formatNumber(active.total, locale),
-                    })}
-              </p>
-            )}
+            <CommonLogsFilterBar
+              table={table}
+              onRefresh={refreshLogs}
+              isRefreshing={
+                isRefreshing || (isFetching && settledScope !== queryScope)
+              }
+            />
+            <div className='flex h-7 shrink-0 items-center justify-between gap-2 overflow-hidden'>
+              <div role='status' className='min-w-0 truncate text-xs'>
+                {showActive && activeQuery.isError && (
+                  <span className='text-warning'>
+                    {t('Live request status is temporarily unavailable')}
+                  </span>
+                )}
+                {!activeQuery.isError && active != null && active.total > 0 && (
+                  <span className='text-info'>
+                    {active.total > active.items.length
+                      ? t(
+                          'Showing {{shown}} of {{total}} in-progress requests',
+                          {
+                            shown: formatNumber(active.items.length, locale),
+                            total: formatNumber(active.total, locale),
+                          }
+                        )
+                      : t('In progress: {{total}}', {
+                          total: formatNumber(active.total, locale),
+                        })}
+                  </span>
+                )}
+              </div>
+              {reading.hasUpdates && (
+                <Button
+                  variant='ghost'
+                  size='sm'
+                  className='h-7 shrink-0'
+                  onClick={resumeUpdates}
+                >
+                  {t('New logs available')}
+                </Button>
+              )}
+            </div>
           </>
         ) : (
           <TaskLogsFilterBar table={table} logCategory={logCategory} />

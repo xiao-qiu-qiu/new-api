@@ -452,6 +452,7 @@ export interface TaskArtifactsResponse {
 export interface GetLogsParams {
   p?: number
   page_size?: number
+  cursor?: string
   type?: number
   username?: string
   token_name?: string
@@ -473,6 +474,9 @@ export interface GetLogsResponse {
   data?: {
     items: UsageLog[] | MidjourneyLog[] | TaskLog[]
     total: number
+    total_exact?: boolean
+    has_more?: boolean
+    next_cursor?: string
     page: number
     page_size: number
   }
@@ -540,6 +544,7 @@ export interface FetchLogsConfig {
   pageSize: number
   searchParams: Record<string, unknown>
   columnFilters: Array<{ id: string; value: unknown }>
+  signal?: AbortSignal
 }
 
 // ============================================================================

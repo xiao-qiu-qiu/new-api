@@ -329,6 +329,88 @@ describe('active request polling', () => {
     }
   )
 
+  it('aborts only the hidden active poll, retains its cache and ignores its late completion', async () => {
+    let resolvePoll!: (value: ReturnType<typeof activeResponse>) => void
+    const get = vi
+      .spyOn(api, 'get')
+      .mockResolvedValueOnce(activeResponse())
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolvePoll = resolve
+        })
+      )
+      .mockResolvedValue(activeResponse([]))
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    const hook = renderHook(() => useActiveRequests(options), { wrapper })
+    await waitFor(() => expect(hook.result.current.data?.total).toBe(1))
+    const activeKey = client.getQueryCache().getAll()[0].queryKey
+    const cached = client.getQueryData(activeKey)
+    let refresh!: ReturnType<typeof hook.result.current.refetch>
+    act(() => {
+      refresh = hook.result.current.refetch()
+    })
+    const signal = get.mock.calls[1][1]?.signal
+    const unrelatedKey = ['active-requests', 8, 'self']
+    const unrelatedController = new AbortController()
+    client.setQueryData(unrelatedKey, snapshot)
+    let resolveOther!: () => void
+    const unrelated = client
+      .fetchQuery({
+        queryKey: unrelatedKey,
+        queryFn: ({ signal: otherSignal }) => {
+          otherSignal.addEventListener('abort', () =>
+            unrelatedController.abort()
+          )
+          return new Promise((resolve) => {
+            resolveOther = () => resolve(snapshot)
+          })
+        },
+      })
+      .catch(() => undefined)
+
+    act(() => focusManager.setFocused(false))
+
+    expect(signal?.aborted).toBe(true)
+    expect(unrelatedController.signal.aborted).toBe(false)
+    expect(client.getQueryData(activeKey)).toBe(cached)
+    await act(async () => {
+      resolvePoll(activeResponse([]))
+      await refresh
+    })
+    expect(invalidate).not.toHaveBeenCalled()
+    expect(client.getQueryData(activeKey)).toBe(cached)
+
+    await act(async () => {
+      focusManager.setFocused(true)
+      resolveOther()
+      await unrelated
+    })
+    await waitFor(() => expect(hook.result.current.data?.items).toEqual([]))
+    expect(get).toHaveBeenCalledTimes(3)
+    expect(invalidate).toHaveBeenCalledOnce()
+  })
+
+  it('rechecks visibility before handing off a completed poll even before effects run', async () => {
+    const get = vi.spyOn(api, 'get').mockResolvedValueOnce(activeResponse())
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    const hook = renderHook(() => useActiveRequests(options), { wrapper })
+    await waitFor(() => expect(hook.result.current.data?.total).toBe(1))
+    get.mockImplementationOnce(async () => {
+      vi.spyOn(focusManager, 'isFocused').mockReturnValue(false)
+      return activeResponse([])
+    })
+
+    await act(async () => {
+      await hook.result.current.refetch()
+    })
+
+    expect(invalidate).not.toHaveBeenCalled()
+    const activeQuery = client
+      .getQueryCache()
+      .find({ queryKey: ['active-requests'], exact: false })
+    expect(activeQuery?.state.data).toMatchObject({ items: [activeRequest] })
+  })
+
   it.each([undefined, [], ['0'], ['2']])(
     'enables polling for the selected consumption type %j',
     async (type) => {
@@ -457,6 +539,7 @@ describe('active request polling', () => {
       const activePath = `${logPath}/active`
       const reads: Array<{
         url: string
+        signal?: { readonly aborted: boolean }
         resolve: (items: (typeof persistedLog)[]) => void
       }> = []
       let activeItems = [activeRequest]
@@ -487,7 +570,11 @@ describe('active request polling', () => {
               },
             })
           }
-          reads.push({ url: url.href, resolve: resolveRead })
+          reads.push({
+            url: url.href,
+            signal: config.signal,
+            resolve: resolveRead,
+          })
           if (reads.length === 1) resolveRead([])
         })
       }
@@ -500,7 +587,7 @@ describe('active request polling', () => {
             active: useActiveRequests(scopedOptions),
             logs: useQuery({
               queryKey: logKey,
-              queryFn: async () =>
+              queryFn: async ({ signal }) =>
                 (
                   await fetchLogsByCategory({
                     logCategory: 'common',
@@ -509,6 +596,7 @@ describe('active request polling', () => {
                     pageSize: 20,
                     searchParams: scopedOptions.searchParams,
                     columnFilters: [],
+                    signal,
                   })
                 ).data,
             }),
@@ -531,6 +619,7 @@ describe('active request polling', () => {
 
         await waitFor(() => expect(reads).toHaveLength(3))
         expect(reads[2].url).toBe(reads[1].url)
+        expect(reads[1].signal?.aborted).toBe(true)
         expect(hook.result.current.active.data?.items).toEqual([activeRequest])
         expect(hook.result.current.logs.data?.items).toEqual([])
 

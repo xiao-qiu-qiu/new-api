@@ -18,16 +18,24 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useQuery } from '@tanstack/react-query'
 import { getRouteApi } from '@tanstack/react-router'
+import { Loader2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
+import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { formatLogQuota } from '@/lib/format'
 import { requireServerSuccess } from '@/lib/server-error-message'
 import { cn } from '@/lib/utils'
+import { useAuthStore } from '@/stores/auth-store'
 
 import { getLogStats, getUserLogStats } from '../api'
 import { DEFAULT_LOG_STATS } from '../constants'
-import { buildApiParams } from '../lib/utils'
+import {
+  getLogQueryValidationError,
+  getLogStatsParams,
+  getLogStatsQueryKey,
+  requiresLogScanBudget,
+} from '../lib/log-query'
 import { useLogsViewScope, useUsageLogsContext } from './usage-logs-provider'
 
 const route = getRouteApi('/_authenticated/usage-logs/$section')
@@ -50,33 +58,72 @@ function StatBadge(props: {
 
 export function CommonLogsStats() {
   const { t } = useTranslation()
-  const { isAdminView: isAdmin } = useLogsViewScope()
+  const {
+    isAdminView: isAdmin,
+    canManageScope,
+    viewAccess,
+  } = useLogsViewScope()
+  const userId = useAuthStore((state) => state.auth.user?.id)
   const searchParams = route.useSearch()
   const { sensitiveVisible } = useUsageLogsContext()
+  const manualOnly = requiresLogScanBudget(searchParams)
+  const validationError = getLogQueryValidationError(
+    searchParams,
+    canManageScope
+  )
 
-  const { data: stats, isLoading } = useQuery({
-    queryKey: ['usage-logs-stats', isAdmin, searchParams],
-    queryFn: async () => {
-      const params = buildApiParams({
-        page: 1,
-        pageSize: 1,
-        searchParams,
-        columnFilters: [],
-        isAdmin,
-      })
+  const {
+    data: stats,
+    isLoading,
+    isFetching,
+    refetch,
+  } = useQuery({
+    queryKey: getLogStatsQueryKey(searchParams, isAdmin, viewAccess, userId),
+    queryFn: async ({ signal }) => {
+      const params = getLogStatsParams(searchParams, isAdmin)
 
       const result = isAdmin
-        ? requireServerSuccess(await getLogStats(params))
-        : requireServerSuccess(await getUserLogStats(params))
+        ? requireServerSuccess(await getLogStats(params, signal))
+        : requireServerSuccess(await getUserLogStats(params, signal))
 
       return result.success
         ? result.data || DEFAULT_LOG_STATS
         : DEFAULT_LOG_STATS
     },
-    placeholderData: (previousData) => previousData,
+    enabled: !manualOnly,
+    retry: false,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+    placeholderData: (previousData, previousQuery) => {
+      if (
+        manualOnly ||
+        previousQuery?.queryKey[1] !== viewAccess ||
+        previousQuery.queryKey[2] !== userId
+      ) {
+        return undefined
+      }
+      const previousParams = previousQuery.queryKey[3]
+      const previousManualOnly = requiresLogScanBudget({
+        model: previousParams.model_name,
+        token: previousParams.token_name,
+        username: previousParams.username,
+        errorKeyword: previousParams.error_keyword,
+        errorCode: previousParams.error_code,
+        requestResult: previousParams.request_result,
+        startTime:
+          previousParams.start_timestamp == null
+            ? undefined
+            : previousParams.start_timestamp * 1000,
+        endTime:
+          previousParams.end_timestamp == null
+            ? undefined
+            : previousParams.end_timestamp * 1000,
+      })
+      return previousManualOnly ? undefined : previousData
+    },
   })
 
-  if (isLoading) {
+  if (isLoading && !manualOnly) {
     return (
       <div className='flex items-center gap-2'>
         <Skeleton className='h-7 w-[150px] rounded-md' />
@@ -88,21 +135,49 @@ export function CommonLogsStats() {
 
   return (
     <div className='flex flex-wrap items-center gap-2'>
-      <StatBadge
-        label={t('Usage')}
-        value={sensitiveVisible ? formatLogQuota(stats?.quota || 0) : '••••'}
-        accent='bg-sky-500/70'
-      />
-      <StatBadge
-        label={t('RPM')}
-        value={stats?.rpm || 0}
-        accent='bg-rose-500/65'
-      />
-      <StatBadge
-        label={t('TPM')}
-        value={stats?.tpm || 0}
-        accent='bg-slate-400/70'
-      />
+      {manualOnly && (
+        <Button
+          type='button'
+          size='sm'
+          variant='outline'
+          disabled={isFetching || Boolean(validationError)}
+          aria-busy={isFetching}
+          title={validationError ? t(validationError) : undefined}
+          onClick={() => {
+            void refetch()
+          }}
+        >
+          <Loader2
+            aria-hidden='true'
+            className={cn(
+              'size-3.5',
+              isFetching ? 'animate-spin' : 'invisible'
+            )}
+          />
+          {t('Load statistics')}
+        </Button>
+      )}
+      {(!manualOnly || stats) && (
+        <>
+          <StatBadge
+            label={t('Usage')}
+            value={
+              sensitiveVisible ? formatLogQuota(stats?.quota || 0) : '••••'
+            }
+            accent='bg-sky-500/70'
+          />
+          <StatBadge
+            label={t('RPM')}
+            value={stats?.rpm || 0}
+            accent='bg-rose-500/65'
+          />
+          <StatBadge
+            label={t('TPM')}
+            value={stats?.tpm || 0}
+            accent='bg-slate-400/70'
+          />
+        </>
+      )}
     </div>
   )
 }

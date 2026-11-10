@@ -91,6 +91,11 @@ export type DataTablePageProps<TData> = {
    * Refetch / background loading — dims the table without removing rows.
    */
   isFetching?: boolean
+  /** Whether a background refetch should dim and block existing rows. */
+  dimOnRefetch?: boolean
+  tableLayout?: 'auto' | 'fixed'
+  scrollContainerRef?: React.Ref<HTMLDivElement>
+  onScroll?: React.UIEventHandler<HTMLDivElement>
 
   /**
    * Empty-state title (used for both desktop {@link TableEmpty} and mobile fallback).
@@ -208,6 +213,10 @@ export type DataTablePageProps<TData> = {
 
   /** Minimal previous/next pagination for narrow feature layouts. */
   compactPagination?: boolean
+  paginationTotalExact?: boolean
+  paginationHasMore?: boolean
+  paginationDisabled?: boolean
+  paginationCanPrevious?: boolean
 
   /**
    * Render pagination via `PageFooterPortal` (sticks to page footer).
@@ -399,6 +408,10 @@ function renderPagination<TData>(
     <DataTablePagination
       table={props.table}
       compact={props.compactPagination}
+      totalExact={props.paginationTotalExact}
+      hasMore={props.paginationHasMore}
+      disabled={props.paginationDisabled}
+      canPreviousPage={props.paginationCanPrevious}
     />
   )
 
@@ -419,7 +432,8 @@ function renderMobile<TData>(
     return null
   }
 
-  const isFetchingOnly = props.isFetching && !props.isLoading
+  const isFetchingOnly =
+    props.dimOnRefetch !== false && props.isFetching && !props.isLoading
   const ownGetRowClassName = props.getRowClassName
   const mobileGetRowClassName =
     props.mobileProps?.getRowClassName ??
@@ -487,7 +501,15 @@ function renderMobile<TData>(
     }
   }
 
-  return <div className='min-h-0 flex-1 overflow-y-auto'>{mobileContent}</div>
+  return (
+    <div
+      ref={props.scrollContainerRef}
+      onScroll={props.onScroll}
+      className='min-h-0 flex-1 overflow-y-auto'
+    >
+      {mobileContent}
+    </div>
+  )
 }
 
 function renderDesktop<TData>(
@@ -500,7 +522,8 @@ function renderDesktop<TData>(
     return null
   }
 
-  const isFetchingOnly = props.isFetching && !props.isLoading
+  const isFetchingOnly =
+    props.dimOnRefetch !== false && props.isFetching && !props.isLoading
   const fixedHeight = props.fixedHeight !== false
 
   if (cardViewActive && viewMode === DATA_TABLE_VIEW_MODES.CARD) {
@@ -540,6 +563,9 @@ function renderDesktop<TData>(
       skeletonKeyPrefix={props.skeletonKeyPrefix}
       renderRow={props.renderRow}
       applyHeaderSize={props.applyHeaderSize}
+      tableLayout={props.tableLayout}
+      scrollContainerRef={props.scrollContainerRef}
+      onScroll={props.onScroll}
       splitHeader={fixedHeight}
       tableContainerClassName={fixedHeight ? 'h-full min-h-0' : undefined}
       tableHeaderClassName={cn(
