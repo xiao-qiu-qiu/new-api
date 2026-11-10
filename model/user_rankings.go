@@ -224,17 +224,15 @@ type RankingUserUsage struct {
 	Models      map[string]RankingModelUsage
 }
 
-// This is internal usage only. Public rankings must apply live consent before
-// returning totals or model names; administrative access requires AdminAuth.
-func GetUserRankingUsage(ctx context.Context, userIDs []int, start, end int64) (map[int]RankingUserUsage, error) {
-	totals := make(map[int]RankingUserUsage, len(userIDs))
+func scanUserRankingUsage(ctx context.Context, userIDs []int, start, end int64) (map[int]rankingUsageDay, error) {
+	totals := make(map[int]rankingUsageDay, len(userIDs))
 	for _, userID := range userIDs {
-		totals[userID] = RankingUserUsage{Models: make(map[string]RankingModelUsage)}
+		totals[userID] = rankingUsageDay{usage: RankingUserUsage{Models: make(map[string]RankingModelUsage)}}
 	}
 	for offset := 0; offset < len(userIDs); offset += 500 {
 		batch := userIDs[offset:min(offset+500, len(userIDs))]
 		rows, err := LOG_DB.WithContext(ctx).Model(&Log{}).
-			Select("user_id, prompt_tokens, completion_tokens, other, model_name, quota").
+			Select("id, user_id, prompt_tokens, completion_tokens, other, model_name, quota").
 			Where("type = ? AND user_id IN ? AND created_at >= ? AND created_at <= ?", LogTypeConsume, batch, start, end).
 			Rows()
 		if err != nil {
@@ -242,10 +240,11 @@ func GetUserRankingUsage(ctx context.Context, userIDs []int, start, end int64) (
 		}
 		for rows.Next() {
 			var userID int
+			var id int64
 			var prompt, completion int64
 			var quota *int64
 			var other, modelName *string
-			if err := rows.Scan(&userID, &prompt, &completion, &other, &modelName, &quota); err != nil {
+			if err := rows.Scan(&id, &userID, &prompt, &completion, &other, &modelName, &quota); err != nil {
 				rows.Close()
 				return nil, err
 			}
@@ -258,7 +257,10 @@ func GetUserRankingUsage(ctx context.Context, userIDs []int, start, end int64) (
 			if quota != nil {
 				consumed = max(*quota, 0)
 			}
-			usage := totals[userID]
+			day := totals[userID]
+			day.logCount++
+			day.lastID = max(day.lastID, id)
+			usage := day.usage
 			usage.TotalTokens += tokens
 			usage.TotalQuota += consumed
 			name := ""
@@ -270,7 +272,8 @@ func GetUserRankingUsage(ctx context.Context, userIDs []int, start, end int64) (
 			item.TotalTokens += tokens
 			item.TotalQuota += consumed
 			usage.Models[name] = item
-			totals[userID] = usage
+			day.usage = usage
+			totals[userID] = day
 		}
 		err = rows.Err()
 		rows.Close()

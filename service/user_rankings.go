@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"sort"
 	"sync"
@@ -101,8 +102,10 @@ func getUserRankings(ctx context.Context, period string, viewerID int, metric st
 	if options.administrator {
 		audience = "admin"
 	}
-	cacheKey := audience + ":" + metric + ":" + config.cacheKey(now)
-	value, err, _ := userRankingBuild.Do(cacheKey, func() (any, error) {
+	// Both metrics are derived from the same usage; build it once even when
+	// older clients request the two boards concurrently.
+	cacheKey := audience + ":" + config.cacheKey(now)
+	build := func() (any, error) {
 		userRankingCache.Lock()
 		cached, ok := userRankingCache.items[cacheKey]
 		generation := userRankingCache.generation
@@ -117,6 +120,25 @@ func getUserRankings(ctx context.Context, period string, viewerID int, metric st
 		ids := make([]int, 0, len(participants))
 		for _, participant := range participants {
 			ids = append(ids, participant.ID)
+		}
+		if !options.administrator {
+			otherMetric := model.RankingMetricTokens
+			if metric == model.RankingMetricTokens {
+				otherMetric = model.RankingMetricSpending
+			}
+			otherParticipants, err := options.participants(ctx, otherMetric)
+			if err != nil {
+				return nil, err
+			}
+			included := make(map[int]bool, len(ids))
+			for _, id := range ids {
+				included[id] = true
+			}
+			for _, participant := range otherParticipants {
+				if !included[participant.ID] {
+					ids = append(ids, participant.ID)
+				}
+			}
 		}
 		start, end := rankingTimeRange(config, now)
 		queryCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
@@ -138,11 +160,26 @@ func getUserRankings(ctx context.Context, period string, viewerID int, metric st
 		}
 		userRankingCache.Unlock()
 		return cached, nil
-	})
-	if err != nil {
-		return nil, err
 	}
-	cached := value.(userRankingTotals)
+	var cached userRankingTotals
+	for {
+		result := userRankingBuild.DoChan(cacheKey, build)
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case built := <-result:
+			// A tab/metric switch can cancel the request that started a shared
+			// build. Its live waiters should start a new build, not inherit 503.
+			if errors.Is(built.Err, context.Canceled) && ctx.Err() == nil {
+				continue
+			}
+			if built.Err != nil {
+				return nil, built.Err
+			}
+			cached = built.Val.(userRankingTotals)
+		}
+		break
+	}
 	// Consent and account status are NEVER cached: withdrawal takes effect on
 	// the next read on every instance, even while token totals are cached.
 	participants, err := options.participants(ctx, metric)

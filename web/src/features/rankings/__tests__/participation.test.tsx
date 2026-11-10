@@ -17,7 +17,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, render, screen, waitFor, within } from '@testing-library/react'
+import {
+  act,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+  within,
+} from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
@@ -33,13 +40,15 @@ import { ModelUsageBar } from '../components/model-usage-bar'
 import { RankingPeriods } from '../components/ranking-periods'
 import { UserLeaderboard } from '../components/user-leaderboard'
 import { useRankingPeriods } from '../hooks/use-ranking-periods'
-import type {
-  Participation,
-  ParticipationChoice,
-  RankedModel,
-  RankedUser,
-  RankingMetric,
+import {
+  useUserRankings,
+  type Participation,
+  type ParticipationChoice,
+  type RankedModel,
+  type RankedUser,
+  type RankingMetric,
 } from '../hooks/use-user-rankings'
+import type { RankingPeriod } from '../types'
 
 vi.mock('@/lib/api', () => ({ api: { get: vi.fn(), put: vi.fn() } }))
 
@@ -102,6 +111,184 @@ function mockRankings(preference: Participation, users: RankedUser[] = []) {
     return { data: { success: true, data: { ...preference } } }
   })
 }
+
+function getRankingRequests() {
+  return vi
+    .mocked(api.get)
+    .mock.calls.filter(([url]) => url.startsWith('/api/rankings/users'))
+}
+
+describe('ranking requests', () => {
+  function renderRequests(
+    metric: RankingMetric = 'tokens',
+    adminViewerID: number | null = null
+  ) {
+    const client = new QueryClient({
+      defaultOptions: {
+        queries: { retry: 4, retryDelay: 0, refetchOnWindowFocus: false },
+      },
+    })
+    clients.add(client)
+    return renderHook(
+      (props: { period: RankingPeriod; metric: RankingMetric }) =>
+        useUserRankings(props.period, props.metric, adminViewerID),
+      {
+        initialProps: { period: 'year', metric },
+        wrapper: ({ children }) => (
+          <QueryClientProvider client={client}>{children}</QueryClientProvider>
+        ),
+      }
+    )
+  }
+
+  afterEach(() => vi.useRealTimers())
+
+  test.each(['tokens', 'spending'] as const)(
+    'opening %s requests only that metric and switching fetches the selected board',
+    async (metric) => {
+      mockRankings({ ...initialPreference, prompted: true })
+      const hook = renderRequests(metric)
+      await waitFor(() =>
+        expect(hook.result.current.rankings.isSuccess).toBe(true)
+      )
+      const otherMetric = metric === 'tokens' ? 'spending' : 'tokens'
+      expect(api.get).toHaveBeenCalledWith(
+        '/api/rankings/users',
+        expect.objectContaining({ params: { period: 'year', metric } })
+      )
+      expect(api.get).not.toHaveBeenCalledWith(
+        '/api/rankings/users',
+        expect.objectContaining({
+          params: { period: 'year', metric: otherMetric },
+        })
+      )
+
+      hook.rerender({ period: 'year', metric: otherMetric })
+      await waitFor(() =>
+        expect(hook.result.current.rankings.isSuccess).toBe(true)
+      )
+      expect(api.get).toHaveBeenCalledWith(
+        '/api/rankings/users',
+        expect.objectContaining({
+          params: { period: 'year', metric: otherMetric },
+        })
+      )
+      expect(getRankingRequests()).toHaveLength(2)
+
+      hook.rerender({ period: 'year', metric })
+      expect(hook.result.current.rankings.isSuccess).toBe(true)
+      expect(getRankingRequests()).toHaveLength(2)
+    }
+  )
+
+  test.each([
+    { period: 'month' as const, metric: 'tokens' as const },
+    { period: 'year' as const, metric: 'spending' as const },
+  ])(
+    'switching to $period/$metric aborts the previous request and unmount aborts the next',
+    async (next) => {
+      const signals: AbortSignal[] = []
+      vi.mocked(api.get).mockImplementation(async (url, config) => {
+        if (url.includes('/self/')) {
+          return {
+            data: {
+              success: true,
+              data: { ...initialPreference, prompted: true },
+            },
+          }
+        }
+        const signal = config?.signal as AbortSignal
+        signals.push(signal)
+        return new Promise((_resolve, reject) => {
+          signal?.addEventListener(
+            'abort',
+            () => reject(new DOMException('Aborted', 'AbortError')),
+            { once: true }
+          )
+        })
+      })
+      const hook = renderRequests()
+      expect(signals[0]).toBeInstanceOf(AbortSignal)
+      expect(signals[0].aborted).toBe(false)
+      hook.rerender(next)
+      expect(signals[0].aborted).toBe(true)
+      expect(signals[1].aborted).toBe(false)
+      hook.unmount()
+      expect(signals[1].aborted).toBe(true)
+    }
+  )
+
+  test.each([
+    { mode: 'public', adminViewerID: null },
+    { mode: 'admin', adminViewerID: 1 },
+  ])(
+    '503 in $mode mode waits sixty seconds without retries and recovery resumes thirty-second polling',
+    async ({ adminViewerID }) => {
+      vi.useFakeTimers()
+      useAuthStore
+        .getState()
+        .auth.setUser({ id: 1, username: 'viewer', role: 10 })
+      let unavailable = true
+      vi.mocked(api.get).mockImplementation(async (url) => {
+        if (url.includes('/self/')) {
+          return {
+            data: {
+              success: true,
+              data: { ...initialPreference, prompted: true },
+            },
+          }
+        }
+        if (unavailable) {
+          throw Object.assign(new Error('Service unavailable'), {
+            response: { status: 503 },
+          })
+        }
+        return {
+          data: {
+            success: true,
+            data: {
+              users: [],
+              participants: 0,
+              total_tokens: 0,
+              total_quota: 0,
+            },
+          },
+        }
+      })
+      const hook = renderRequests('tokens', adminViewerID)
+      await act(async () => vi.advanceTimersByTimeAsync(0))
+      expect(hook.result.current.rankings.isError).toBe(true)
+      expect(getRankingRequests()).toHaveLength(1)
+      expect(getRankingRequests()[0]).toEqual([
+        adminViewerID === null
+          ? '/api/rankings/users'
+          : '/api/rankings/users/admin',
+        {
+          params: { period: 'year', metric: 'tokens' },
+          signal: expect.any(AbortSignal),
+        },
+      ])
+
+      await act(async () => vi.advanceTimersByTimeAsync(59_999))
+      expect(getRankingRequests()).toHaveLength(1)
+      await act(async () => vi.advanceTimersByTimeAsync(1))
+      expect(getRankingRequests()).toHaveLength(2)
+
+      unavailable = false
+      await act(async () => {
+        await hook.result.current.rankings.refetch()
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      expect(hook.result.current.rankings.isSuccess).toBe(true)
+      expect(getRankingRequests()).toHaveLength(3)
+      await act(async () => vi.advanceTimersByTimeAsync(29_999))
+      expect(getRankingRequests()).toHaveLength(3)
+      await act(async () => vi.advanceTimersByTimeAsync(1))
+      expect(getRankingRequests()).toHaveLength(4)
+      hook.unmount()
+    }
+  )
+})
 
 describe('ranking administrator mode', () => {
   const publicUser: RankedUser = {
@@ -182,10 +369,14 @@ describe('ranking administrator mode', () => {
       ).toBeGreaterThan(0)
       expect(api.get).toHaveBeenCalledWith('/api/rankings/users/admin', {
         params: { period: 'week', metric: 'tokens' },
+        signal: expect.any(AbortSignal),
       })
-      expect(api.get).toHaveBeenCalledWith('/api/rankings/users/admin', {
-        params: { period: 'week', metric: 'spending' },
-      })
+      expect(api.get).not.toHaveBeenCalledWith(
+        '/api/rankings/users/admin',
+        expect.objectContaining({
+          params: { period: 'week', metric: 'spending' },
+        })
+      )
 
       await userEvent.click(control)
       expect(control).not.toBeChecked()
@@ -255,6 +446,11 @@ describe('ranking administrator mode', () => {
     )
     expect(await screen.findByText('Unable to load rankings')).toBeVisible()
     expect(screen.queryByRole('table')).not.toBeInTheDocument()
+    mockAdministratorRankings()
+    await userEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(
+      await within(await screen.findByRole('table')).findByText('private-user')
+    ).toBeVisible()
   })
 })
 
