@@ -1,8 +1,11 @@
 package controller
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/i18n"
@@ -58,43 +61,40 @@ func limitLogTimeRange(startTimestamp int64, endTimestamp int64) (int64, error) 
 }
 
 func GetAllLogs(c *gin.Context) {
-	pageInfo := common.GetPageQuery(c)
-	logs, total, err := model.GetAllLogs(logFilterFromQuery(c, true), pageInfo.GetStartIdx(), pageInfo.GetPageSize())
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	if c.GetInt("role") < common.RoleRootUser {
-		model.FormatAdminLogs(logs)
-	} else {
-		model.FormatRootLogs(logs)
-	}
-	pageInfo.SetTotal(int(total))
-	pageInfo.SetItems(logs)
-	common.ApiSuccess(c, pageInfo)
-	return
+	getLogs(c, true)
 }
 
 func GetUserLogs(c *gin.Context) {
-	pageInfo := common.GetPageQuery(c)
-	filter := logFilterFromQuery(c, false)
-	if c.GetInt("role") < common.RoleAdminUser {
-		startTimestamp, err := limitLogTimeRange(filter.StartTimestamp, filter.EndTimestamp)
-		if err != nil {
-			common.ApiError(c, err)
-			return
-		}
-		filter.StartTimestamp = startTimestamp
-	}
-	logs, total, err := model.GetUserLogs(c.GetInt("id"), filter, pageInfo.GetStartIdx(), pageInfo.GetPageSize())
-	if err != nil {
-		common.ApiError(c, err)
+	getLogs(c, false)
+}
+
+func getLogs(c *gin.Context, all bool) {
+	filter, ok := validatedLogFilter(c, all, false)
+	if !ok {
 		return
 	}
-	pageInfo.SetTotal(int(total))
-	pageInfo.SetItems(logs)
-	common.ApiSuccess(c, pageInfo)
-	return
+	page, ok := validatedLogPage(c)
+	if !ok {
+		return
+	}
+	ctx, finish, ok := beginLogQuery(c, filter.NeedsScanBudget(common.GetTimestamp()), false)
+	if !ok {
+		return
+	}
+	defer finish()
+	result, err := model.GetLogPage(ctx, c.GetInt("id"), all, filter, page.Page, page.PageSize, c.Query("cursor"))
+	if err != nil {
+		logQueryError(c, err)
+		return
+	}
+	if all {
+		if c.GetInt("role") < common.RoleRootUser {
+			model.FormatAdminLogs(result.Items)
+		} else {
+			model.FormatRootLogs(result.Items)
+		}
+	}
+	common.ApiSuccess(c, result)
 }
 
 // ExportAllLogs streams every user's logs matching the search.
@@ -104,10 +104,6 @@ func ExportAllLogs(c *gin.Context) {
 
 // ExportUserLogs streams the caller's own logs matching the search.
 func ExportUserLogs(c *gin.Context) {
-	if c.GetInt("role") < common.RoleAdminUser && !operation_setting.GetLogSetting().UserExportEnabled {
-		common.ApiErrorT(c, "Log export is disabled")
-		return
-	}
 	exportLogs(c, false)
 }
 
@@ -116,17 +112,22 @@ func ExportUserLogs(c *gin.Context) {
 // one export at a time, and every export stays within the longest log time
 // range.
 func exportLogs(c *gin.Context, all bool) {
-	filter := logFilterFromQuery(c, all)
-	if err := filter.Validate(); err != nil {
-		common.ApiError(c, err)
+	filter, valid := validatedLogFilter(c, all, true)
+	if !valid {
 		return
 	}
-	startTimestamp, err := limitLogTimeRange(filter.StartTimestamp, filter.EndTimestamp)
-	if err != nil {
-		common.ApiError(c, err)
+	if !all && c.GetInt("role") < common.RoleAdminUser && !operation_setting.GetLogSetting().UserExportEnabled {
+		common.ApiErrorT(c, "Log export is disabled")
 		return
 	}
-	filter.StartTimestamp = startTimestamp
+	if filter.IsHeavy() {
+		var err error
+		filter, err = filter.LimitErrorSearchRange(common.GetTimestamp())
+		if err != nil {
+			common.ApiErrorStatus(c, http.StatusBadRequest, err)
+			return
+		}
+	}
 
 	userId := c.GetInt("id")
 	release, ok, err := service.AcquireLogExportLock(userId)
@@ -136,10 +137,23 @@ func exportLogs(c *gin.Context, all bool) {
 		return
 	}
 	if !ok {
-		common.ApiErrorT(c, "Another log export is running. Try again after it finishes.")
+		c.Header("Retry-After", "1")
+		common.ApiErrorStatus(c, http.StatusTooManyRequests, common.NewMessage("Another log export is running. Try again after it finishes."))
 		return
 	}
 	defer release()
+	ctx, finish, ok := beginLogQuery(c, filter.NeedsScanBudget(common.GetTimestamp()), true)
+	if !ok {
+		return
+	}
+	defer finish()
+	// Bound slow-client writes as well as database execution. Gin unwraps its
+	// writer to the server connection; httptest may not support deadlines.
+	responseControl := http.NewResponseController(c.Writer)
+	deadline, _ := ctx.Deadline()
+	if err := responseControl.SetWriteDeadline(deadline); err == nil {
+		defer responseControl.SetWriteDeadline(time.Time{})
+	}
 
 	c.Header("Content-Type", "application/x-ndjson; charset=utf-8")
 	c.Header("Cache-Control", "no-store")
@@ -158,19 +172,26 @@ func exportLogs(c *gin.Context, all bool) {
 		count++
 		return nil
 	}
-	ctx := c.Request.Context()
 	if all {
 		err = model.StreamAllLogs(ctx, filter, c.GetInt("role"), writeLog)
 	} else {
 		err = model.StreamUserLogs(ctx, userId, filter, writeLog)
 	}
-	if ctx.Err() != nil {
+	if err != nil {
+		// The response may already be 200, including socket write failures.
+		c.Set("log_query_failed", true)
+	}
+	if errors.Is(ctx.Err(), context.Canceled) {
 		return
 	}
 	// The status is already sent, so the result object becomes the last line.
 	if err != nil {
 		common.SysError(common.LogText("failed to export logs: %s", err.Error()))
-		common.ApiErrorT(c, "Failed to export logs")
+		if errors.Is(err, context.DeadlineExceeded) {
+			common.ApiErrorT(c, "Log query timed out. Narrow the time range and try again.")
+		} else {
+			common.ApiErrorT(c, "Failed to export logs")
+		}
 		return
 	}
 	common.ApiSuccess(c, gin.H{"count": count})
@@ -208,47 +229,41 @@ func GetLogByKey(c *gin.Context) {
 }
 
 func GetLogsStat(c *gin.Context) {
-	stat, err := model.SumUsedQuota(logFilterFromQuery(c, true))
-	if err != nil {
-		common.ApiError(c, err)
-		return
-	}
-	//tokenNum := model.SumUsedToken(logType, startTimestamp, endTimestamp, modelName, username, "")
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "",
-		"data": gin.H{
-			"quota": stat.Quota,
-			"rpm":   stat.Rpm,
-			"tpm":   stat.Tpm,
-		},
-	})
-	return
+	getLogsStat(c, true)
 }
 
 func GetLogsSelfStat(c *gin.Context) {
-	filter := logFilterFromQuery(c, false)
-	if c.GetInt("role") < common.RoleAdminUser {
+	getLogsStat(c, false)
+}
+
+func getLogsStat(c *gin.Context, all bool) {
+	filter, ok := validatedLogFilter(c, all, false)
+	if !ok {
+		return
+	}
+	if filter.IsHeavy() {
 		var err error
-		if filter.StartTimestamp, err = limitLogTimeRange(filter.StartTimestamp, filter.EndTimestamp); err != nil {
-			common.ApiError(c, err)
+		filter, err = filter.LimitErrorSearchRange(common.GetTimestamp())
+		if err != nil {
+			common.ApiErrorStatus(c, http.StatusBadRequest, err)
 			return
 		}
 	}
-	quotaNum, err := model.SumUserUsedQuota(c.GetInt("id"), filter)
-	if err != nil {
-		common.ApiError(c, err)
+	ctx, finish, ok := beginLogQuery(c, filter.NeedsScanBudget(common.GetTimestamp()), false)
+	if !ok {
 		return
 	}
-	c.JSON(200, gin.H{
-		"success": true,
-		"message": "",
-		"data": gin.H{
-			"quota": quotaNum.Quota,
-			"rpm":   quotaNum.Rpm,
-			"tpm":   quotaNum.Tpm,
-			//"token": tokenNum,
-		},
-	})
-	return
+	defer finish()
+	var stat model.Stat
+	var err error
+	if all {
+		stat, err = model.SumUsedQuotaWithContext(ctx, filter)
+	} else {
+		stat, err = model.SumUserUsedQuotaWithContext(ctx, c.GetInt("id"), filter)
+	}
+	if err != nil {
+		logQueryError(c, err)
+		return
+	}
+	common.ApiSuccess(c, stat)
 }

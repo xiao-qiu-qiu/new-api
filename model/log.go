@@ -7,7 +7,6 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/logger"
-	"github.com/QuantumNous/new-api/types"
 
 	"github.com/gin-gonic/gin"
 
@@ -529,160 +528,21 @@ func (f LogFilter) apply(tx *gorm.DB) (*gorm.DB, error) {
 }
 
 func GetAllLogs(filter LogFilter, startIdx int, num int) (logs []*Log, total int64, err error) {
-	tx, err := filter.apply(LOG_DB)
-	if err != nil {
-		return nil, 0, err
-	}
-	err = tx.Model(&Log{}).Count(&total).Error
-	if err != nil {
-		return nil, 0, err
-	}
-	order := "logs.created_at desc, logs.id desc"
-	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
-		order = clickHouseLogOrder("logs.")
-	}
-	err = tx.Order(order).Limit(num).Offset(startIdx).Find(&logs).Error
-	if err != nil {
-		return nil, 0, err
-	}
-	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
-		assignDisplayLogIds(logs, startIdx)
-	}
-
-	channelIds := types.NewSet[int]()
-	for _, log := range logs {
-		if log.ChannelId != 0 {
-			channelIds.Add(log.ChannelId)
-		}
-	}
-
-	if channelIds.Len() > 0 {
-		var channels []struct {
-			Id   int    `gorm:"column:id"`
-			Name string `gorm:"column:name"`
-		}
-		if common.MemoryCacheEnabled {
-			// Cache get channel
-			for _, channelId := range channelIds.Items() {
-				if cacheChannel, err := CacheGetChannel(channelId); err == nil {
-					channels = append(channels, struct {
-						Id   int    `gorm:"column:id"`
-						Name string `gorm:"column:name"`
-					}{
-						Id:   channelId,
-						Name: cacheChannel.Name,
-					})
-				}
-			}
-		} else {
-			// Bulk query channels from DB
-			if err = DB.Table("channels").Select("id, name").Where("id IN ?", channelIds.Items()).Find(&channels).Error; err != nil {
-				return logs, total, err
-			}
-		}
-		channelMap := make(map[int]string, len(channels))
-		for _, channel := range channels {
-			channelMap[channel.Id] = channel.Name
-		}
-		for i := range logs {
-			logs[i].ChannelName = channelMap[logs[i].ChannelId]
-		}
-	}
-
-	return logs, total, err
+	return GetAllLogsWithContext(context.Background(), filter, startIdx, num)
 }
-
-const logSearchCountLimit = 10000
 
 func GetUserLogs(userId int, filter LogFilter, startIdx int, num int) (logs []*Log, total int64, err error) {
-	tx, err := filter.apply(LOG_DB.Where("logs.user_id = ?", userId))
-	if err != nil {
-		return nil, 0, err
-	}
-	err = tx.Model(&Log{}).Limit(logSearchCountLimit).Count(&total).Error
-	if err != nil {
-		common.SysError(common.LogText("failed to count user logs: %s", err.Error()))
-		return nil, 0, common.NewMessage("Failed to query logs")
-	}
-	order := "logs.id desc"
-	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
-		order = clickHouseLogOrder("logs.")
-	}
-	err = tx.Order(order).Limit(num).Offset(startIdx).Find(&logs).Error
-	if err != nil {
-		common.SysError(common.LogText("failed to search user logs: %s", err.Error()))
-		return nil, 0, common.NewMessage("Failed to query logs")
-	}
-
-	formatUserLogs(logs, startIdx)
-	return logs, total, err
+	return GetUserLogsWithContext(context.Background(), userId, filter, startIdx, num)
 }
 
-// StreamAllLogs calls fn with each log matching filter, newest first, as an
-// administrator with role sees it. Rows are read one at a time, so an export
-// never holds the whole result in memory.
+// StreamAllLogs exports bounded keyset batches under one total deadline.
 func StreamAllLogs(ctx context.Context, filter LogFilter, role int, fn func(*Log) error) error {
-	tx, err := filter.apply(LOG_DB.WithContext(ctx))
-	if err != nil {
-		return err
-	}
-	visibility := logOtherVisibilityAdmin
-	if role >= common.RoleRootUser {
-		visibility = logOtherVisibilityRoot
-	}
-	channelNames := make(map[int]string)
-	return streamLogs(tx, "logs.created_at desc, logs.id desc", func(log *Log) error {
-		if log.ChannelId != 0 {
-			name, ok := channelNames[log.ChannelId]
-			if !ok {
-				if channel, err := CacheGetChannel(log.ChannelId); err == nil {
-					name = channel.Name
-				}
-				channelNames[log.ChannelId] = name
-			}
-			log.ChannelName = name
-		}
-		log.Other = formatLogOtherJSON(log.Other, visibility)
-		return fn(log)
-	})
+	return streamLogBatches(ctx, 0, true, filter, role, fn)
 }
 
-// StreamUserLogs is StreamAllLogs for one user's own logs, shaped like the
-// user log list.
+// StreamUserLogs always reapplies ownership on every export batch.
 func StreamUserLogs(ctx context.Context, userId int, filter LogFilter, fn func(*Log) error) error {
-	tx, err := filter.apply(LOG_DB.WithContext(ctx).Where("logs.user_id = ?", userId))
-	if err != nil {
-		return err
-	}
-	count := 0
-	return streamLogs(tx, "logs.id desc", func(log *Log) error {
-		count++
-		log.Id = count
-		log.ChannelName = ""
-		log.Other = formatLogOtherJSON(log.Other, logOtherVisibilityUser)
-		return fn(log)
-	})
-}
-
-func streamLogs(tx *gorm.DB, order string, fn func(*Log) error) error {
-	if common.UsingLogDatabase(common.DatabaseTypeClickHouse) {
-		order = clickHouseLogOrder("logs.")
-	}
-	rows, err := tx.Model(&Log{}).Order(order).Rows()
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var log Log
-		if err := LOG_DB.ScanRows(rows, &log); err != nil {
-			return err
-		}
-		if err := fn(&log); err != nil {
-			return err
-		}
-	}
-	return rows.Err()
+	return streamLogBatches(ctx, userId, false, filter, 0, fn)
 }
 
 type Stat struct {
@@ -692,14 +552,14 @@ type Stat struct {
 }
 
 func SumUsedQuota(filter LogFilter) (Stat, error) {
-	return sumUsedQuota(LOG_DB, filter)
+	return SumUsedQuotaWithContext(context.Background(), filter)
 }
 
 // SumUserUsedQuota uses the same ownership boundary as the user's log list.
 // A username is a search term, never an identifier for the caller's own logs.
 func SumUserUsedQuota(userId int, filter LogFilter) (Stat, error) {
 	filter.Username = ""
-	return sumUsedQuota(LOG_DB.Where("logs.user_id = ?", userId), filter)
+	return SumUserUsedQuotaWithContext(context.Background(), userId, filter)
 }
 
 func sumUsedQuota(db *gorm.DB, filter LogFilter) (stat Stat, err error) {
@@ -723,7 +583,7 @@ func sumUsedQuota(db *gorm.DB, filter LogFilter) (stat Stat, err error) {
 	// 执行查询
 	if err := tx.Scan(&stat).Error; err != nil {
 		common.SysError(common.LogText("failed to query log stat: %s", err.Error()))
-		return stat, common.NewMessage("Failed to query statistics")
+		return stat, err
 	}
 	var rateStat struct {
 		Rpm int
@@ -731,7 +591,7 @@ func sumUsedQuota(db *gorm.DB, filter LogFilter) (stat Stat, err error) {
 	}
 	if err := rpmTpmQuery.Scan(&rateStat).Error; err != nil {
 		common.SysError(common.LogText("failed to query rpm/tpm stat: %s", err.Error()))
-		return stat, common.NewMessage("Failed to query statistics")
+		return stat, err
 	}
 	stat.Rpm = rateStat.Rpm
 	stat.Tpm = rateStat.Tpm

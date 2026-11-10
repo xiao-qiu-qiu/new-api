@@ -2,8 +2,12 @@ package model
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -354,6 +358,170 @@ func TestLogErrorFilterDatabaseMatrix(t *testing.T) {
 				require.Error(t, err)
 				require.Error(t, StreamAllLogs(context.Background(), filter, common.RoleAdminUser, func(*Log) error { t.Error("invalid filter must not export rows"); return nil }))
 				require.Error(t, StreamUserLogs(context.Background(), 1, filter, func(*Log) error { t.Error("invalid filter must not export rows"); return nil }))
+			})
+		})
+	}
+}
+
+func TestLogQueryDatabaseMatrix(t *testing.T) {
+	for _, dialect := range []string{"sqlite", "mysql", "postgres", "clickhouse"} {
+		t.Run(dialect, func(t *testing.T) {
+			db := openLogFilterTestDatabase(t, dialect)
+			now := time.Now().Unix()
+			entries := []Log{
+				{Id: 1, UserId: 1, CreatedAt: now - 10, RequestId: "retry", Content: "403", TokenName: "a", Type: LogTypeError},
+				{Id: 2, UserId: 1, CreatedAt: now - 10, RequestId: "retry", Content: "403", TokenName: "b", Type: LogTypeError},
+				{Id: 3, UserId: 1, CreatedAt: now - 10, RequestId: "retry", Content: "403", TokenName: "c", Type: LogTypeError},
+				{Id: 4, UserId: 1, CreatedAt: now - 9, RequestId: "new", Content: "403", TokenName: "d", Type: LogTypeError},
+				{Id: 5, UserId: 1, CreatedAt: now - 11, RequestId: "old", Content: "403", TokenName: "e", Type: LogTypeError},
+				{Id: 6, UserId: 2, CreatedAt: now - 10, RequestId: "other", Content: "403", TokenName: "f", Type: LogTypeError},
+				{Id: 7, UserId: 1, CreatedAt: now - 10, RequestId: "success", Content: "200", TokenName: "g", Type: LogTypeConsume},
+				{Id: 8, UserId: 1, CreatedAt: now - 25*3600, RequestId: "outside", Content: "403", TokenName: "h", Type: LogTypeError},
+			}
+			if dialect == "clickhouse" {
+				for i := range entries {
+					entries[i].Id = 0
+				}
+			}
+			require.NoError(t, db.Create(&entries).Error)
+			for _, all := range []bool{false, true} {
+				t.Run(fmt.Sprintf("cursor all=%v", all), func(t *testing.T) {
+					filter := LogFilter{ErrorKeyword: "403", StartTimestamp: now - 3600, EndTimestamp: now}
+					var expected []Log
+					for _, entry := range entries {
+						if entry.Content == "403" && entry.CreatedAt >= filter.StartTimestamp && (all || entry.UserId == 1) {
+							expected = append(expected, entry)
+						}
+					}
+					slices.SortFunc(expected, func(a, b Log) int {
+						if (all || dialect == "clickhouse") && a.CreatedAt != b.CreatedAt {
+							if a.CreatedAt > b.CreatedAt {
+								return -1
+							}
+							return 1
+						}
+						if dialect == "clickhouse" {
+							return strings.Compare(b.RequestId, a.RequestId)
+						}
+						return b.Id - a.Id
+					})
+					// Failing COUNT makes the test protect the no-count contract.
+					require.NoError(t, db.Callback().Query().Before("gorm:query").Register("test:no-log-count", func(tx *gorm.DB) {
+						if _, counting := tx.Statement.Dest.(*int64); counting {
+							tx.AddError(errors.New("heavy log pages must not count"))
+						}
+					}))
+					defer db.Callback().Query().Remove("test:no-log-count")
+					var ids []string
+					var firstCursor, cursor string
+					for page := 1; ; page++ {
+						result, err := GetLogPage(context.Background(), 1, all, filter, page, 2, cursor)
+						require.NoError(t, err)
+						assert.False(t, result.TotalExact)
+						assert.LessOrEqual(t, len(result.Items), 2)
+						for _, log := range result.Items {
+							ids = append(ids, log.TokenName)
+							if !all {
+								assert.Equal(t, 1, log.UserId)
+							}
+						}
+						assert.EqualValues(t, len(ids), result.Total, "total is only the displayed lower bound")
+						if !result.HasMore {
+							assert.Empty(t, result.NextCursor)
+							break
+						}
+						cursor = result.NextCursor
+						if page == 1 {
+							firstCursor = cursor
+						}
+						require.Less(t, page, 10, "cursor must advance")
+					}
+					expectedIDs := make([]string, len(expected))
+					for i := range expected {
+						expectedIDs[i] = expected[i].TokenName
+					}
+					if dialect == "clickhouse" {
+						assert.ElementsMatch(t, expectedIDs, ids, "duplicate ordering keys must survive pagination")
+					} else {
+						assert.Equal(t, expectedIDs, ids)
+					}
+					_, err := GetLogPage(context.Background(), 2, all, filter, 2, 2, firstCursor)
+					require.ErrorIs(t, err, ErrInvalidLogCursor, "cursor is bound to the caller")
+					changed := filter
+					changed.ErrorKeyword = "200"
+					_, err = GetLogPage(context.Background(), 1, all, changed, 2, 2, firstCursor)
+					require.ErrorIs(t, err, ErrInvalidLogCursor, "cursor cannot change filters")
+					_, err = GetLogPage(context.Background(), 1, all, filter, 2, 3, firstCursor)
+					require.ErrorIs(t, err, ErrInvalidLogCursor, "cursor cannot change page size")
+					_, err = GetLogPage(context.Background(), 1, all, filter, 2, 2, firstCursor+"x")
+					require.ErrorIs(t, err, ErrInvalidLogCursor, "cursor cannot be forged")
+					_, err = GetLogPage(context.Background(), 1, all, filter, 2, 2, "")
+					require.ErrorIs(t, err, ErrInvalidLogCursor, "missing cursor must not become an OFFSET scan")
+					result, err := GetLogPage(context.Background(), 1, all, filter, 1, 2, firstCursor)
+					require.NoError(t, err)
+					assert.Equal(t, 2, result.Page)
+				})
+			}
+			t.Run("export preserves duplicate ordering keys", func(t *testing.T) {
+				var ids []string
+				require.NoError(t, StreamUserLogs(context.Background(), 1, LogFilter{ErrorKeyword: "403", StartTimestamp: now - 3600}, func(log *Log) error {
+					ids = append(ids, log.TokenName)
+					return nil
+				}))
+				assert.ElementsMatch(t, []string{"a", "b", "c", "d", "e"}, ids)
+			})
+			t.Run("invalid model pagination is rejected", func(t *testing.T) {
+				for _, pagination := range [][2]int{{0, -1}, {-1, 20}, {0, 0}, {0, 101}, {int(^uint(0) >> 1), 100}} {
+					_, _, err := GetAllLogs(LogFilter{}, pagination[0], pagination[1])
+					require.Error(t, err)
+					_, _, err = GetUserLogs(1, LogFilter{}, pagination[0], pagination[1])
+					require.Error(t, err)
+				}
+			})
+			t.Run("canceled list stat and export", func(t *testing.T) {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				_, err := GetLogPage(ctx, 1, false, LogFilter{}, 1, 10, "")
+				require.ErrorIs(t, err, context.Canceled)
+				_, err = SumUserUsedQuotaWithContext(ctx, 1, LogFilter{})
+				require.ErrorIs(t, err, context.Canceled)
+				err = StreamUserLogs(ctx, 1, LogFilter{}, func(*Log) error { t.Error("canceled export must not return rows"); return nil })
+				require.ErrorIs(t, err, context.Canceled)
+			})
+			t.Run("database execution timeout is local", func(t *testing.T) {
+				if dialect == "sqlite" {
+					return // SQLite cancellation is exercised above.
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+				defer cancel()
+				var driverError error
+				err := withLogQueryBudget(ctx, func(query *gorm.DB) error {
+					// Keep driver settings while removing client cancellation, so
+					// this query must be interrupted by the database's own budget.
+					query = query.WithContext(context.WithoutCancel(query.Statement.Context))
+					var value float64
+					switch dialect {
+					case "mysql":
+						driverError = query.Table("logs").Select("SUM(SLEEP(0.1))").Scan(&value).Error
+					case "postgres":
+						driverError = query.Raw("SELECT pg_sleep(1)").Scan(&value).Error
+					case "clickhouse":
+						driverError = query.Raw("SELECT sleep(1)").Scan(&value).Error
+					}
+					return driverError
+				})
+				require.ErrorIs(t, err, context.DeadlineExceeded)
+				require.Error(t, driverError, "database must reject the running SELECT")
+				t.Logf("native query deadline: %v", driverError)
+				if dialect == "mysql" {
+					var state struct{ Timeout int }
+					require.NoError(t, db.Raw("SELECT @@session.max_execution_time AS timeout").Scan(&state).Error)
+					assert.Zero(t, state.Timeout, "SELECT hint must not alter pooled session state")
+				} else if dialect == "postgres" {
+					var setting string
+					require.NoError(t, db.Raw("SHOW statement_timeout").Scan(&setting).Error)
+					assert.Equal(t, "0", setting, "SET LOCAL must not survive transaction cleanup")
+				}
 			})
 		})
 	}

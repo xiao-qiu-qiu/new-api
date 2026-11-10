@@ -3,11 +3,14 @@ package controller
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -22,6 +25,9 @@ import (
 	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/clickhouse"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
@@ -75,11 +81,15 @@ func useLogExportDatabases(t *testing.T, mainDB *gorm.DB, logDB *gorm.DB, mainTy
 	previousRedis, previousMemory := common.RedisEnabled, common.MemoryCacheEnabled
 	model.DB, model.LOG_DB = mainDB, logDB
 	common.SetDatabaseTypes(mainType, logType)
-	common.RedisEnabled, common.MemoryCacheEnabled = false, false
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	previousClient := common.RDB
+	common.RedisEnabled, common.MemoryCacheEnabled, common.RDB = true, false, client
 	t.Cleanup(func() {
+		assert.NoError(t, client.Close())
 		model.DB, model.LOG_DB = previousDB, previousLogDB
 		common.SetDatabaseTypes(previousMain, previousLog)
-		common.RedisEnabled, common.MemoryCacheEnabled = previousRedis, previousMemory
+		common.RedisEnabled, common.MemoryCacheEnabled, common.RDB = previousRedis, previousMemory, previousClient
 	})
 }
 
@@ -99,10 +109,43 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 	} {
 		t.Run(tc.kind, func(t *testing.T) {
 			dsn := os.Getenv(tc.env)
-			if tc.env != "" && dsn == "" {
+			testDSN := os.Getenv("TEST_" + strings.ToUpper(tc.kind) + "_DSN")
+			if tc.env != "" && dsn == "" && testDSN == "" {
 				t.Skip(tc.env + " is not configured")
 			}
-			db, isolatedDSN := newAuditTestDatabase(t, tc.kind, dsn)
+			var db *gorm.DB
+			var isolatedDSN string
+			if testDSN != "" && tc.kind != "sqlite" {
+				// TEST_* databases are already isolated and need no CREATE
+				// DATABASE privilege. Do not invoke unrelated audit migrations.
+				var driver gorm.Dialector
+				switch tc.kind {
+				case "mysql":
+					driver = mysql.Open(testDSN)
+				case "postgres":
+					driver = postgres.Open(testDSN)
+				case "clickhouse":
+					driver = clickhouse.Open(testDSN)
+				}
+				var err error
+				db, err = gorm.Open(driver, &gorm.Config{})
+				require.NoError(t, err)
+				require.False(t, db.Migrator().HasTable(&model.Log{}), "TEST_* DSN must point at an isolated log database")
+				if tc.kind != "clickhouse" {
+					require.False(t, db.Migrator().HasTable(&model.Channel{}))
+				}
+				sqlDB, err := db.DB()
+				require.NoError(t, err)
+				t.Cleanup(func() { assert.NoError(t, sqlDB.Close()) })
+				t.Cleanup(func() {
+					assert.NoError(t, db.Migrator().DropTable(&model.Log{}))
+					if tc.kind != "clickhouse" {
+						assert.NoError(t, db.Migrator().DropTable(&model.Channel{}))
+					}
+				})
+			} else {
+				db, isolatedDSN = newAuditTestDatabase(t, tc.kind, dsn)
+			}
 			mainDB, mainType := db, tc.typ
 			if tc.kind == "clickhouse" {
 				mainDB, _ = newAuditTestDatabase(t, "sqlite", "")
@@ -111,8 +154,12 @@ func TestLogExportDatabaseMatrix(t *testing.T) {
 			useLogExportDatabases(t, mainDB, db, mainType, tc.typ)
 			require.NoError(t, mainDB.AutoMigrate(&model.Channel{}))
 			if tc.kind == "clickhouse" {
-				t.Setenv("LOG_SQL_DSN", isolatedDSN)
-				require.NoError(t, model.InitLogDB())
+				if testDSN != "" {
+					require.NoError(t, db.Set("gorm:table_options", "ENGINE=MergeTree() ORDER BY (created_at, request_id)").AutoMigrate(&model.Log{}))
+				} else {
+					t.Setenv("LOG_SQL_DSN", isolatedDSN)
+					require.NoError(t, model.InitLogDB())
+				}
 			} else {
 				require.NoError(t, db.AutoMigrate(&model.Log{}))
 			}
@@ -363,6 +410,390 @@ func TestActiveRequestsAuthorization(t *testing.T) {
 					assert.Zero(t, item.Channel)
 					assert.Empty(t, item.ChannelName)
 				}
+			}
+		})
+	}
+}
+
+func TestLogQueryProtection(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, _ := newAuditTestDatabase(t, "sqlite", "")
+	useLogExportDatabases(t, db, db, common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
+	require.NoError(t, db.AutoMigrate(&model.Log{}))
+	for _, handler := range []gin.HandlerFunc{GetUserLogs, GetLogsSelfStat, ExportUserLogs} {
+		for _, query := range []string{"error_keyword=403", "error_code=cyber_policy", "request_result=failed"} {
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/api/log/self?"+query, nil)
+			ctx.Set("id", 301)
+			ctx.Set("role", common.RoleCommonUser)
+			handler(ctx)
+			assert.Equal(t, http.StatusForbidden, recorder.Code)
+			assert.Contains(t, recorder.Body.String(), "Error log searches are only available to administrators")
+		}
+	}
+	now := time.Now().Unix()
+	for _, handler := range []gin.HandlerFunc{GetUserLogs, GetLogsSelfStat, ExportUserLogs, GetAllLogs, GetLogsStat, ExportAllLogs} {
+		for _, query := range []string{
+			fmt.Sprintf("error_keyword=403&start_timestamp=%d&end_timestamp=%d", now-30*24*3600, now),
+			"start_timestamp=-1", "start_timestamp=oops", "end_timestamp=999999999999999999999",
+			"start_timestamp=4&end_timestamp=3", "channel=-1", "type=500", "type=1&type=2",
+			"error_keyword=" + strings.Repeat("a", 257), "error_code=" + strings.Repeat("b", 129),
+			"request_result=unknown",
+		} {
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/api/log?"+query, nil)
+			ctx.Set("id", 302)
+			ctx.Set("role", common.RoleAdminUser)
+			handler(ctx)
+			assert.Equal(t, http.StatusBadRequest, recorder.Code, query)
+		}
+	}
+	for _, query := range []string{"page_size=-1", "ps=-1", "size=-1", "p=-1", "p=0", "p=9223372036854775807&page_size=100", "page_size=oops", "p=1&p=2", "error_keyword=403&p=2"} {
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/api/log?"+query, nil)
+		ctx.Set("id", 303)
+		ctx.Set("role", common.RoleAdminUser)
+		GetAllLogs(ctx)
+		assert.Equal(t, http.StatusBadRequest, recorder.Code, query)
+	}
+	t.Run("missing bounds search only the last day", func(t *testing.T) {
+		require.NoError(t, db.Create(&[]model.Log{
+			{UserId: 304, Type: model.LogTypeError, Content: "403", CreatedAt: now - 10, RequestId: "recent"},
+			{UserId: 304, Type: model.LogTypeError, Content: "403", CreatedAt: now - 25*3600, RequestId: "old"},
+		}).Error)
+		response := callLogHandler(t, GetUserLogs, 304, common.RoleAdminUser, "error_keyword=403")[0]
+		require.Equal(t, true, response["success"])
+		data := response["data"].(map[string]any)
+		assert.Equal(t, false, data["total_exact"])
+		assert.EqualValues(t, 1, data["total"])
+		items := data["items"].([]any)
+		require.Len(t, items, 1)
+		assert.Equal(t, "recent", items[0].(map[string]any)["request_id"])
+	})
+	t.Run("ordinary page size remains capped", func(t *testing.T) {
+		response := callLogHandler(t, GetUserLogs, 305, common.RoleCommonUser, "page_size=101")[0]
+		require.Equal(t, true, response["success"])
+		assert.EqualValues(t, 100, response["data"].(map[string]any)["page_size"])
+	})
+	t.Run("common pagination clamps negatives and prevents overflow", func(t *testing.T) {
+		for _, query := range []string{"page_size=-1&p=-2", "ps=-1", "size=-1", "p=9223372036854775807&page_size=100"} {
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/?"+query, nil)
+			page := common.GetPageQuery(ctx)
+			assert.GreaterOrEqual(t, page.Page, 1)
+			assert.GreaterOrEqual(t, page.PageSize, 1)
+			assert.LessOrEqual(t, page.PageSize, 100)
+			assert.GreaterOrEqual(t, page.GetStartIdx(), 0)
+			assert.GreaterOrEqual(t, page.GetEndIdx(), page.GetStartIdx())
+		}
+	})
+	t.Run("canceled client does not reach the database", func(t *testing.T) {
+		for _, handler := range []gin.HandlerFunc{GetUserLogs, GetLogsSelfStat} {
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			requestContext, cancel := context.WithCancel(context.Background())
+			cancel()
+			ctx.Request = httptest.NewRequest(http.MethodGet, "/api/log/self", nil).WithContext(requestContext)
+			ctx.Set("id", 306)
+			ctx.Set("role", common.RoleCommonUser)
+			handler(ctx)
+			assert.Equal(t, http.StatusRequestTimeout, recorder.Code)
+		}
+	})
+	t.Run("ordinary user scans share the heavy budget without losing permission", func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), model.LogQueryTimeout)
+		defer cancel()
+		release, retry, err := service.AcquireLogQuery(ctx, 320, true, false)
+		require.NoError(t, err)
+		require.Zero(t, retry)
+		defer release()
+		for _, handler := range []gin.HandlerFunc{GetUserLogs, GetLogsSelfStat} {
+			for _, query := range []string{
+				fmt.Sprintf("model_name=gpt&start_timestamp=%d&end_timestamp=%d", now-60, now),
+				fmt.Sprintf("token_name=key&start_timestamp=%d&end_timestamp=%d", now-60, now),
+				fmt.Sprintf("start_timestamp=%d&end_timestamp=%d", now-30*24*3600, now),
+			} {
+				recorder := httptest.NewRecorder()
+				request, _ := gin.CreateTestContext(recorder)
+				request.Request = httptest.NewRequest(http.MethodGet, "/api/log/self?"+query, nil)
+				request.Set("id", 321)
+				request.Set("role", common.RoleCommonUser)
+				handler(request)
+				assert.Equal(t, http.StatusTooManyRequests, recorder.Code, query)
+			}
+			response := callLogHandler(t, handler, 321, common.RoleCommonUser, fmt.Sprintf("start_timestamp=%d&end_timestamp=%d", now-60, now))[0]
+			assert.Equal(t, true, response["success"], "recent unfiltered reads do not compete for the scan slot")
+		}
+	})
+	t.Run("query deadline reaches database and returns 504", func(t *testing.T) {
+		require.NoError(t, db.Callback().Query().Before("gorm:query").Register("test:log-deadline", func(tx *gorm.DB) {
+			deadline, ok := tx.Statement.Context.Deadline()
+			assert.True(t, ok)
+			assert.LessOrEqual(t, time.Until(deadline), model.LogQueryTimeout)
+			tx.AddError(context.DeadlineExceeded)
+		}))
+		t.Cleanup(func() { db.Callback().Query().Remove("test:log-deadline") })
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Request = httptest.NewRequest(http.MethodGet, "/api/log/self", nil)
+		ctx.Set("id", 307)
+		ctx.Set("role", common.RoleCommonUser)
+		GetUserLogs(ctx)
+		assert.Equal(t, http.StatusGatewayTimeout, recorder.Code)
+		assert.Contains(t, recorder.Body.String(), "Log query timed out")
+	})
+}
+
+func TestLogQueryConcurrencyAndRate(t *testing.T) {
+	for _, useRedis := range []bool{false, true} {
+		t.Run(fmt.Sprintf("redis=%v", useRedis), func(t *testing.T) {
+			previousRedis, previousClient := common.RedisEnabled, common.RDB
+			common.RedisEnabled = useRedis
+			var server *miniredis.Miniredis
+			if useRedis {
+				server = miniredis.RunT(t)
+				client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+				common.RDB = client
+				t.Cleanup(func() { assert.NoError(t, client.Close()) })
+			}
+			t.Cleanup(func() { common.RedisEnabled, common.RDB = previousRedis, previousClient })
+			ctx, cancel := context.WithTimeout(context.Background(), model.LogQueryTimeout)
+			defer cancel()
+			first, retry, err := service.AcquireLogQuery(ctx, 401, false, false)
+			require.NoError(t, err)
+			require.Zero(t, retry)
+			t.Cleanup(first)
+			second, retry, err := service.AcquireLogQuery(ctx, 401, false, false)
+			require.NoError(t, err)
+			require.Zero(t, retry, "list and stat may execute together")
+			t.Cleanup(second)
+			_, retry, err = service.AcquireLogQuery(ctx, 401, false, false)
+			require.NoError(t, err)
+			assert.Positive(t, retry, "user concurrency is two")
+			third, retry, err := service.AcquireLogQuery(ctx, 402, true, false)
+			require.NoError(t, err)
+			require.Zero(t, retry)
+			t.Cleanup(third)
+			_, retry, err = service.AcquireLogQuery(ctx, 403, true, false)
+			require.NoError(t, err)
+			assert.Positive(t, retry, "heavy global concurrency is one")
+			_, retry, err = service.AcquireLogQuery(ctx, 403, false, true)
+			require.NoError(t, err)
+			assert.Positive(t, retry, "exports share the heavy slot")
+			fourth, retry, err := service.AcquireLogQuery(ctx, 403, false, false)
+			require.NoError(t, err)
+			require.Zero(t, retry)
+			t.Cleanup(fourth)
+			_, retry, err = service.AcquireLogQuery(ctx, 404, false, false)
+			require.NoError(t, err)
+			assert.Positive(t, retry, "global concurrency is four")
+			first()
+			first() // Idempotent release cannot remove another reservation.
+			second()
+			third()
+			fourth()
+			for range 10 {
+				release, retry, err := service.AcquireLogQuery(ctx, 405, true, false)
+				require.NoError(t, err)
+				require.Zero(t, retry)
+				release()
+			}
+			_, retry, err = service.AcquireLogQuery(ctx, 405, true, false)
+			require.NoError(t, err)
+			assert.Positive(t, retry, "completed requests still spend the rate budget")
+
+			// The controller uses 429 for administrators too, with Retry-After.
+			release, retry, err := service.AcquireLogQuery(ctx, 406, true, false)
+			require.NoError(t, err)
+			require.Zero(t, retry)
+			t.Cleanup(release)
+			recorder := httptest.NewRecorder()
+			request, _ := gin.CreateTestContext(recorder)
+			request.Request = httptest.NewRequest(http.MethodGet, "/api/log?"+url.Values{"error_keyword": {"403"}}.Encode(), nil)
+			request.Set("id", 407)
+			request.Set("role", common.RoleAdminUser)
+			GetAllLogs(request)
+			assert.Equal(t, http.StatusTooManyRequests, recorder.Code)
+			assert.NotEmpty(t, recorder.Header().Get("Retry-After"))
+			release()
+			if useRedis {
+				longCtx, longCancel := context.WithTimeout(context.Background(), model.LogExportQueryTimeout)
+				defer longCancel()
+				longRelease, retry, err := service.AcquireLogQuery(longCtx, 410, false, true)
+				require.NoError(t, err)
+				require.Zero(t, retry)
+				t.Cleanup(longRelease)
+				shortRelease, retry, err := service.AcquireLogQuery(ctx, 411, false, false)
+				require.NoError(t, err)
+				require.Zero(t, retry)
+				t.Cleanup(shortRelease)
+				server.FastForward(11 * time.Second)
+				assert.True(t, server.Exists("{log-query}:global"), "short query must not shorten the export's global lease")
+				assert.True(t, server.Exists("{log-query}:heavy-global"))
+				_, retry, err = service.AcquireLogQuery(ctx, 412, true, false)
+				require.NoError(t, err)
+				assert.Positive(t, retry)
+			}
+		})
+	}
+}
+
+func TestLogQueryCanceledLease(t *testing.T) {
+	for _, tc := range []struct{ useRedis, expired bool }{{false, false}, {false, true}, {true, false}, {true, true}} {
+		useRedis := tc.useRedis
+		t.Run(fmt.Sprintf("redis=%v/expired=%v", useRedis, tc.expired), func(t *testing.T) {
+			check := func(t *testing.T) {
+				previousRedis, previousClient := common.RedisEnabled, common.RDB
+				common.RedisEnabled = useRedis
+				t.Cleanup(func() { common.RedisEnabled, common.RDB = previousRedis, previousClient })
+				var server *miniredis.Miniredis
+				if useRedis {
+					server = miniredis.RunT(t)
+					client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+					common.RDB = client
+					t.Cleanup(func() { assert.NoError(t, client.Close()) })
+				}
+				budget := model.LogQueryTimeout
+				if tc.expired {
+					budget = 100 * time.Millisecond
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), budget)
+				defer cancel()
+				release, retry, err := service.AcquireLogQuery(ctx, 701, true, false)
+				require.NoError(t, err)
+				require.Zero(t, retry)
+				if tc.expired {
+					<-ctx.Done()
+				} else {
+					cancel()
+				}
+				release()
+				next, nextCancel := context.WithTimeout(context.Background(), model.LogQueryTimeout)
+				defer nextCancel()
+				unexpectedRelease, retry, err := service.AcquireLogQuery(next, 702, true, false)
+				require.NoError(t, err)
+				if unexpectedRelease != nil {
+					unexpectedRelease()
+				}
+				assert.Positive(t, retry, "cancellation must retain the global scan lease")
+				if useRedis {
+					server.FastForward(11 * time.Second)
+				} else {
+					// The synctest clock advances without wall-clock waiting.
+					<-time.After(11 * time.Second)
+				}
+				recovered, recoveredCancel := context.WithTimeout(context.Background(), model.LogQueryTimeout)
+				defer recoveredCancel()
+				release, retry, err = service.AcquireLogQuery(recovered, 702, true, false)
+				require.NoError(t, err)
+				require.Zero(t, retry, "the retained lease must expire")
+				release()
+			}
+			if useRedis {
+				check(t)
+			} else {
+				synctest.Test(t, check)
+			}
+		})
+	}
+}
+
+type failingLogExportWriter struct {
+	gin.ResponseWriter
+	failed bool
+	cancel context.CancelFunc
+}
+
+func (w *failingLogExportWriter) Write(data []byte) (int, error) {
+	if !w.failed {
+		w.failed = true
+		if w.cancel != nil {
+			w.cancel()
+		}
+		return 0, io.ErrClosedPipe
+	}
+	return w.ResponseWriter.Write(data)
+}
+
+func TestLogExportFailureRetainsQueryLease(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, outcome := range []string{"sql_error", "write_error", "client_cancel"} {
+		t.Run(outcome, func(t *testing.T) {
+			db, _ := newAuditTestDatabase(t, "sqlite", "")
+			useLogExportDatabases(t, db, db, common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
+			require.NoError(t, db.AutoMigrate(&model.Log{}))
+			require.NoError(t, db.Create(&model.Log{UserId: 705, Type: model.LogTypeConsume, CreatedAt: time.Now().Unix() - 10}).Error)
+			if outcome == "sql_error" {
+				require.NoError(t, db.Callback().Query().Before("gorm:query").Register("test:export-connection-error", func(tx *gorm.DB) {
+					tx.AddError(io.ErrUnexpectedEOF)
+				}))
+			}
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			requestCtx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			c.Request = httptest.NewRequest(http.MethodGet, "/api/log/self/export", nil).WithContext(requestCtx)
+			c.Set("id", 705)
+			c.Set("role", common.RoleAdminUser)
+			if outcome != "sql_error" {
+				writer := &failingLogExportWriter{ResponseWriter: c.Writer}
+				if outcome == "client_cancel" {
+					writer.cancel = cancel
+				}
+				c.Writer = writer
+			}
+			ExportUserLogs(c)
+			assert.True(t, c.GetBool("log_query_failed"), "stream failure must be recorded despite HTTP 200")
+			assert.Equal(t, http.StatusOK, c.Writer.Status())
+			next, nextCancel := context.WithTimeout(context.Background(), model.LogQueryTimeout)
+			defer nextCancel()
+			release, retry, err := service.AcquireLogQuery(next, 706, true, false)
+			require.NoError(t, err)
+			if release != nil {
+				release()
+			}
+			assert.Positive(t, retry, "stream failures must not release the database budget")
+		})
+	}
+}
+
+func TestLogQueryFinishOutcome(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	for _, outcome := range []string{"success", "server_error", "stream_error"} {
+		t.Run(outcome, func(t *testing.T) {
+			previousRedis, previousClient := common.RedisEnabled, common.RDB
+			server := miniredis.RunT(t)
+			client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+			common.RedisEnabled, common.RDB = true, client
+			t.Cleanup(func() {
+				common.RedisEnabled, common.RDB = previousRedis, previousClient
+				assert.NoError(t, client.Close())
+			})
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodGet, "/api/log/export", nil)
+			c.Set("id", 703)
+			ctx, finish, ok := beginLogQuery(c, true, true)
+			require.True(t, ok)
+			if outcome == "server_error" {
+				logQueryError(c, fmt.Errorf("SQL connection lost"))
+			} else if outcome == "stream_error" {
+				c.Set("log_query_failed", true)
+			}
+			finish()
+			assert.ErrorIs(t, ctx.Err(), context.Canceled)
+			next, cancel := context.WithTimeout(context.Background(), model.LogQueryTimeout)
+			defer cancel()
+			release, retry, err := service.AcquireLogQuery(next, 704, true, false)
+			require.NoError(t, err)
+			if release != nil {
+				release()
+			}
+			if outcome == "success" {
+				assert.Zero(t, retry, "successful finish releases before canceling its context")
+			} else {
+				assert.Positive(t, retry, "uncertain SQL/stream outcomes must retain the lease")
 			}
 		})
 	}

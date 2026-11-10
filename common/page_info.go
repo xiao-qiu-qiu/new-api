@@ -15,10 +15,24 @@ type PageInfo struct {
 }
 
 func (p *PageInfo) GetStartIdx() int {
+	if p.Page <= 1 || p.PageSize <= 0 {
+		return 0
+	}
+	maxInt := int(^uint(0) >> 1)
+	if p.Page-1 > maxInt/p.PageSize {
+		return maxInt
+	}
 	return (p.Page - 1) * p.PageSize
 }
 
 func (p *PageInfo) GetEndIdx() int {
+	if p.Page <= 0 || p.PageSize <= 0 {
+		return 0
+	}
+	maxInt := int(^uint(0) >> 1)
+	if p.Page > maxInt/p.PageSize {
+		return maxInt
+	}
 	return p.Page * p.PageSize
 }
 
@@ -48,13 +62,7 @@ func GetPageQuery(c *gin.Context) *PageInfo {
 		pageInfo.PageSize = pageSize
 	}
 	if pageInfo.Page < 1 {
-		// 兼容
-		page, _ := strconv.Atoi(c.Query("p"))
-		if page != 0 {
-			pageInfo.Page = page
-		} else {
-			pageInfo.Page = 1
-		}
+		pageInfo.Page = 1
 	}
 
 	if pageInfo.PageSize == 0 {
@@ -77,6 +85,11 @@ func GetPageQuery(c *gin.Context) *PageInfo {
 	if pageInfo.PageSize > 100 {
 		pageInfo.PageSize = 100
 	}
+	if pageInfo.PageSize < 1 {
+		pageInfo.PageSize = max(1, min(ItemsPerPage, 100))
+	}
+	maxInt := int(^uint(0) >> 1)
+	pageInfo.Page = min(pageInfo.Page, maxInt/pageInfo.PageSize)
 
 	return pageInfo
 }

@@ -2,6 +2,7 @@ package model
 
 import (
 	"strings"
+	"unicode/utf8"
 
 	"github.com/QuantumNous/new-api/common"
 	"gorm.io/gorm"
@@ -9,12 +10,76 @@ import (
 
 // Validate rejects unknown result values before exports start writing a response.
 func (f LogFilter) Validate() error {
+	for _, field := range []struct {
+		value string
+		limit int
+	}{
+		{f.ErrorKeyword, 256}, {f.ErrorCode, 128}, {f.RequestResult, 32},
+		{f.ModelName, 256}, {f.Username, 256}, {f.TokenName, 256},
+		{f.Group, 128}, {f.RequestId, 64}, {f.UpstreamRequestId, 128},
+	} {
+		if len(field.value) > field.limit || !utf8.ValidString(field.value) || strings.ContainsRune(field.value, 0) {
+			return common.NewMessage("Invalid log search parameters")
+		}
+	}
+	// Bound arithmetic as well as the timestamps passed to every dialect.
+	const maxTimestamp = 253402300799 // 9999-12-31 UTC
+	if f.Type < 0 || f.Type > LogTypeLogin || f.Channel < 0 ||
+		f.StartTimestamp < 0 || f.EndTimestamp < 0 ||
+		f.StartTimestamp > maxTimestamp || f.EndTimestamp > maxTimestamp ||
+		(f.EndTimestamp != 0 && f.StartTimestamp > f.EndTimestamp) {
+		return common.NewMessage("Invalid log search parameters")
+	}
 	switch f.RequestResult {
 	case "", "success", "failed", "stream_error":
 		return nil
 	default:
 		return common.NewMessage("Invalid request result")
 	}
+}
+
+func (f LogFilter) IsHeavy() bool {
+	return f.ErrorKeyword != "" || f.ErrorCode != "" || f.RequestResult != ""
+}
+
+// NeedsScanBudget concerns query cost, not permission. Name fragments and
+// long historical COUNT/aggregations remain available to users but share the
+// serial scan budget with administrator error searches and exports.
+func (f LogFilter) NeedsScanBudget(now int64) bool {
+	if f.IsHeavy() || f.ModelName != "" || f.TokenName != "" || f.Username != "" {
+		return true
+	}
+	end := now
+	if f.EndTimestamp != 0 {
+		end = min(end, f.EndTimestamp)
+	}
+	return f.StartTimestamp == 0 || end-f.StartTimestamp > 24*60*60
+}
+
+// LimitErrorSearchRange bounds JSON/text scans even for administrators. The
+// returned end also freezes a missing upper bound for subsequent cursor pages.
+func (f LogFilter) LimitErrorSearchRange(now int64) (LogFilter, error) {
+	if err := f.Validate(); err != nil {
+		return f, err
+	}
+	if !f.IsHeavy() {
+		return f, nil
+	}
+	end := now
+	if f.EndTimestamp != 0 {
+		end = min(end, f.EndTimestamp)
+	}
+	if f.StartTimestamp == 0 {
+		f.StartTimestamp = max(0, end-24*60*60)
+	}
+	if f.StartTimestamp > end {
+		return f, common.NewMessage("Invalid log search parameters")
+	}
+	if end-f.StartTimestamp > 24*60*60 {
+		return f, common.NewMessage("Error log searches cannot exceed 24 hours")
+	}
+	f.EndTimestamp = end
+	return f, nil
 }
 
 func logSearchJSON(source string) string {
