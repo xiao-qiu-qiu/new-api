@@ -588,6 +588,7 @@ func TestChannelFailoverProbeContractAndIsolation(t *testing.T) {
 	assert.Equal(t, "priority", request.URL.Query().Get("service_tier"))
 	assert.Equal(t, "websocket", request.URL.Query().Get("transport"))
 	assert.Equal(t, "true", request.URL.Query().Get("require_compact"))
+	assert.NotContains(t, request.URL.Query(), "api_format")
 	assert.Zero(t, request.ContentLength)
 	primary.Key = "rotated-secret"
 	assert.NotEqual(t, key, makeChannelFailoverKey(c, primary, "alias", setting))
@@ -622,6 +623,60 @@ func TestChannelFailoverProbeContractAndIsolation(t *testing.T) {
 	assert.Zero(t, redirected.Load(), "credentials never follow a redirect")
 	primary.BaseURL = nil
 	assert.Equal(t, "unknown", probeChannelAvailability(context.Background(), entry).State)
+
+	t.Run("native_chat_format", func(t *testing.T) {
+		db := channelFailoverDatabase(t, sqlite.Open(":memory:"))
+		primary, setting := channelFailoverFixture(t, db, true)
+		global := model_setting.GetGlobalSettings()
+		previous := *global
+		t.Cleanup(func() { *global = previous })
+		global.PassThroughRequestEnabled = false
+		global.ChatCompletionsToResponsesPolicy = model_setting.ChatCompletionsToResponsesPolicy{}
+		seen := make(chan *http.Request, 1)
+		var echoFormat atomic.Value
+		echoFormat.Store("chat_completions")
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			seen <- req.Clone(req.Context())
+			response := map[string]any{
+				"object": "routing.availability", "model": req.URL.Query().Get("model"),
+				"state": "empty", "checked_at": time.Now().Unix(),
+			}
+			if format := echoFormat.Load().(string); format != "" {
+				response["api_format"] = format
+			}
+			body, _ := common.Marshal(response)
+			_, _ = w.Write(body)
+		}))
+		defer server.Close()
+		primary.Type, primary.BaseURL = constant.ChannelTypeSub2API, &server.URL
+		chat := newChannelFailoverContext(t)
+		chat.Request.URL.Path = "/v1/chat/completions"
+		key := makeChannelFailoverKey(chat, primary, "alias", setting)
+		channelFailover.observe(key, primary, setting, time.Now())
+		entry := channelFailover.entries[key]
+		require.NotNil(t, entry)
+		result := probeChannelAvailability(context.Background(), entry)
+		require.Equal(t, "empty", result.State)
+		assert.Equal(t, "chat_completions", (<-seen).URL.Query().Get("api_format"))
+		channelFailover.finish(entry, entry.revision, result, time.Now())
+		recordChannelFailoverAvailability(t, primary, setting, "ready")
+		assert.Equal(t, setting.FallbackChannelID, selectChannelFailoverForTest(t, chat).Id, "native Chat retains its empty account pool independently of Responses")
+		assert.Equal(t, primary.Id, selectChannelFailoverForTest(t, newChannelFailoverContext(t)).Id, "an empty Chat pool must not hide ready Responses accounts")
+
+		for _, format := range []string{"responses", ""} {
+			echoFormat.Store(format)
+			assert.Equal(t, "unknown", probeChannelAvailability(context.Background(), entry).State, "a mismatched or missing format echo cannot mark native Chat empty")
+			assert.Equal(t, "chat_completions", (<-seen).URL.Query().Get("api_format"))
+		}
+		global.ChatCompletionsToResponsesPolicy = model_setting.ChatCompletionsToResponsesPolicy{Enabled: true, AllChannels: true, ModelPatterns: []string{"^alias$"}}
+		converted := newChannelFailoverContext(t)
+		converted.Request.URL.Path = "/v1/chat/completions"
+		convertedKey := makeChannelFailoverKey(converted, primary, "alias", setting)
+		convertedEntry := &channelFailoverEntry{key: convertedKey, channel: primary, setting: setting}
+		assert.Equal(t, "empty", probeChannelAvailability(context.Background(), convertedEntry).State)
+		assert.NotContains(t, (<-seen).URL.Query(), "api_format", "converted Chat keeps the legacy Responses probe contract")
+		assert.Equal(t, primary.Id, selectChannelFailoverForTest(t, converted).Id, "converted Chat uses Responses availability instead of the native Chat pool")
+	})
 }
 
 func TestChannelFailoverProbeMaintenanceFence(t *testing.T) {
@@ -1312,12 +1367,13 @@ func TestChannelFailoverCapacityKeepsPrimaryEnabledForRecovery(t *testing.T) {
 
 func TestChannelFailoverOnlyProbesSupportedTextRoutes(t *testing.T) {
 	db := channelFailoverDatabase(t, sqlite.Open(":memory:"))
-	primary, _ := channelFailoverFixture(t, db, true)
+	primary, setting := channelFailoverFixture(t, db, true)
 	global := model_setting.GetGlobalSettings()
 	previous := *global
 	t.Cleanup(func() { *global = previous })
-	global.ChatCompletionsToResponsesPolicy.Enabled = false
-	for _, path := range []string{"/v1/images/generations", "/v1/images/edits", "/v1/audio/speech", "/v1/audio/transcriptions", "/v1/embeddings", "/v1/videos", "/v1/messages", "/v1/chat/completions"} {
+	global.PassThroughRequestEnabled = false
+	global.ChatCompletionsToResponsesPolicy = model_setting.ChatCompletionsToResponsesPolicy{}
+	for _, path := range []string{"/v1/images/generations", "/v1/images/edits", "/v1/audio/speech", "/v1/audio/transcriptions", "/v1/embeddings", "/v1/videos", "/v1/messages"} {
 		c := newChannelFailoverContext(t)
 		c.Request.URL.Path = path
 		assert.Nil(t, prepareChannelFailover(c, "alias", "default", 0), "%s must not inherit Responses capacity with an empty model filter", path)
@@ -1328,15 +1384,60 @@ func TestChannelFailoverOnlyProbesSupportedTextRoutes(t *testing.T) {
 		c.Request.URL.Path = path
 		assert.NotNil(t, prepareChannelFailover(c, "alias", "default", 0))
 	}
-	global.PassThroughRequestEnabled = false
-	global.ChatCompletionsToResponsesPolicy = model_setting.ChatCompletionsToResponsesPolicy{Enabled: true, AllChannels: true, ModelPatterns: []string{"^alias$"}}
-	converted := newChannelFailoverContext(t)
-	converted.Request.URL.Path = "/v1/chat/completions"
-	assert.NotNil(t, prepareChannelFailover(converted, "alias", "default", 0))
-	primary.SetSetting(kitdto.ChannelSettings{PassThroughBodyEnabled: true})
-	passthrough := newChannelFailoverContext(t)
-	passthrough.Request.URL.Path = "/v1/chat/completions"
-	assert.Nil(t, prepareChannelFailover(passthrough, "alias", "default", 0), "a raw chat passthrough is not a Responses request")
+	for _, tc := range []struct {
+		name               string
+		channelType        int
+		path               string
+		convert            bool
+		globalPassthrough  bool
+		channelPassthrough bool
+		wantFailover       bool
+	}{
+		{name: "openai_native_chat", channelType: constant.ChannelTypeOpenAI, path: "/v1/chat/completions"},
+		{name: "openai_converted_chat", channelType: constant.ChannelTypeOpenAI, path: "/v1/chat/completions", convert: true, wantFailover: true},
+		{name: "openai_global_passthrough", channelType: constant.ChannelTypeOpenAI, path: "/v1/chat/completions", convert: true, globalPassthrough: true},
+		{name: "openai_playground_channel_passthrough", channelType: constant.ChannelTypeOpenAI, path: "/pg/chat/completions", convert: true, channelPassthrough: true},
+		{name: "sub2api_native_chat", channelType: constant.ChannelTypeSub2API, path: "/v1/chat/completions", wantFailover: true},
+		{name: "sub2api_playground_chat", channelType: constant.ChannelTypeSub2API, path: "/pg/chat/completions", wantFailover: true},
+		{name: "sub2api_global_passthrough", channelType: constant.ChannelTypeSub2API, path: "/v1/chat/completions", globalPassthrough: true},
+		{name: "sub2api_playground_channel_passthrough", channelType: constant.ChannelTypeSub2API, path: "/pg/chat/completions", channelPassthrough: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			primary.Type = tc.channelType
+			primary.Priority = common.GetPointer(int64(100))
+			primary.SetSetting(kitdto.ChannelSettings{PassThroughBodyEnabled: tc.channelPassthrough})
+			global.PassThroughRequestEnabled = tc.globalPassthrough
+			global.ChatCompletionsToResponsesPolicy = model_setting.ChatCompletionsToResponsesPolicy{Enabled: tc.convert, AllChannels: true, ModelPatterns: []string{"^alias$"}}
+			c := newChannelFailoverContext(t)
+			c.Request.URL.Path = tc.path
+			key := makeChannelFailoverKey(c, primary, "alias", setting)
+			channelFailover.observe(key, primary, setting, time.Now())
+			entry := channelFailover.entries[key]
+			require.NotNil(t, entry)
+			channelFailover.finish(entry, entry.revision, channelAvailability{State: "empty"}, time.Now())
+			selected := selectChannelFailoverForTest(t, c)
+			assert.Equal(t, tc.wantFailover, HasChannelFailover(c))
+			if !tc.wantFailover {
+				assert.Nil(t, prepareChannelFailover(c, "alias", "default", 0))
+				assert.Equal(t, primary.Id, selected.Id, "ineligible Chat requests retain ordinary priority routing")
+				return
+			}
+			assert.Equal(t, setting.FallbackChannelID, selected.Id, "a known empty primary must be skipped on the first attempt")
+			events := RequestPolicy(c).Events()
+			require.NotEmpty(t, events)
+			selection := events[len(events)-1]
+			assert.Equal(t, setting.FallbackChannelID, selection.ChannelID)
+			assert.Equal(t, PolicyDecision{Action: "select", Reason: "backup_empty", Source: "channel_failover"}, selection.Decision)
+			channelFailover.finish(entry, entry.revision, channelAvailability{State: "ready"}, time.Now())
+			c = newChannelFailoverContext(t)
+			c.Request.URL.Path = tc.path
+			assert.Equal(t, setting.FallbackChannelID, selectChannelFailoverForTest(t, c).Id, "one recovery confirmation keeps the backup")
+			channelFailover.finish(entry, entry.revision, channelAvailability{State: "ready"}, time.Now())
+			c = newChannelFailoverContext(t)
+			c.Request.URL.Path = tc.path
+			assert.Equal(t, primary.Id, selectChannelFailoverForTest(t, c).Id, "two recovery confirmations restore the primary")
+		})
+	}
 }
 
 // Observe a completed fence read, so tests can cancel or finish a deployment

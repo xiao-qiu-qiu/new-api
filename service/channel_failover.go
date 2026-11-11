@@ -39,6 +39,7 @@ var ApplyChannelFailoverProbeHeaders func(*relaycommon.RelayInfo, *http.Request)
 type channelAvailability struct {
 	Object            string `json:"object"`
 	Model             string `json:"model"`
+	APIFormat         string `json:"api_format,omitempty"`
 	State             string `json:"state"`
 	Reason            string `json:"reason"`
 	CheckedAt         int64  `json:"checked_at"`
@@ -53,6 +54,7 @@ type channelFailoverKey struct {
 	Version           [32]byte
 	RequestModel      string
 	Model             string
+	APIFormat         string
 	Tier              string
 	Transport         string
 	Compact           bool
@@ -206,6 +208,12 @@ func makeChannelFailoverKey(c *gin.Context, channel *model.Channel, modelName st
 		}
 	}
 	compact := c.Request != nil && c.Request.URL != nil && strings.HasSuffix(c.Request.URL.Path, "/responses/compact")
+	apiFormat := ""
+	if channel.Type == constant.ChannelTypeSub2API && c.Request != nil && c.Request.URL != nil &&
+		(c.Request.URL.Path == "/v1/chat/completions" || c.Request.URL.Path == "/pg/chat/completions") &&
+		!ShouldChatCompletionsUseResponsesGlobal(channel.Id, channel.Type, modelName) {
+		apiFormat = "chat_completions"
+	}
 	var override struct {
 		ServiceTier string `json:"service_tier"`
 	}
@@ -213,7 +221,11 @@ func makeChannelFailoverKey(c *gin.Context, channel *model.Channel, modelName st
 		tier = override.ServiceTier
 	}
 	fallbackID := channelFailoverBackup(setting, modelName)
-	return channelFailoverKey{ChannelID: channel.Id, FallbackChannelID: fallbackID, Version: channelFailoverConfigVersion(channel, setting, fallbackID), RequestModel: modelName, Model: channel.ResolveServiceTierModel(modelName), Tier: tier, Transport: transport, Compact: compact}
+	return channelFailoverKey{
+		ChannelID: channel.Id, FallbackChannelID: fallbackID, Version: channelFailoverConfigVersion(channel, setting, fallbackID),
+		RequestModel: modelName, Model: channel.ResolveServiceTierModel(modelName), APIFormat: apiFormat,
+		Tier: tier, Transport: transport, Compact: compact,
+	}
 }
 
 func channelFailoverConfigVersion(channel *model.Channel, setting operation_setting.ChannelFailoverSetting, fallbackID int) [32]byte {
@@ -325,6 +337,9 @@ func probeChannelAvailability(parent context.Context, entry *channelFailoverEntr
 	}
 	query := u.Query()
 	query.Set("model", entry.key.Model)
+	if entry.key.APIFormat != "" {
+		query.Set("api_format", entry.key.APIFormat)
+	}
 	query.Set("service_tier", entry.key.Tier)
 	query.Set("transport", entry.key.Transport)
 	query.Set("require_compact", strconv.FormatBool(entry.key.Compact))
@@ -380,8 +395,11 @@ func probeChannelAvailability(parent context.Context, entry *channelFailoverEntr
 		data, readErr := io.ReadAll(io.LimitReader(response.Body, 16*1024+1))
 		_ = response.Body.Close()
 		var availability channelAvailability
+		// Require a format acknowledgement before using the probe's account
+		// pool for native Chat; legacy probes only evaluate Responses accounts.
 		if response.StatusCode != http.StatusOK || readErr != nil || len(data) > 16*1024 || common.Unmarshal(data, &availability) != nil ||
 			availability.Object != "routing.availability" || availability.Model != entry.key.Model || availability.CheckedAt <= 0 ||
+			entry.key.APIFormat != "" && availability.APIFormat != entry.key.APIFormat ||
 			time.Since(time.Unix(availability.CheckedAt, 0)) > 10*time.Second || time.Until(time.Unix(availability.CheckedAt, 0)) > 5*time.Second {
 			return unknown
 		}
@@ -477,12 +495,13 @@ func prepareChannelFailover(c *gin.Context, modelName, usingGroup string, prefer
 	switch c.Request.URL.Path {
 	case "/v1/responses", "/v1/responses/compact":
 	case "/v1/chat/completions", "/pg/chat/completions":
+		// Native Sub2API Chat probes its own endpoint capability. Other providers
+		// must convert Chat to use the Responses capacity contract.
 		if model_setting.GetGlobalSettings().PassThroughRequestEnabled || primary.GetSetting().PassThroughBodyEnabled ||
-			!ShouldChatCompletionsUseResponsesGlobal(primary.Id, primary.Type, modelName) {
+			primary.Type != constant.ChannelTypeSub2API && !ShouldChatCompletionsUseResponsesGlobal(primary.Id, primary.Type, modelName) {
 			return nil
 		}
 	default:
-		// The availability contract describes native Responses scheduling.
 		// Other endpoints retain their own provider capabilities and routing.
 		return nil
 	}
