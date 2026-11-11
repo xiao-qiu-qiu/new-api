@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -616,4 +617,230 @@ func TestStreamKeepAliveCancellation(t *testing.T) {
 	_, err := c.Writer.WriteString("data: done\n\n")
 	require.NoError(t, err)
 	require.True(t, strings.HasSuffix(recorder.Body.String(), "data: done\n\n"))
+}
+
+func TestRelayResponsesStreamFailureAccounting(t *testing.T) {
+	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
+		t.Run(dialect.kind, func(t *testing.T) {
+			dsn := os.Getenv(dialect.env)
+			if dialect.kind != "sqlite" && dsn == "" {
+				t.Skip(dialect.env + " not configured")
+			}
+			db := modelManagementDB(t, dialect.kind, dsn)
+			require.NoError(t, i18n.Init())
+			require.NoError(t, db.AutoMigrate(&model.Token{}, &model.Log{}))
+			previousRetries, previousCount := common.RetryTimes, constant.CountToken
+			previousLogs, previousErrors := common.LogConsumeEnabled, constant.ErrorLogEnabled
+			previousBatch, previousExport := common.BatchUpdateEnabled, common.DataExportEnabled
+			previousDisable := common.AutomaticDisableChannelEnabled
+			quotaSetting := operation_setting.GetQuotaSetting()
+			previousQuota := *quotaSetting
+			general := operation_setting.GetGeneralSetting()
+			previousPing := general.PingIntervalEnabled
+			previousGroups := common.GetJsonString(ratio_setting.GetGroupRatioCopy())
+			common.RetryTimes, constant.CountToken = 1, true
+			common.LogConsumeEnabled, constant.ErrorLogEnabled = true, false
+			common.BatchUpdateEnabled, common.DataExportEnabled = false, false
+			common.AutomaticDisableChannelEnabled = false
+			quotaSetting.StreamDisconnectMode, quotaSetting.StreamDrainTimeoutSeconds = "drain", 5
+			quotaSetting.TrustQuotaUSD = 0
+			general.PingIntervalEnabled = false
+			t.Cleanup(func() {
+				common.RetryTimes, constant.CountToken = previousRetries, previousCount
+				common.LogConsumeEnabled, constant.ErrorLogEnabled = previousLogs, previousErrors
+				common.BatchUpdateEnabled, common.DataExportEnabled = previousBatch, previousExport
+				common.AutomaticDisableChannelEnabled = previousDisable
+				*quotaSetting = previousQuota
+				general.PingIntervalEnabled = previousPing
+				require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(previousGroups))
+			})
+			require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1}`))
+			require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"responses-e2e":1}`))
+			require.NoError(t, ratio_setting.UpdateCompletionRatioByJSONString(`{"responses-e2e":1}`))
+			require.NoError(t, ratio_setting.UpdateCacheRatioByJSONString(`{"responses-e2e":0.5}`))
+			service.InitHttpClient()
+
+			const failure = `data: {"type":"error","code":"upstream_error","message":"temporarily unavailable"}` + "\n\n"
+			const failed = `data: {"type":"response.failed","response":{"id":"resp_failed","status":"failed","error":{"code":"upstream_error","type":"server_error","message":"temporarily unavailable"},"usage":{"input_tokens":100,"output_tokens":7,"total_tokens":107,"input_tokens_details":{"cached_tokens":80}}}}` + "\n\n"
+			const completed = `data: {"type":"response.completed","response":{"id":"resp_completed","status":"completed","usage":{"input_tokens":100,"output_tokens":7,"total_tokens":107,"input_tokens_details":{"cached_tokens":80}}}}` + "\n\n"
+			const initialQuota, settledQuota = 1000000, 67 // (100 - 80) + 80*0.5 + 7
+			for i, tc := range []struct {
+				name               string
+				prefix             string
+				retry, abort, tool bool
+			}{
+				{name: "initial rejection retries without committing", retry: true},
+				{name: "created response is not replayed", prefix: `data: {"type":"response.created","response":{"id":"resp_failed","status":"in_progress"}}` + "\n\n"},
+				{name: "partial failure settles without an appended error", prefix: `data: {"type":"response.output_text.delta","delta":"partial output"}` + "\n\n"},
+				{name: "disconnect before first event drains failed usage", abort: true},
+				{name: "completed search without text is billed and not replayed", tool: true, prefix: `data: {"type":"response.output_item.done","item":{"id":"ws_completed","type":"web_search_call","status":"completed"}}` + "\n\n"},
+			} {
+				t.Run(tc.name, func(t *testing.T) {
+					wantQuota := settledQuota
+					if tc.tool {
+						previousPrice := operation_setting.GetToolPrice("web_search_preview")
+						operation_setting.SetToolPriceForTest("web_search_preview", 2)
+						t.Cleanup(func() { operation_setting.SetToolPriceForTest("web_search_preview", previousPrice) })
+						wantQuota += 1000 // One search at $2/1K calls, plus the terminal token usage.
+					}
+					user := &model.User{Username: fmt.Sprintf("responses-failure-%d", i), AffCode: fmt.Sprintf("rsp%d", i), Group: "default", Quota: initialQuota, Status: common.UserStatusEnabled, Setting: `{"billing_preference":"wallet_only"}`}
+					require.NoError(t, db.Create(user).Error)
+					token := &model.Token{UserId: user.Id, Key: common.NewRequestId(), Name: "responses-client", Status: common.TokenStatusEnabled, RemainQuota: initialQuota}
+					require.NoError(t, db.Create(token).Error)
+					ready, release := make(chan struct{}), make(chan struct{})
+					releaseUpstream := sync.OnceFunc(func() { close(release) })
+					upstreamResults := make(chan error, 2)
+					var attempts atomic.Int32
+					var reservedQuota atomic.Int64
+					upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						attempt := attempts.Add(1)
+						var reservedUser model.User
+						if err := db.First(&reservedUser, user.Id).Error; err != nil {
+							upstreamResults <- err
+							w.WriteHeader(http.StatusInternalServerError)
+							return
+						}
+						if attempt == 1 {
+							reservedQuota.Store(int64(initialQuota - reservedUser.Quota))
+						}
+						if r.URL.Path != "/v1/responses" {
+							upstreamResults <- fmt.Errorf("unexpected upstream path %s", r.URL.Path)
+							w.WriteHeader(http.StatusNotFound)
+							return
+						}
+						w.Header().Set("Content-Type", "text/event-stream")
+						if tc.abort {
+							w.WriteHeader(http.StatusOK)
+							w.(http.Flusher).Flush()
+							if attempt == 1 {
+								close(ready)
+							}
+							<-release
+						}
+						payload := tc.prefix + failure + failed
+						if tc.retry {
+							payload = failure
+							if attempt > 1 {
+								payload = completed
+							}
+						} else if tc.abort {
+							payload = failed
+						}
+						if err := r.Context().Err(); err != nil {
+							upstreamResults <- err
+							return
+						}
+						_, err := io.WriteString(w, payload)
+						upstreamResults <- err
+					}))
+					t.Cleanup(upstream.Close)
+					channel := &model.Channel{Name: tc.name, Type: constant.ChannelTypeOpenAI, Key: "responses-upstream", Status: common.ChannelStatusEnabled, Group: "default", Models: "responses-e2e", BaseURL: &upstream.URL}
+					require.NoError(t, db.Create(channel).Error)
+					require.NoError(t, channel.AddAbilities(db))
+					t.Cleanup(func() {
+						require.NoError(t, db.Where("channel_id = ?", channel.Id).Delete(&model.Ability{}).Error)
+						require.NoError(t, db.Delete(channel).Error)
+					})
+					requestID := common.NewRequestId()
+					engine := gin.New()
+					engine.POST("/v1/responses", middleware.BodyStorageCleanup(), func(c *gin.Context) {
+						c.Set(common.RequestIdKey, requestID)
+						user.ToBaseUser().WriteContext(c)
+						common.SetContextKey(c, constant.ContextKeyUserId, user.Id)
+						common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+						common.SetContextKey(c, constant.ContextKeyTokenGroup, "default")
+						common.SetContextKey(c, constant.ContextKeyTokenKey, token.Key)
+						c.Set("token_id", token.Id)
+						c.Set("token_quota", token.RemainQuota)
+						c.Set("token_name", token.Name)
+					}, middleware.Distribute(), func(c *gin.Context) { Relay(c, types.RelayFormatOpenAIResponses) })
+					ctx, cancel := context.WithCancel(t.Context())
+					request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"responses-e2e","stream":true,"max_output_tokens":16,"input":"hello"}`)).WithContext(ctx)
+					request.Header.Set("Content-Type", "application/json")
+					recorder := httptest.NewRecorder()
+					done := make(chan struct{})
+					go func() {
+						defer close(done)
+						engine.ServeHTTP(recorder, request)
+					}()
+					t.Cleanup(func() {
+						cancel()
+						releaseUpstream()
+						select {
+						case <-done:
+						case <-time.After(5 * time.Second):
+							t.Error("Responses relay did not finish")
+						}
+					})
+					if tc.abort {
+						select {
+						case <-ready:
+						case <-done:
+							t.Fatalf("relay ended before upstream headers: %s", recorder.Body.String())
+						case <-time.After(5 * time.Second):
+							t.Fatal("upstream headers did not arrive")
+						}
+						cancel() // The upstream cannot send its first event until cancellation is observable.
+						releaseUpstream()
+					}
+					select {
+					case <-done:
+					case <-time.After(10 * time.Second):
+						t.Fatal("Responses relay did not finish")
+					}
+					wantAttempts := int32(1)
+					if tc.retry {
+						wantAttempts = 2
+					}
+					assert.Equal(t, wantAttempts, attempts.Load())
+					assert.Positive(t, reservedQuota.Load(), "exercise a real reservation before success or failure settlement")
+					for range attempts.Load() {
+						select {
+						case err := <-upstreamResults:
+							require.NoError(t, err)
+						case <-time.After(5 * time.Second):
+							t.Fatal("upstream handler did not finish")
+						}
+					}
+					body := recorder.Body.String()
+					assert.NotContains(t, body, "[DONE]")
+					if tc.abort {
+						assert.Empty(t, body)
+					} else if tc.retry {
+						assert.Contains(t, body, "event: response.completed\n")
+						assert.NotContains(t, body, "upstream_error", "the first rejection must remain uncommitted")
+					} else {
+						assert.Contains(t, body, tc.prefix)
+						assert.Equal(t, 1, strings.Count(body, "event: error\n"))
+						assert.Equal(t, 1, strings.Count(body, "event: response.failed\n"))
+						assert.NotContains(t, body, `data: {"error":`, "controller must not append another error envelope")
+					}
+					// Exercise the real BillingSession: one billed request, one consume log,
+					// and identical wallet/token deltas, including failed and drained output.
+					var updatedUser model.User
+					require.NoError(t, db.First(&updatedUser, user.Id).Error)
+					assert.Equal(t, initialQuota-wantQuota, updatedUser.Quota)
+					assert.Equal(t, wantQuota, updatedUser.UsedQuota)
+					assert.Equal(t, 1, updatedUser.RequestCount)
+					var updatedToken model.Token
+					require.NoError(t, db.First(&updatedToken, token.Id).Error)
+					assert.Equal(t, initialQuota-wantQuota, updatedToken.RemainQuota)
+					assert.Equal(t, wantQuota, updatedToken.UsedQuota)
+					var logs []model.Log
+					require.NoError(t, db.Where("request_id = ? AND type = ?", requestID, model.LogTypeConsume).Find(&logs).Error)
+					require.Len(t, logs, 1)
+					assert.Equal(t, wantQuota, logs[0].Quota)
+					assert.Equal(t, 100, logs[0].PromptTokens)
+					assert.Equal(t, 7, logs[0].CompletionTokens)
+					var other map[string]any
+					require.NoError(t, common.UnmarshalJsonStr(logs[0].Other, &other))
+					assert.Equal(t, float64(80), other["cache_tokens"])
+					if tc.tool {
+						assert.NotContains(t, body, "response.output_text.delta")
+						assert.Equal(t, []any{map[string]any{"name": "web_search_preview", "count": float64(1), "price": float64(2)}}, other["tool_surcharges"])
+					}
+				})
+			}
+		})
+	}
 }

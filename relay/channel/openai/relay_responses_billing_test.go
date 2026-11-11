@@ -193,7 +193,12 @@ func TestOaiResponsesStreamHandlerCompletionLifecycle(t *testing.T) {
 			info.SetEstimatePromptTokens(7)
 			resp := &http.Response{StatusCode: http.StatusOK, Body: upstream, Header: http.Header{"Content-Type": {"text/event-stream"}}}
 			usage, apiErr := OaiResponsesStreamHandler(c, info, resp)
-			require.Nil(t, apiErr)
+			if tc.responseStatus == "failed" {
+				require.NotNil(t, apiErr)
+				assert.True(t, types.IsSkipRetryError(apiErr))
+			} else {
+				require.Nil(t, apiErr)
+			}
 			require.NotNil(t, usage)
 			require.NotNil(t, info.StreamStatus)
 			assert.Equal(t, tc.wantEnd, info.StreamStatus.EndReason)
@@ -933,15 +938,78 @@ func TestStreamDrainBufferedTailAndDoneWriteFailure(t *testing.T) {
 	})
 }
 
+func TestResponsesStreamFailureBeforeOutputCanRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		event string
+	}{
+		{"standard error", `{"type":"error","code":"upstream_error","message":"temporarily unavailable"}`},
+		{"response error", `{"type":"response.error","code":"upstream_error","message":"temporarily unavailable"}`},
+		{"legacy nested error", `{"type":"error","status":502,"error":{"code":"upstream_error","type":"server_error","message":"temporarily unavailable"}}`},
+		{"failed response", `{"type":"response.failed","response":{"status":"failed","error":{"code":"upstream_error","type":"server_error","message":"temporarily unavailable"}}}`},
+		{"failed done alias", `{"type":"response.done","response":{"status":"failed","error":{"code":"upstream_error","type":"server_error","message":"temporarily unavailable"}}}`},
+		{"invalid success status", `{"type":"error","status":200,"code":"upstream_error","message":"temporarily unavailable"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			info := &relaycommon.RelayInfo{DisablePing: true, ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-4o"}}
+			response := &http.Response{Body: io.NopCloser(strings.NewReader("data: " + tc.event + "\n\n"))}
+			usage, apiErr := OaiResponsesStreamHandler(c, info, response)
+			require.NotNil(t, apiErr)
+			assert.Equal(t, http.StatusBadGateway, apiErr.StatusCode)
+			assert.EqualValues(t, "upstream_error", apiErr.GetErrorCode())
+			assert.Equal(t, "temporarily unavailable", apiErr.Error())
+			assert.False(t, types.IsSkipRetryError(apiErr))
+			assert.False(t, c.Writer.Written(), "the retry layer must own the first downstream response")
+			assert.Empty(t, recorder.Body.String())
+			require.NotNil(t, usage)
+			assert.Zero(t, usage.TotalTokens)
+		})
+	}
+}
+
+func TestResponsesStreamFailureStatusAndPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		event  string
+		status int
+		code   string
+		skip   bool
+	}{
+		{"explicit rate limit", `{"type":"error","status":429,"code":"rate_limit_exceeded","message":"retry later"}`, 429, "rate_limit_exceeded", false},
+		{"standard context rejection", `{"type":"error","code":"context_length_exceeded","message":"context is too long"}`, 400, "context_length_exceeded", false},
+		{"standard rate limit", `{"type":"error","code":"rate_limit_exceeded","message":"retry later"}`, 429, "rate_limit_exceeded", false},
+		{"explicit status takes precedence", `{"type":"error","status":503,"code":"context_length_exceeded","message":"retry later"}`, 503, "context_length_exceeded", false},
+		{"legacy permission error", `{"type":"error","error":{"type":"permission_error","code":"access_denied","message":"not allowed"}}`, 403, "access_denied", false},
+		{"policy rejection", `{"type":"error","code":"cyber_policy","message":"rejected"}`, 403, "cyber_policy", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			info := &relaycommon.RelayInfo{DisablePing: true, ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-4o"}}
+			_, apiErr := OaiResponsesStreamHandler(c, info, &http.Response{Body: io.NopCloser(strings.NewReader("data: " + tc.event + "\n\n"))})
+			require.NotNil(t, apiErr)
+			assert.Equal(t, tc.status, apiErr.StatusCode)
+			assert.EqualValues(t, tc.code, apiErr.GetErrorCode())
+			assert.Equal(t, tc.skip, types.IsSkipRetryError(apiErr))
+			assert.False(t, c.Writer.Written())
+		})
+	}
+}
+
 func TestResponsesStreamErrorBeforeTerminalKeepsUsage(t *testing.T) {
 	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 	info := &relaycommon.RelayInfo{DisablePing: true, ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gpt-4o"}}
-	body := "data: {\"type\":\"error\",\"code\":\"upstream_error\"}\n\n" +
+	body := "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial output\"}\n\n" +
+		"data: {\"type\":\"error\",\"code\":\"upstream_error\"}\n\n" +
 		"data: {\"type\":\"response.error\"}\n\n" +
 		"data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"usage\":{\"input_tokens\":100,\"output_tokens\":7,\"total_tokens\":107,\"input_tokens_details\":{\"cached_tokens\":80}}}}\n\n"
 	usage, apiErr := OaiResponsesStreamHandler(c, info, &http.Response{Body: io.NopCloser(strings.NewReader(body))})
-	require.Nil(t, apiErr)
+	require.NotNil(t, apiErr)
+	assert.True(t, types.IsSkipRetryError(apiErr), "generated output must never be replayed")
 	assert.Equal(t, 100, usage.PromptTokens)
 	assert.Equal(t, 7, usage.CompletionTokens)
 	assert.Equal(t, 80, usage.PromptTokensDetails.CachedTokens)

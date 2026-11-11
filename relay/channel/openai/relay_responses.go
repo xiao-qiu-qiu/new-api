@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -80,6 +81,8 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	defer service.CloseResponseBodyGracefully(resp)
 
 	accumulator := service.NewResponsesUsageAccumulator(info)
+	var streamError *types.NewAPIError
+	accepted := false
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 
@@ -94,9 +97,32 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 			data = string(rewriteSGLangResponsesCreatedAt(info, []byte(data), "response.created_at", streamResponse.Response.CreatedAt))
 		}
 		accumulator.Observe(&streamResponse, common.StringToByteSlice(data))
+		apiErr := responsesStreamError(&streamResponse, data)
+		if apiErr == nil || streamResponse.Response != nil &&
+			(streamResponse.Response.Usage != nil || len(streamResponse.Response.Output) > 0) {
+			accepted = true
+		}
+		noRetry := accepted || c.Writer.Written() || info.StreamLifecycle.ClientError() != nil
+		common.SetContextKey(c, constant.ContextKeyResponseStreamNoRetry, noRetry)
+		if apiErr != nil {
+			if streamError == nil {
+				streamError = apiErr
+			}
+			info.StreamStatus.MarkFailed(string(apiErr.GetErrorCode()), apiErr.ToOpenAIError().Type, apiErr.StatusCode)
+			// Keep an initial rejection uncommitted so the shared retry policy
+			// can select another channel before any response reaches the client.
+			if !noRetry {
+				sr.Done()
+				return
+			}
+		}
+		written := c.Writer.Size()
 		if err := helper.ResponseChunkData(c, streamResponse, data); err != nil {
 			sr.Stop(err)
 			return
+		}
+		if apiErr != nil && c.Writer.Size() > written && info.StreamLifecycle.ClientError() == nil {
+			common.SetContextKey(c, constant.ContextKeyResponseStreamErrorForwarded, true)
 		}
 		// Responses ends at its protocol terminal; providers may keep the HTTP
 		// connection open indefinitely after sending the final usage.
@@ -108,7 +134,74 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 
 	common.SetContextKey(c, constant.ContextKeyResponseStreamStatus, info.StreamStatus)
 	info.StreamStatus.RequireTerminal()
-	return accumulator.Finish(), nil
+	if streamError != nil && common.GetContextKeyBool(c, constant.ContextKeyResponseStreamNoRetry) {
+		// A prefix, heartbeat or error frame already committed this attempt.
+		// Preserve its accounting facts, but never replay the request.
+		types.ErrOptionWithSkipRetry()(streamError)
+	}
+	return accumulator.Finish(), streamError
+}
+
+func responsesStreamError(event *dto.ResponsesStreamResponse, data string) *types.NewAPIError {
+	if event.Type != "error" && event.Type != "response.error" && event.Type != "response.failed" &&
+		ojson.Get(data, "response.status").Str != "failed" {
+		return nil
+	}
+	if apiErr := service.CyberPolicyErrorFromPayload(common.StringToByteSlice(data), http.StatusOK); apiErr != nil {
+		return apiErr
+	}
+	upstreamError := types.OpenAIError{Code: event.Code, Message: event.Message, Param: event.Param}
+	if raw := ojson.Get(data, "error"); raw.Raw != "" {
+		// Older Responses-compatible providers nest their error object.
+		_ = common.UnmarshalJsonStr(raw.Raw, &upstreamError)
+	}
+	if event.Response != nil {
+		if responseError := event.Response.GetOpenAIError(); responseError != nil {
+			upstreamError = *responseError
+		}
+	}
+	if upstreamError.Code == nil || upstreamError.Code == "" {
+		upstreamError.Code = string(types.ErrorCodeBadResponse)
+	}
+	if upstreamError.Message == "" {
+		upstreamError.Message = "responses stream error: " + event.Type
+	}
+	status := http.StatusBadGateway
+	switch upstreamError.Type {
+	case "invalid_request_error":
+		status = http.StatusBadRequest
+	case "authentication_error":
+		status = http.StatusUnauthorized
+	case "permission_error":
+		status = http.StatusForbidden
+	case "rate_limit_error":
+		status = http.StatusTooManyRequests
+	}
+	// Standard error events carry a code but have no error-type field.
+	// Preserve their client/rate-limit classification before retry decisions.
+	switch fmt.Sprint(upstreamError.Code) {
+	case "invalid_request", "invalid_request_error", "invalid_argument", "invalid_value",
+		"unsupported_value", "invalid_prompt", "context_length_exceeded", "string_above_max_length",
+		"previous_response_not_found", "invalid_encrypted_content":
+		status = http.StatusBadRequest
+	case "invalid_api_key", "authentication_error", "token_expired":
+		status = http.StatusUnauthorized
+	case "permission_error", "permission_denied", "access_denied", "basispoints_model_access_changed":
+		status = http.StatusForbidden
+	case "model_not_found", "model_not_found_error":
+		status = http.StatusNotFound
+	case "rate_limit_error", "rate_limit_exceeded", "insufficient_quota", "usage_limit_reached":
+		status = http.StatusTooManyRequests
+	case "overloaded_error", "service_unavailable":
+		status = http.StatusServiceUnavailable
+	}
+	for _, path := range []string{"response.error.status", "error.status", "status"} {
+		if code, err := strconv.Atoi(ojson.Get(data, path).Raw); err == nil && code >= 400 && code <= 599 {
+			status = code
+			break
+		}
+	}
+	return types.WithOpenAIError(upstreamError, status)
 }
 
 func rewriteSGLangResponsesCreatedAt(info *relaycommon.RelayInfo, payload []byte, path string, createdAt dto.IntValue) []byte {

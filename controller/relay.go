@@ -200,6 +200,8 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 			active.SetState(active_requests.StatusRetrying)
 		}
 		relayInfo.StreamStatus = nil
+		common.SetContextKey(c, constant.ContextKeyResponseStreamErrorForwarded, false)
+		common.SetContextKey(c, constant.ContextKeyResponseStreamNoRetry, false)
 		relayInfo.PerformanceBusinessRejection = false
 		relayInfo.PerformanceOutputTokens = 0
 		relayInfo.RetryIndex = retryParam.GetRetry()
@@ -270,6 +272,9 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 }
 
 func writeRelayStreamError(c *gin.Context, format types.RelayFormat, apiError *types.NewAPIError) {
+	if common.GetContextKeyBool(c, constant.ContextKeyResponseStreamErrorForwarded) {
+		return
+	}
 	// 心跳提交响应头后，最终错误继续通过同一个流返回。
 	status, _ := common.GetContextKeyType[*relaycommon.StreamStatus](c, constant.ContextKeyResponseStreamStatus)
 	if status == nil {

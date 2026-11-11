@@ -379,6 +379,13 @@ func TestDecideRelayRetryReasons(t *testing.T) {
 		want    PolicyDecision
 	}{
 		{name: "retry status matched", err: upstream(http.StatusTooManyRequests), retries: 1, want: PolicyDecision{Action: "retry", Reason: "retry_status_matched", Source: "global"}},
+		{name: "started Responses blocks channel error", err: types.NewError(errors.New("upstream"), types.ErrorCodeChannelNoAvailableKey), retries: 2, setup: func(c *gin.Context) {
+			common.SetContextKey(c, constant.ContextKeyResponseStreamNoRetry, true)
+		}, want: PolicyDecision{Action: "stop", Reason: "response_started", Source: "system"}},
+		{name: "started Responses precedes failover", err: upstream(http.StatusServiceUnavailable), retries: 2, setup: func(c *gin.Context) {
+			common.SetContextKey(c, constant.ContextKeyResponseStreamNoRetry, true)
+			c.Set(channelFailoverContextKey, &channelFailoverRequest{order: []int{1, 2}, visited: map[int]bool{1: true}, current: 1})
+		}, want: PolicyDecision{Action: "stop", Reason: "response_started", Source: "system"}},
 		{name: "status outside retry rules", err: upstream(http.StatusBadRequest), retries: 1, want: PolicyDecision{Action: "stop", Reason: "status_not_retryable", Source: "global"}},
 		{name: "attempt budget exhausted", err: upstream(http.StatusTooManyRequests), retries: 0, want: PolicyDecision{Action: "stop", Reason: "attempt_budget_exhausted", Source: "global"}},
 		{name: "always skipped status", err: upstream(http.StatusGatewayTimeout), retries: 1, want: PolicyDecision{Action: "stop", Reason: "system_retry_exclusion", Source: "system"}},

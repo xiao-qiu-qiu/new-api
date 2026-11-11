@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -73,6 +75,14 @@ func ResponsesHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *
 
 	usage, newAPIError := adaptor.DoResponse(c, httpResp, info)
 	if newAPIError != nil {
+		// An accepted failed stream still owes usage, including drained output.
+		// Settling here also prevents final-failure cleanup from refunding it.
+		if info.IsStream && info.StreamStatus.ResponseFailed() &&
+			common.GetContextKeyBool(c, constant.ContextKeyResponseStreamNoRetry) {
+			if usageDto, ok := usage.(*dto.Usage); ok && usageDto != nil {
+				ConsumeResponsesQuota(c, info, usageDto)
+			}
+		}
 		// reset status code 重置状态码
 		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
 		return newAPIError

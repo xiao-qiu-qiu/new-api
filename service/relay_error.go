@@ -34,6 +34,9 @@ func DecideRelayRetry(c *gin.Context, err *types.NewAPIError, retryTimes int) Po
 	if IsMediaGenerationRequest(c) {
 		return PolicyDecision{Action: "stop", Reason: MediaGenerationNoRetryReason, Source: MediaGenerationNoRetrySource}
 	}
+	if common.GetContextKeyBool(c, constant.ContextKeyResponseStreamNoRetry) {
+		return PolicyDecision{Action: "stop", Reason: "response_started", Source: "system"}
+	}
 	if !GetChannelConstraints(c).SuppressesRetry() {
 		if decision, applies := channelFailoverRetry(c, err, retryTimes); applies {
 			return decision
