@@ -32,6 +32,20 @@ func (a *Adaptor) Init(info *relaycommon.RelayInfo) {
 	a.openaiAdaptor.Init(info)
 	a.claudeAdaptor.Init(info)
 	a.geminiAdaptor.Init(info)
+	if info.RelayFormat == types.RelayFormatOpenAI && info.RelayMode == relayconstant.RelayModeChatCompletions && !info.IsChannelTest {
+		// Seed request-local templates before Chat conversion and header operations.
+		// Explicit channel values, including empty values, take precedence over defaults.
+		headers := make(map[string]any, len(info.HeadersOverride)+6)
+		for name, value := range info.HeadersOverride {
+			headers[strings.ToLower(strings.TrimSpace(name))] = value
+		}
+		for _, name := range []string{"session-id", "session_id", "x-session-id", "thread-id", "thread_id", "x-thread-id"} {
+			if _, exists := headers[name]; !exists {
+				headers[name] = "{client_header:" + name + "}"
+			}
+		}
+		info.HeadersOverride = headers
+	}
 }
 
 func (a *Adaptor) GetRequestURL(info *relaycommon.RelayInfo) (string, error) {
