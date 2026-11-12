@@ -42,6 +42,7 @@ var responsesWSTestUserSequence atomic.Int64
 
 func setupResponsesWSRequestTest(t *testing.T) (*model.User, *model.Token) {
 	t.Helper()
+	require.NoError(t, i18n.Init())
 	previousDB := model.DB
 	previousLogDB := model.LOG_DB
 	previousType := common.MainDatabaseType()
@@ -95,7 +96,7 @@ func setupResponsesWSRequestTest(t *testing.T) (*model.User, *model.Token) {
 	// user a separate quota bucket, including when the tests run with -count.
 	user := &model.User{Id: 5062000 + int(responsesWSTestUserSequence.Add(1)), Username: "responses-ws-user", Status: common.UserStatusEnabled, Group: "default", Quota: 1000, AuthVersion: 1}
 	require.NoError(t, db.Create(user).Error)
-	token := &model.Token{UserId: user.Id, Key: "responseswstoken", Status: common.TokenStatusEnabled, ExpiredTime: -1, RemainQuota: 100}
+	token := &model.Token{UserId: user.Id, Key: "responseswstoken", Group: "default", Status: common.TokenStatusEnabled, ExpiredTime: -1, RemainQuota: 100}
 	require.NoError(t, db.Create(token).Error)
 	t.Cleanup(func() {
 		require.NoError(t, db.Unscoped().Delete(token).Error)
