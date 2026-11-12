@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -97,7 +98,7 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 			data = string(rewriteSGLangResponsesCreatedAt(info, []byte(data), "response.created_at", streamResponse.Response.CreatedAt))
 		}
 		accumulator.Observe(&streamResponse, common.StringToByteSlice(data))
-		apiErr := responsesStreamError(&streamResponse, data)
+		apiErr := openaiStreamError(data)
 		if apiErr == nil || streamResponse.Response != nil &&
 			(streamResponse.Response.Usage != nil || len(streamResponse.Response.Output) > 0) {
 			accepted = true
@@ -142,14 +143,19 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	return accumulator.Finish(), streamError
 }
 
-func responsesStreamError(event *dto.ResponsesStreamResponse, data string) *types.NewAPIError {
-	if event.Type != "error" && event.Type != "response.error" && event.Type != "response.failed" &&
-		ojson.Get(data, "response.status").Str != "failed" {
+func openaiStreamError(data string) *types.NewAPIError {
+	eventType := strings.ToLower(strings.TrimSpace(ojson.Get(data, "type").Str))
+	errorPayload := strings.TrimSpace(ojson.Get(data, "error").Raw)
+	hasError := errorPayload != "" && errorPayload != "null" && errorPayload != "{}" && errorPayload != `""`
+	if eventType != "error" && eventType != "upstream_error" && eventType != "response.error" &&
+		eventType != "response.failed" && ojson.Get(data, "response.status").Str != "failed" && !hasError {
 		return nil
 	}
 	if apiErr := service.CyberPolicyErrorFromPayload(common.StringToByteSlice(data), http.StatusOK); apiErr != nil {
 		return apiErr
 	}
+	var event dto.ResponsesStreamResponse
+	_ = common.UnmarshalJsonStr(data, &event)
 	upstreamError := types.OpenAIError{Code: event.Code, Message: event.Message, Param: event.Param}
 	if raw := ojson.Get(data, "error"); raw.Raw != "" {
 		// Older Responses-compatible providers nest their error object.
@@ -164,7 +170,7 @@ func responsesStreamError(event *dto.ResponsesStreamResponse, data string) *type
 		upstreamError.Code = string(types.ErrorCodeBadResponse)
 	}
 	if upstreamError.Message == "" {
-		upstreamError.Message = "responses stream error: " + event.Type
+		upstreamError.Message = "upstream stream error: " + eventType
 	}
 	status := http.StatusBadGateway
 	switch upstreamError.Type {

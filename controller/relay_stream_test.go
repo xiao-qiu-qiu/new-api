@@ -619,7 +619,7 @@ func TestStreamKeepAliveCancellation(t *testing.T) {
 	require.True(t, strings.HasSuffix(recorder.Body.String(), "data: done\n\n"))
 }
 
-func TestRelayResponsesStreamFailureAccounting(t *testing.T) {
+func TestRelayStreamFailureAccounting(t *testing.T) {
 	for _, dialect := range []struct{ kind, env string }{{"sqlite", ""}, {"mysql", "TEST_MYSQL_DSN"}, {"postgres", "TEST_POSTGRES_DSN"}} {
 		t.Run(dialect.kind, func(t *testing.T) {
 			dsn := os.Getenv(dialect.env)
@@ -655,35 +655,88 @@ func TestRelayResponsesStreamFailureAccounting(t *testing.T) {
 				require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(previousGroups))
 			})
 			require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1}`))
-			require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"responses-e2e":1}`))
-			require.NoError(t, ratio_setting.UpdateCompletionRatioByJSONString(`{"responses-e2e":1}`))
-			require.NoError(t, ratio_setting.UpdateCacheRatioByJSONString(`{"responses-e2e":0.5}`))
+			require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"responses-e2e":1,"chat-e2e":1}`))
+			require.NoError(t, ratio_setting.UpdateCompletionRatioByJSONString(`{"responses-e2e":1,"chat-e2e":1}`))
+			require.NoError(t, ratio_setting.UpdateCacheRatioByJSONString(`{"responses-e2e":0.5,"chat-e2e":0.5}`))
 			service.InitHttpClient()
 
 			const failure = `data: {"type":"error","code":"upstream_error","message":"temporarily unavailable"}` + "\n\n"
 			const failed = `data: {"type":"response.failed","response":{"id":"resp_failed","status":"failed","error":{"code":"upstream_error","type":"server_error","message":"temporarily unavailable"},"usage":{"input_tokens":100,"output_tokens":7,"total_tokens":107,"input_tokens_details":{"cached_tokens":80}}}}` + "\n\n"
 			const completed = `data: {"type":"response.completed","response":{"id":"resp_completed","status":"completed","usage":{"input_tokens":100,"output_tokens":7,"total_tokens":107,"input_tokens_details":{"cached_tokens":80}}}}` + "\n\n"
+			const chatDone = "data: [DONE]\n\n"
+			const chatFailure = `data:{"error":{"code":"usage_limit_reached","type":"rate_limit_error","message":"limit"}}` + "\n\n"
+			const chatInvalid = `data:{"error":{"code":"invalid_request","type":"invalid_request_error","message":"invalid input"}}` + "\n\n"
+			const chatRole = `data: {"id":"chatcmpl-failed","object":"chat.completion.chunk","model":"chat-e2e","choices":[{"index":0,"delta":{"role":"assistant"}}]}` + "\n\n"
+			const chatText = `data: {"id":"chatcmpl-failed","object":"chat.completion.chunk","model":"chat-e2e","choices":[{"index":0,"delta":{"content":"partial output"}}]}` + "\n\n"
+			const chatTool = `data: {"id":"chatcmpl-failed","object":"chat.completion.chunk","model":"chat-e2e","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_weather","type":"function","function":{"name":"lookup_weather","arguments":"{}"}}]}}]}` + "\n\n"
+			const chatUsage = `data: {"id":"chatcmpl-failed","object":"chat.completion.chunk","model":"chat-e2e","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":7,"total_tokens":107,"prompt_tokens_details":{"cached_tokens":80}}}` + "\n\n"
+			const chatInputUsage = `data: {"id":"chatcmpl-failed","object":"chat.completion.chunk","model":"chat-e2e","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":0,"prompt_tokens_details":{"cached_tokens":80}}}` + "\n\n"
+			const chatZeroUsage = `data: {"id":"chatcmpl-failed","object":"chat.completion.chunk","model":"chat-e2e","choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0,"prompt_tokens_details":{"cached_tokens":0}}}` + "\n\n"
+			const chatEmpty = `data: {"id":"chatcmpl-failed","object":"chat.completion.chunk","model":"chat-e2e","choices":[{"index":0,"delta":{}}]}` + "\n\n"
+			const chatCompleted = `data: {"id":"chatcmpl-success","object":"chat.completion.chunk","model":"chat-e2e","choices":[{"index":0,"delta":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":7,"total_tokens":107,"prompt_tokens_details":{"cached_tokens":80}}}` + "\n\n" + chatDone
 			const initialQuota, settledQuota = 1000000, 67 // (100 - 80) + 80*0.5 + 7
 			for i, tc := range []struct {
-				name               string
-				prefix             string
-				retry, abort, tool bool
+				name, prefix, payload   string
+				retry, abort, tool      bool
+				chat, refund, heartbeat bool
+				inputOnly, fixedPrice   bool
+				forceFormat             bool
+				wantAttempts            int32
+				estimatedOutput         string
+				estimatedTools          int
 			}{
 				{name: "initial rejection retries without committing", retry: true},
 				{name: "created response is not replayed", prefix: `data: {"type":"response.created","response":{"id":"resp_failed","status":"in_progress"}}` + "\n\n"},
 				{name: "partial failure settles without an appended error", prefix: `data: {"type":"response.output_text.delta","delta":"partial output"}` + "\n\n"},
 				{name: "disconnect before first event drains failed usage", abort: true},
 				{name: "completed search without text is billed and not replayed", tool: true, prefix: `data: {"type":"response.output_item.done","item":{"id":"ws_completed","type":"web_search_call","status":"completed"}}` + "\n\n"},
+				{name: "chat/initial rate limit retries without leaking rejection", chat: true, retry: true, payload: chatFailure + chatDone},
+				{name: "chat/initial invalid request refunds", chat: true, refund: true, payload: chatInvalid + chatDone},
+				{name: "chat/exhausted rate limit retries refund", chat: true, refund: true, wantAttempts: 2, payload: chatFailure + chatDone},
+				{name: "chat/accepted role without usage or output refunds", chat: true, refund: true, prefix: chatRole, payload: chatFailure + chatDone},
+				{name: "chat/error after heartbeat refunds without replay", chat: true, refund: true, heartbeat: true, payload: chatFailure + chatDone},
+				{name: "chat/partial text uses reported cached usage once", chat: true, prefix: chatText, payload: chatUsage + chatFailure + chatDone},
+				{name: "chat/usage after accepted error settles once", chat: true, prefix: chatText, payload: chatFailure + chatUsage + chatDone},
+				{name: "chat/input-only cached usage before three empty frames is retained", chat: true, inputOnly: true, prefix: chatRole, payload: chatInputUsage + chatEmpty + chatEmpty + chatEmpty + chatFailure + chatDone},
+				{name: "chat/explicit zero usage refunds a fixed request price", chat: true, refund: true, fixedPrice: true, prefix: chatRole, payload: chatZeroUsage + chatFailure + chatDone},
+				{name: "chat/partial tool uses reported cached usage once", chat: true, forceFormat: true, prefix: chatTool, payload: chatUsage + chatFailure + chatDone},
+				{name: "chat/disconnect after text drains failed cached usage", chat: true, abort: true, prefix: chatText, payload: chatUsage + chatFailure + chatDone},
+				{name: "chat/partial text without usage retains local estimate", chat: true, prefix: chatText, payload: chatFailure + chatDone, estimatedOutput: "partial output"},
+				{name: "chat/partial tool without usage retains local estimate", chat: true, prefix: chatTool, payload: chatFailure + chatDone, estimatedOutput: "lookup_weather{}", estimatedTools: 1},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
+					path, modelName := "/v1/responses", "responses-e2e"
+					var format types.RelayFormat = types.RelayFormatOpenAIResponses
+					requestBody := `{"model":"responses-e2e","stream":true,"max_output_tokens":16,"input":"hello"}`
+					if tc.chat {
+						path, modelName, format = "/v1/chat/completions", "chat-e2e", types.RelayFormatOpenAI
+						requestBody = `{"model":"chat-e2e","stream":true,"max_tokens":16,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"hello"}]}`
+					}
 					wantQuota := settledQuota
+					wantPrompt, wantCompletion, wantCache := 100, 7, 80
+					if tc.refund {
+						wantQuota, wantPrompt, wantCompletion, wantCache = 0, 0, 0, 0
+					} else if tc.inputOnly {
+						wantQuota, wantCompletion = 60, 0 // (100 - 80) + 80*0.5, without estimated output.
+					} else if tc.estimatedOutput != "" {
+						// One user message plus the Chat framing overhead; bill only the observed output.
+						wantPrompt = service.CountTokenInput("user\nhello", modelName) + 6
+						wantCompletion = service.CountTokenInput(tc.estimatedOutput, modelName) + tc.estimatedTools*7
+						wantCache = 0
+						wantQuota = wantPrompt + wantCompletion
+					}
+					if tc.fixedPrice {
+						previousPrices := ratio_setting.ModelPrice2JSONString()
+						require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"chat-e2e":0.001}`))
+						t.Cleanup(func() { require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(previousPrices)) })
+					}
 					if tc.tool {
 						previousPrice := operation_setting.GetToolPrice("web_search_preview")
 						operation_setting.SetToolPriceForTest("web_search_preview", 2)
 						t.Cleanup(func() { operation_setting.SetToolPriceForTest("web_search_preview", previousPrice) })
 						wantQuota += 1000 // One search at $2/1K calls, plus the terminal token usage.
 					}
-					user := &model.User{Username: fmt.Sprintf("responses-failure-%d", i), AffCode: fmt.Sprintf("rsp%d", i), Group: "default", Quota: initialQuota, Status: common.UserStatusEnabled, Setting: `{"billing_preference":"wallet_only"}`}
+					user := &model.User{Username: fmt.Sprintf("stream-failure-%d", i), AffCode: fmt.Sprintf("str%d", i), Group: "default", Quota: initialQuota, Status: common.UserStatusEnabled, Setting: `{"billing_preference":"wallet_only"}`}
 					require.NoError(t, db.Create(user).Error)
 					token := &model.Token{UserId: user.Id, Key: common.NewRequestId(), Name: "responses-client", Status: common.TokenStatusEnabled, RemainQuota: initialQuota}
 					require.NoError(t, db.Create(token).Error)
@@ -703,7 +756,7 @@ func TestRelayResponsesStreamFailureAccounting(t *testing.T) {
 						if attempt == 1 {
 							reservedQuota.Store(int64(initialQuota - reservedUser.Quota))
 						}
-						if r.URL.Path != "/v1/responses" {
+						if r.URL.Path != path {
 							upstreamResults <- fmt.Errorf("unexpected upstream path %s", r.URL.Path)
 							w.WriteHeader(http.StatusNotFound)
 							return
@@ -711,6 +764,13 @@ func TestRelayResponsesStreamFailureAccounting(t *testing.T) {
 						w.Header().Set("Content-Type", "text/event-stream")
 						if tc.abort {
 							w.WriteHeader(http.StatusOK)
+							if tc.chat {
+								// Flush a following empty chunk so the buffered text reaches the client before cancellation.
+								if _, err := io.WriteString(w, tc.prefix+`data: {"id":"chatcmpl-failed","choices":[]}`+"\n\n"); err != nil {
+									upstreamResults <- err
+									return
+								}
+							}
 							w.(http.Flusher).Flush()
 							if attempt == 1 {
 								close(ready)
@@ -718,7 +778,14 @@ func TestRelayResponsesStreamFailureAccounting(t *testing.T) {
 							<-release
 						}
 						payload := tc.prefix + failure + failed
-						if tc.retry {
+						if tc.chat {
+							payload = tc.prefix + tc.payload
+							if tc.retry && attempt > 1 {
+								payload = chatCompleted
+							} else if tc.abort {
+								payload = tc.payload
+							}
+						} else if tc.retry {
 							payload = failure
 							if attempt > 1 {
 								payload = completed
@@ -734,7 +801,12 @@ func TestRelayResponsesStreamFailureAccounting(t *testing.T) {
 						upstreamResults <- err
 					}))
 					t.Cleanup(upstream.Close)
-					channel := &model.Channel{Name: tc.name, Type: constant.ChannelTypeOpenAI, Key: "responses-upstream", Status: common.ChannelStatusEnabled, Group: "default", Models: "responses-e2e", BaseURL: &upstream.URL}
+					channel := &model.Channel{Name: tc.name, Type: constant.ChannelTypeOpenAI, Key: "stream-upstream", Status: common.ChannelStatusEnabled, Group: "default", Models: modelName, BaseURL: &upstream.URL}
+					if tc.forceFormat {
+						channelSetting := channel.GetSetting()
+						channelSetting.ForceFormat = true
+						channel.SetSetting(channelSetting)
+					}
 					require.NoError(t, db.Create(channel).Error)
 					require.NoError(t, channel.AddAbilities(db))
 					t.Cleanup(func() {
@@ -743,7 +815,7 @@ func TestRelayResponsesStreamFailureAccounting(t *testing.T) {
 					})
 					requestID := common.NewRequestId()
 					engine := gin.New()
-					engine.POST("/v1/responses", middleware.BodyStorageCleanup(), func(c *gin.Context) {
+					engine.POST(path, middleware.BodyStorageCleanup(), func(c *gin.Context) {
 						c.Set(common.RequestIdKey, requestID)
 						user.ToBaseUser().WriteContext(c)
 						common.SetContextKey(c, constant.ContextKeyUserId, user.Id)
@@ -753,15 +825,23 @@ func TestRelayResponsesStreamFailureAccounting(t *testing.T) {
 						c.Set("token_id", token.Id)
 						c.Set("token_quota", token.RemainQuota)
 						c.Set("token_name", token.Name)
-					}, middleware.Distribute(), func(c *gin.Context) { Relay(c, types.RelayFormatOpenAIResponses) })
+					}, middleware.Distribute(), func(c *gin.Context) {
+						if tc.heartbeat {
+							// Commit a real SSE heartbeat without a timing-dependent ticker.
+							helper.SetEventStreamHeaders(c)
+							assert.NoError(t, helper.PingData(c))
+						}
+						Relay(c, format)
+					})
 					ctx, cancel := context.WithCancel(t.Context())
-					request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"responses-e2e","stream":true,"max_output_tokens":16,"input":"hello"}`)).WithContext(ctx)
+					request := httptest.NewRequest(http.MethodPost, path, strings.NewReader(requestBody)).WithContext(ctx)
 					request.Header.Set("Content-Type", "application/json")
 					recorder := httptest.NewRecorder()
+					writer := &activeRequestTestWriter{ResponseRecorder: recorder, wrote: make(chan struct{})}
 					done := make(chan struct{})
 					go func() {
 						defer close(done)
-						engine.ServeHTTP(recorder, request)
+						engine.ServeHTTP(writer, request)
 					}()
 					t.Cleanup(func() {
 						cancel()
@@ -769,7 +849,7 @@ func TestRelayResponsesStreamFailureAccounting(t *testing.T) {
 						select {
 						case <-done:
 						case <-time.After(5 * time.Second):
-							t.Error("Responses relay did not finish")
+							t.Error("stream relay did not finish")
 						}
 					})
 					if tc.abort {
@@ -780,20 +860,35 @@ func TestRelayResponsesStreamFailureAccounting(t *testing.T) {
 						case <-time.After(5 * time.Second):
 							t.Fatal("upstream headers did not arrive")
 						}
-						cancel() // The upstream cannot send its first event until cancellation is observable.
+						if tc.chat {
+							select {
+							case <-writer.wrote:
+							case <-done:
+								t.Fatalf("relay ended before partial text: %s", recorder.Body.String())
+							case <-time.After(5 * time.Second):
+								t.Fatal("partial text did not reach the client")
+							}
+						}
+						cancel() // Terminal usage stays blocked until the client has cancelled.
 						releaseUpstream()
 					}
 					select {
 					case <-done:
 					case <-time.After(10 * time.Second):
-						t.Fatal("Responses relay did not finish")
+						t.Fatal("stream relay did not finish")
 					}
 					wantAttempts := int32(1)
 					if tc.retry {
 						wantAttempts = 2
 					}
+					if tc.wantAttempts != 0 {
+						wantAttempts = tc.wantAttempts
+					}
 					assert.Equal(t, wantAttempts, attempts.Load())
 					assert.Positive(t, reservedQuota.Load(), "exercise a real reservation before success or failure settlement")
+					if tc.fixedPrice {
+						assert.Equal(t, int64(common.QuotaFromFloat(0.001*common.QuotaPerUnit)), reservedQuota.Load(), "exercise a real fixed-price reservation before refunding zero usage")
+					}
 					for range attempts.Load() {
 						select {
 						case err := <-upstreamResults:
@@ -803,8 +898,45 @@ func TestRelayResponsesStreamFailureAccounting(t *testing.T) {
 						}
 					}
 					body := recorder.Body.String()
-					assert.NotContains(t, body, "[DONE]")
-					if tc.abort {
+					if tc.chat {
+						switch {
+						case tc.abort:
+							assert.Contains(t, body, tc.prefix)
+							assert.NotContains(t, body, `"error":`)
+							assert.NotContains(t, body, `"usage":`)
+						case tc.retry:
+							assert.Equal(t, http.StatusOK, recorder.Code)
+							assert.Equal(t, 1, strings.Count(body, `"content":"hello"`))
+							assert.NotContains(t, body, "usage_limit_reached", "the first rejection must remain uncommitted")
+							assert.NotContains(t, body, `"error":`)
+							assert.Equal(t, 1, strings.Count(body, "data: [DONE]"))
+						default:
+							if tc.forceFormat {
+								assert.Contains(t, body, `"id":"call_weather"`)
+								assert.Contains(t, body, `"name":"lookup_weather"`)
+								assert.Contains(t, body, `"arguments":"{}"`)
+							} else {
+								assert.Contains(t, body, tc.prefix)
+							}
+							assert.Equal(t, 1, strings.Count(body, `"error":`), "controller must not append another error envelope")
+							errorCode := "usage_limit_reached"
+							if strings.Contains(tc.payload, "invalid_request") {
+								errorCode = "invalid_request"
+							}
+							assert.Contains(t, body, errorCode)
+							if tc.heartbeat {
+								assert.Contains(t, body, ": PING\n\n")
+							}
+							if tc.prefix != "" || tc.heartbeat {
+								assert.Equal(t, http.StatusOK, recorder.Code)
+								assert.Equal(t, 1, strings.Count(body, "data: [DONE]"))
+							} else if tc.wantAttempts == 2 {
+								assert.Equal(t, http.StatusTooManyRequests, recorder.Code)
+							} else {
+								assert.Equal(t, http.StatusBadRequest, recorder.Code)
+							}
+						}
+					} else if tc.abort {
 						assert.Empty(t, body)
 					} else if tc.retry {
 						assert.Contains(t, body, "event: response.completed\n")
@@ -815,26 +947,55 @@ func TestRelayResponsesStreamFailureAccounting(t *testing.T) {
 						assert.Equal(t, 1, strings.Count(body, "event: response.failed\n"))
 						assert.NotContains(t, body, `data: {"error":`, "controller must not append another error envelope")
 					}
-					// Exercise the real BillingSession: one billed request, one consume log,
-					// and identical wallet/token deltas, including failed and drained output.
+					if !tc.chat {
+						assert.NotContains(t, body, "[DONE]")
+					}
+					// Exercise the real BillingSession and identical wallet/Key deltas,
+					// including refunds, accepted failures, and drained output.
+					if tc.refund {
+						// Refund runs asynchronously; wait for both ledger updates before checking final accounting.
+						require.EventuallyWithT(t, func(collect *assert.CollectT) {
+							var refundedUser model.User
+							if assert.NoError(collect, db.First(&refundedUser, user.Id).Error) {
+								assert.Equal(collect, initialQuota, refundedUser.Quota)
+							}
+							var refundedToken model.Token
+							if assert.NoError(collect, db.First(&refundedToken, token.Id).Error) {
+								assert.Equal(collect, initialQuota, refundedToken.RemainQuota)
+							}
+						}, 3*time.Second, time.Millisecond, "wallet and Key refunds must finish before fixture teardown")
+					}
 					var updatedUser model.User
 					require.NoError(t, db.First(&updatedUser, user.Id).Error)
 					assert.Equal(t, initialQuota-wantQuota, updatedUser.Quota)
 					assert.Equal(t, wantQuota, updatedUser.UsedQuota)
-					assert.Equal(t, 1, updatedUser.RequestCount)
+					wantRequests := 1
+					if tc.refund {
+						wantRequests = 0
+					}
+					assert.Equal(t, wantRequests, updatedUser.RequestCount)
 					var updatedToken model.Token
 					require.NoError(t, db.First(&updatedToken, token.Id).Error)
 					assert.Equal(t, initialQuota-wantQuota, updatedToken.RemainQuota)
 					assert.Equal(t, wantQuota, updatedToken.UsedQuota)
 					var logs []model.Log
 					require.NoError(t, db.Where("request_id = ? AND type = ?", requestID, model.LogTypeConsume).Find(&logs).Error)
+					if tc.refund {
+						assert.LessOrEqual(t, len(logs), 1)
+						for _, log := range logs {
+							assert.Zero(t, log.Quota, "an empty failed stream must not produce a charged consume log")
+							assert.Zero(t, log.PromptTokens)
+							assert.Zero(t, log.CompletionTokens)
+						}
+						return
+					}
 					require.Len(t, logs, 1)
 					assert.Equal(t, wantQuota, logs[0].Quota)
-					assert.Equal(t, 100, logs[0].PromptTokens)
-					assert.Equal(t, 7, logs[0].CompletionTokens)
+					assert.Equal(t, wantPrompt, logs[0].PromptTokens)
+					assert.Equal(t, wantCompletion, logs[0].CompletionTokens)
 					var other map[string]any
 					require.NoError(t, common.UnmarshalJsonStr(logs[0].Other, &other))
-					assert.Equal(t, float64(80), other["cache_tokens"])
+					assert.Equal(t, float64(wantCache), other["cache_tokens"])
 					if tc.tool {
 						assert.NotContains(t, body, "response.output_text.delta")
 						assert.Equal(t, []any{map[string]any{"name": "web_search_preview", "count": float64(1), "price": float64(2)}}, other["tool_surcharges"])

@@ -8,6 +8,7 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -29,17 +30,17 @@ func TestOaiStreamHandlerRequestPolicyOutcome(t *testing.T) {
 	const errorFrame = `{"error":{"message":"upstream unavailable","type":"server_error","code":"upstream_error"}}`
 
 	for _, tc := range []struct {
-		name   string
-		chunks []string
-		failed bool
+		name             string
+		chunks           []string
+		failed, accepted bool
 	}{
-		{"error_object_then_done", []string{errorFrame}, true},
-		{"error_type_without_error_payload", []string{`{"type":"error","message":"upstream unavailable"}`}, true},
-		{"upstream_error_type_with_null_payload", []string{`{"type":"upstream_error","error":null,"message":"upstream unavailable"}`}, true},
-		{"content_finish_then_done", []string{content, finish}, false},
-		{"null_error_is_success", []string{content, nullErrorFinish}, false},
-		{"error_after_finish_overrides_completion", []string{content, finish, errorFrame}, true},
-		{"finish_after_error_cannot_restore_success", []string{errorFrame, finish}, true},
+		{"error_object_then_done", []string{errorFrame}, true, false},
+		{"error_type_without_error_payload", []string{`{"type":"error","message":"upstream unavailable"}`}, true, false},
+		{"upstream_error_type_with_null_payload", []string{`{"type":"upstream_error","error":null,"message":"upstream unavailable"}`}, true, false},
+		{"content_finish_then_done", []string{content, finish}, false, true},
+		{"null_error_is_success", []string{content, nullErrorFinish}, false, true},
+		{"error_after_finish_overrides_completion", []string{content, finish, errorFrame}, true, true},
+		{"finish_after_error_cannot_restore_success", []string{content, errorFrame, finish}, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			body := "data:" + strings.Join(tc.chunks, "\n\ndata:") + "\n\ndata:[DONE]\n\n"
@@ -49,11 +50,15 @@ func TestOaiStreamHandlerRequestPolicyOutcome(t *testing.T) {
 			info.ShouldIncludeUsage = false
 			policy := service.RequestPolicy(c)
 
-			_, apiErr := OaiStreamHandler(c, info, resp)
-			// HTTP 200 stream errors remain forwarded; StreamStatus carries failure.
-			require.Nil(t, apiErr)
+			usage, apiErr := OaiStreamHandler(c, info, resp)
+			if tc.failed {
+				require.NotNil(t, apiErr)
+				assert.Equal(t, http.StatusBadGateway, apiErr.StatusCode)
+				assert.Equal(t, tc.accepted, types.IsSkipRetryError(apiErr))
+			} else {
+				require.Nil(t, apiErr)
+			}
 			require.NotNil(t, info.StreamStatus)
-			assert.Equal(t, http.StatusOK, recorder.Code)
 			assert.Equal(t, relaycommon.StreamEndReasonDone, info.StreamStatus.EndReason)
 			assert.Equal(t, tc.failed, info.StreamStatus.HasErrors())
 			assert.Equal(t, tc.failed, info.StreamStatus.ResponseFailed())
@@ -72,10 +77,26 @@ func TestOaiStreamHandlerRequestPolicyOutcome(t *testing.T) {
 			assert.Equal(t, wantAction, events[0].Decision.Action)
 			assert.Equal(t, wantReason, events[0].Decision.Reason)
 
-			for _, chunk := range tc.chunks {
-				assert.Contains(t, recorder.Body.String(), chunk, "upstream frames must remain intact")
+			streamBody := recorder.Body.String()
+			if !tc.accepted {
+				assert.False(t, c.Writer.Written(), "an initial rejection must remain available for retry")
+				assert.Empty(t, streamBody)
+				require.NotNil(t, usage)
+				assert.Zero(t, usage.PromptTokens)
+				assert.Zero(t, usage.CompletionTokens)
+				assert.Zero(t, usage.TotalTokens)
+			} else {
+				assert.Equal(t, http.StatusOK, recorder.Code)
+				for _, chunk := range tc.chunks {
+					assert.Contains(t, streamBody, chunk, "upstream frames must remain intact")
+				}
+				assert.Contains(t, streamBody, "data: [DONE]")
+				if tc.failed {
+					assert.True(t, strings.HasPrefix(streamBody, "data: "+content))
+					assert.Equal(t, 1, strings.Count(streamBody, errorFrame))
+					assert.Equal(t, 1, strings.Count(streamBody, "data: [DONE]"))
+				}
 			}
-			assert.Contains(t, recorder.Body.String(), "data: [DONE]")
 		})
 	}
 }

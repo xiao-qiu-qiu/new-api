@@ -146,12 +146,15 @@ func ClaudeHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	}
 
 	usage, newAPIError := adaptor.DoResponse(c, httpResp, info)
-	if newAPIError != nil {
+	if newAPIError != nil && !hasFailedStreamUsage(c, info, usage) {
 		// reset status code 重置状态码
 		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
 		return newAPIError
 	}
 
 	service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
-	return nil
+	if newAPIError != nil {
+		service.ResetStatusCode(newAPIError, statusCodeMappingStr)
+	}
+	return newAPIError
 }

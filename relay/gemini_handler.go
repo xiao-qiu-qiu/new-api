@@ -148,13 +148,16 @@ func GeminiHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *typ
 	}
 
 	usage, openaiErr := adaptor.DoResponse(c, resp.(*http.Response), info)
-	if openaiErr != nil {
+	if openaiErr != nil && !hasFailedStreamUsage(c, info, usage) {
 		service.ResetStatusCode(openaiErr, statusCodeMappingStr)
 		return openaiErr
 	}
 
 	service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
-	return nil
+	if openaiErr != nil {
+		service.ResetStatusCode(openaiErr, statusCodeMappingStr)
+	}
+	return openaiErr
 }
 
 func GeminiEmbeddingHandler(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types.NewAPIError) {

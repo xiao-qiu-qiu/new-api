@@ -172,8 +172,9 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 	}
 
 	usage, newApiErr := adaptor.DoResponse(c, httpResp, info)
-	if newApiErr != nil {
-		// reset status code 重置状态码
+	// A failed stream may already have generated output. Settle its
+	// observed usage once, while empty rejections remain refundable.
+	if newApiErr != nil && !hasFailedStreamUsage(c, info, usage) {
 		service.ResetStatusCode(newApiErr, statusCodeMappingStr)
 		return newApiErr
 	}
@@ -186,5 +187,8 @@ func TextHelper(c *gin.Context, info *relaycommon.RelayInfo) (newAPIError *types
 	} else {
 		service.PostTextConsumeQuota(c, info, usage.(*dto.Usage), nil)
 	}
-	return nil
+	if newApiErr != nil {
+		service.ResetStatusCode(newApiErr, statusCodeMappingStr)
+	}
+	return newApiErr
 }

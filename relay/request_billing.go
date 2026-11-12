@@ -78,6 +78,12 @@ func PrepareRequestBilling(c *gin.Context, info *relaycommon.RelayInfo) *types.N
 	return service.PreConsumeBilling(c, priceData.QuotaToPreConsume, info)
 }
 
+func hasFailedStreamUsage(c *gin.Context, info *relaycommon.RelayInfo, usage any) bool {
+	usageDto, _ := usage.(*dto.Usage)
+	return info.IsStream && info.StreamStatus.ResponseFailed() &&
+		common.GetContextKeyBool(c, constant.ContextKeyResponseStreamNoRetry) && service.ValidUsage(usageDto)
+}
+
 // RefundFailedRequestBilling applies the common final-failure policy after all
 // eligible attempts have ended. A settled BillingSession never refunds again.
 func RefundFailedRequestBilling(c *gin.Context, info *relaycommon.RelayInfo, apiErr *types.NewAPIError) *types.NewAPIError {
