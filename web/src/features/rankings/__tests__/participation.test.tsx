@@ -40,6 +40,7 @@ import { ModelUsageBar } from '../components/model-usage-bar'
 import { RankingPeriods } from '../components/ranking-periods'
 import { UserLeaderboard } from '../components/user-leaderboard'
 import { useRankingPeriods } from '../hooks/use-ranking-periods'
+import { useRankings } from '../hooks/use-rankings'
 import {
   useUserRankings,
   type Participation,
@@ -142,6 +143,162 @@ describe('ranking requests', () => {
   }
 
   afterEach(() => vi.useRealTimers())
+
+  test.each([
+    { mode: 'public', adminViewerID: null },
+    { mode: 'admin', adminViewerID: 1 },
+  ])(
+    '$mode cold snapshots stay loading and poll until complete without publishing empty totals',
+    async ({ adminViewerID }) => {
+      vi.useFakeTimers()
+      useAuthStore
+        .getState()
+        .auth.setUser({ id: 1, username: 'viewer', role: 10 })
+      let ready = false
+      vi.mocked(api.get).mockImplementation(async (url) => {
+        if (url.includes('/self/')) {
+          return {
+            data: {
+              success: true,
+              data: { ...initialPreference, prompted: true },
+            },
+          }
+        }
+        if (!ready) {
+          return {
+            status: 202,
+            headers: { 'retry-after': '1' },
+            data: { success: true, pending: true },
+          }
+        }
+        return {
+          status: 200,
+          data: {
+            success: true,
+            data: {
+              users: [],
+              participants: 0,
+              total_tokens: 120,
+              total_quota: 50,
+            },
+          },
+        }
+      })
+      const hook = renderRequests('spending', adminViewerID)
+      await act(async () => vi.advanceTimersByTimeAsync(0))
+      expect(hook.result.current.rankings.isPending).toBe(true)
+      expect(hook.result.current.rankings.isError).toBe(false)
+      expect(hook.result.current.rankings.data).toBeUndefined()
+      expect(getRankingRequests()).toHaveLength(1)
+      await act(async () => vi.advanceTimersByTimeAsync(999))
+      expect(getRankingRequests()).toHaveLength(1)
+      ready = true
+      await act(async () => vi.advanceTimersByTimeAsync(1))
+      expect(getRankingRequests()).toHaveLength(2)
+      await act(async () => vi.advanceTimersToNextTimerAsync())
+      expect(hook.result.current.rankings.isSuccess).toBe(true)
+      expect(hook.result.current.rankings.data?.total_quota).toBe(50)
+      expect(getRankingRequests()).toHaveLength(2)
+      hook.unmount()
+    }
+  )
+
+  test('switching period or leaving cancels cold-snapshot polling', async () => {
+    vi.useFakeTimers()
+    vi.mocked(api.get).mockImplementation(async (url) => {
+      if (url.includes('/self/')) {
+        return {
+          data: {
+            success: true,
+            data: { ...initialPreference, prompted: true },
+          },
+        }
+      }
+      return {
+        status: 202,
+        headers: { 'retry-after': '1' },
+        data: { success: true, pending: true },
+      }
+    })
+    const hook = renderRequests()
+    await act(async () => vi.advanceTimersByTimeAsync(0))
+    hook.rerender({ period: 'today', metric: 'tokens' })
+    await act(async () => vi.advanceTimersByTimeAsync(1_000))
+    expect(getRankingRequests()).toHaveLength(3)
+    expect(getRankingRequests().map(([, config]) => config?.params)).toEqual([
+      { period: 'year', metric: 'tokens' },
+      { period: 'today', metric: 'tokens' },
+      { period: 'today', metric: 'tokens' },
+    ])
+    hook.unmount()
+    await act(async () => vi.advanceTimersByTimeAsync(5_000))
+    expect(getRankingRequests()).toHaveLength(3)
+  })
+
+  test('model rankings keep their loading state while the background snapshot is pending', async () => {
+    vi.useFakeTimers()
+    let ready = false
+    vi.mocked(api.get).mockImplementation(async () =>
+      ready
+        ? {
+            status: 200,
+            data: {
+              success: true,
+              data: { models: [{ model_name: 'alpha', total_tokens: 123 }] },
+            },
+          }
+        : { status: 202, data: { success: true, pending: true } }
+    )
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    clients.add(client)
+    const hook = renderHook(() => useRankings('year'), {
+      wrapper: ({ children }) => (
+        <QueryClientProvider client={client}>{children}</QueryClientProvider>
+      ),
+    })
+    await act(async () => vi.advanceTimersByTimeAsync(0))
+    expect(hook.result.current.isLoading).toBe(true)
+    expect(hook.result.current.data).toBeUndefined()
+    ready = true
+    await act(async () => vi.advanceTimersByTimeAsync(1_000))
+    expect(api.get).toHaveBeenCalledTimes(2)
+    await act(async () => vi.advanceTimersToNextTimerAsync())
+    expect(hook.result.current.data?.data.models[0].total_tokens).toBe(123)
+    expect(hook.result.current.isSuccess).toBe(true)
+    hook.unmount()
+  })
+
+  test('leaving the model board cancels polling even when the selected period stays the same', async () => {
+    vi.useFakeTimers()
+    vi.mocked(api.get).mockResolvedValue({
+      status: 202,
+      data: { success: true, pending: true },
+    })
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    clients.add(client)
+    const hook = renderHook(
+      (enabled: boolean) => useRankings('year', enabled),
+      {
+        initialProps: true,
+        wrapper: ({ children }) => (
+          <QueryClientProvider client={client}>{children}</QueryClientProvider>
+        ),
+      }
+    )
+    await act(async () => vi.advanceTimersByTimeAsync(0))
+    expect(api.get).toHaveBeenCalledTimes(1)
+    hook.rerender(false)
+    await act(async () => vi.advanceTimersByTimeAsync(2_000))
+    expect(api.get).toHaveBeenCalledTimes(1)
+    hook.rerender(true)
+    await act(async () => vi.advanceTimersByTimeAsync(0))
+    expect(api.get).toHaveBeenCalledTimes(2)
+    hook.unmount()
+  })
 
   test.each(['tokens', 'spending'] as const)(
     'opening %s requests only that metric and switching fetches the selected board',

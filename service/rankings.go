@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"slices"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/model"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -131,8 +133,9 @@ type vendorAggregate struct {
 }
 
 var (
-	rankingCacheMu sync.Mutex
-	rankingCache   = map[string]rankingCacheItem{}
+	rankingCacheMu       sync.Mutex
+	rankingCache         = map[string]rankingCacheItem{}
+	rankingSnapshotBuild singleflight.Group
 )
 
 func GetRankingsSnapshot(period string) (*RankingsResponse, error) {
@@ -142,32 +145,73 @@ func GetRankingsSnapshot(period string) (*RankingsResponse, error) {
 	}
 
 	now := time.Now()
-	cacheKey := config.cacheKey(now)
-	rankingCacheMu.Lock()
-	if item, ok := rankingCache[cacheKey]; ok && now.Before(item.expiresAt) {
-		rankingCacheMu.Unlock()
-		return item.data, nil
-	}
-	rankingCacheMu.Unlock()
+	cacheKey := fmt.Sprintf("models:%p:%s", model.DB, config.cacheKey(now))
+	return getRankingsSnapshot(context.Background(), config, now, cacheKey)
+}
 
-	data, err := buildRankingsSnapshot(config, now)
+// RequestRankingsSnapshot serves only complete snapshots. Snapshots up to
+// fifteen minutes old remain usable while one background build refreshes.
+func RequestRankingsSnapshot(ctx context.Context, period string) (*RankingsResponse, error) {
+	config, err := rankingConfig(period)
 	if err != nil {
 		return nil, err
 	}
-
+	now := time.Now()
+	cacheKey := fmt.Sprintf("models:%p:%s", model.DB, config.cacheKey(now))
 	rankingCacheMu.Lock()
-	for key, item := range rankingCache {
-		if !now.Before(item.expiresAt) {
-			delete(rankingCache, key)
-		}
-	}
-	rankingCache[cacheKey] = rankingCacheItem{
-		expiresAt: now.Add(rankingCacheTTL),
-		data:      data,
-	}
+	cached, ok := rankingCache[cacheKey]
 	rankingCacheMu.Unlock()
+	if ok && now.Before(cached.expiresAt) {
+		return cached.data, nil
+	}
+	build := func(buildCtx context.Context) error {
+		_, err := getRankingsSnapshot(buildCtx, config, now, cacheKey)
+		return err
+	}
+	if ok && now.Before(cached.expiresAt.Add(rankingSnapshotMaxStale-rankingCacheTTL)) {
+		_ = runRankingBuild(ctx, cacheKey, build, 0)
+		return cached.data, nil
+	}
+	err = runRankingBuild(ctx, cacheKey, build)
+	if err != nil {
+		return nil, err
+	}
+	rankingCacheMu.Lock()
+	cached, ok = rankingCache[cacheKey]
+	rankingCacheMu.Unlock()
+	if !ok {
+		return nil, ErrRankingsPending
+	}
+	return cached.data, nil
+}
 
-	return data, nil
+func getRankingsSnapshot(ctx context.Context, config rankingPeriodConfig, now time.Time, cacheKey string) (*RankingsResponse, error) {
+	value, err, _ := rankingSnapshotBuild.Do(cacheKey, func() (any, error) {
+		rankingCacheMu.Lock()
+		cached, ok := rankingCache[cacheKey]
+		rankingCacheMu.Unlock()
+		if ok && time.Now().Before(cached.expiresAt) {
+			return cached.data, nil
+		}
+		data, err := buildRankingsSnapshotWithContext(ctx, config, now)
+		if err != nil {
+			return nil, err
+		}
+		completed := time.Now()
+		rankingCacheMu.Lock()
+		for key, item := range rankingCache {
+			if !completed.Before(item.expiresAt.Add(rankingSnapshotMaxStale - rankingCacheTTL)) {
+				delete(rankingCache, key)
+			}
+		}
+		rankingCache[cacheKey] = rankingCacheItem{expiresAt: completed.Add(rankingCacheTTL), data: data}
+		rankingCacheMu.Unlock()
+		return data, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return value.(*RankingsResponse), nil
 }
 
 func rankingConfig(period string) (rankingPeriodConfig, error) {
@@ -196,20 +240,37 @@ func (config rankingPeriodConfig) cacheKey(now time.Time) string {
 }
 
 func buildRankingsSnapshot(config rankingPeriodConfig, now time.Time) (*RankingsResponse, error) {
+	return buildRankingsSnapshotWithContext(context.Background(), config, now)
+}
+
+func buildRankingsSnapshotWithContext(ctx context.Context, config rankingPeriodConfig, now time.Time) (*RankingsResponse, error) {
 	startTime, endTime := rankingTimeRange(config, now)
-	currentTotals, err := model.GetRankingQuotaTotals(startTime, endTime)
+	currentBuckets, err := model.GetRankingQuotaBucketsWithContext(ctx, startTime, endTime, config.bucketSize, true)
 	if err != nil {
 		return nil, err
 	}
-	currentBuckets, err := model.GetRankingQuotaBuckets(startTime, endTime, config.bucketSize)
-	if err != nil {
-		return nil, err
+	tokensByModel := make(map[string]int64)
+	for _, bucket := range currentBuckets {
+		tokensByModel[bucket.ModelName] += bucket.Tokens
 	}
+	currentTotals := make([]model.RankingQuotaTotal, 0, len(tokensByModel))
+	for modelName, tokens := range tokensByModel {
+		if tokens > 0 {
+			currentTotals = append(currentTotals, model.RankingQuotaTotal{ModelName: modelName, TotalTokens: tokens})
+		}
+	}
+	sort.Slice(currentTotals, func(i, j int) bool {
+		if currentTotals[i].TotalTokens == currentTotals[j].TotalTokens {
+			return currentTotals[i].ModelName < currentTotals[j].ModelName
+		}
+		return currentTotals[i].TotalTokens > currentTotals[j].TotalTokens
+	})
+	currentBuckets = slices.DeleteFunc(currentBuckets, func(bucket model.RankingQuotaBucket) bool { return bucket.Tokens <= 0 })
 
 	var previousTotals []model.RankingQuotaTotal
 	if config.hasPrevious {
 		previousStart, previousEnd := previousRankingTimeRange(config, now)
-		previousTotals, err = model.GetRankingQuotaTotals(previousStart, previousEnd)
+		previousTotals, err = model.GetRankingQuotaTotalsWithContext(ctx, previousStart, previousEnd)
 		if err != nil {
 			return nil, err
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -11,9 +12,12 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/alicebob/miniredis/v2"
 	"github.com/glebarez/sqlite"
+	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/driver/clickhouse"
 	"gorm.io/driver/mysql"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -94,7 +98,7 @@ func TestUserRankingsConsentAndTotals(t *testing.T) {
 			require.NoError(t, db.Create(&logs).Error)
 			// Older consume logs can have NULL quota and unknown model names.
 			require.NoError(t, db.Model(&model.Log{}).Where("id = ?", logs[len(logs)-1].Id).
-				Updates(map[string]any{"quota": nil, "model_name": nil}).Error)
+				Updates(map[string]any{"quota": nil, "model_name": nil, "prompt_tokens": nil, "completion_tokens": nil}).Error)
 			// Upgrade the prior release's consent schema, preserving an existing choice.
 			require.NoError(t, db.Migrator().DropTable(&model.UserRankingPreference{}))
 			require.NoError(t, db.AutoMigrate(&legacyRankingPreference{}))
@@ -491,6 +495,12 @@ func openUserRankingTestDatabase(t *testing.T, engine string) *gorm.DB {
 	t.Helper()
 	var driver gorm.Dialector
 	switch engine {
+	case "clickhouse":
+		dsn := os.Getenv("NEWAPI_TEST_CLICKHOUSE_DSN")
+		if dsn == "" {
+			t.Skip("NEWAPI_TEST_CLICKHOUSE_DSN is not configured")
+		}
+		driver = clickhouse.Open(dsn)
 	case "mysql":
 		dsn := os.Getenv("NEWAPI_TEST_MYSQL_DSN")
 		if dsn == "" {
@@ -565,6 +575,8 @@ func newUserRankingUsageFixture(t *testing.T, db *gorm.DB) (*gorm.DB, *rankingPa
 	require.NoError(t, logs.Callback().Row().Before("gorm:row").Register(callback, observer.observe))
 	require.NoError(t, logs.Callback().Query().Before("gorm:query").Register(callback, observer.observe))
 	t.Cleanup(func() {
+		InvalidateUserRankings()
+		waitForRankingBuilds(t)
 		assert.NoError(t, logs.Callback().Row().Remove(callback))
 		assert.NoError(t, logs.Callback().Query().Remove(callback))
 	})
@@ -684,13 +696,110 @@ func TestUserRankingUsageDatabaseMatrix(t *testing.T) {
 				} {
 					require.NoError(t, logs.Create(&entry).Error)
 				}
-				for range 2 {
+				for attempt := range 2 {
 					observer.queries = 0
 					got, err := model.GetUserRankingUsage(t.Context(), []int{userID}, day+1, day+2*daySeconds+1)
 					require.NoError(t, err)
 					assert.Equal(t, int64(6652), got[userID].TotalTokens)
-					assert.Positive(t, observer.queries, "partial days must remain live even with warm full-day entries")
+					if attempt == 0 {
+						assert.Positive(t, observer.queries, "backfills must refresh exact boundary ranges")
+					} else {
+						assert.Zero(t, observer.queries, "unchanged exact boundaries must reuse parsed usage")
+					}
 				}
+			})
+			t.Run("paged_day_resumes_without_recounting_completed_rows", func(t *testing.T) {
+				logs, observer := newUserRankingUsageFixture(t, db)
+				userIDs := []int{userID, userID + 1}
+				const firstPageID = 2_000_000
+				require.NoError(t, logs.Create(&[]model.Log{
+					{Id: 1_000_000, UserId: userID, CreatedAt: day - 10*daySeconds, Type: model.LogTypeConsume, PromptTokens: 999999},
+					{Id: 1_000_001, UserId: userID + 1, CreatedAt: day + 10*daySeconds, Type: model.LogTypeConsume, PromptTokens: 999999},
+					{Id: firstPageID + 1, UserId: userID, CreatedAt: day + 5*daySeconds, Type: model.LogTypeConsume, PromptTokens: 999999},
+					{Id: firstPageID + 3, UserId: userID, CreatedAt: day + 1, Type: model.LogTypeError, PromptTokens: 999999},
+					{Id: firstPageID + 5, UserId: userID + 2, CreatedAt: day + 1, Type: model.LogTypeConsume, PromptTokens: 999999},
+				}).Error)
+				entries := make([]model.Log, 1001)
+				for i := range entries {
+					entries[i] = model.Log{
+						Id: firstPageID + 2*i, UserId: userIDs[i%len(userIDs)], CreatedAt: day + 1001 - int64(i),
+						Type: model.LogTypeConsume, PromptTokens: 1, Quota: 2,
+					}
+				}
+				require.NoError(t, logs.CreateInBatches(entries, 100).Error)
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				observer.before = func(tx *gorm.DB) {
+					if observer.queries == 2 {
+						cancel()
+						tx.AddError(ctx.Err())
+					}
+				}
+				_, err := model.GetUserRankingUsage(ctx, userIDs, day, day+daySeconds-1)
+				require.ErrorIs(t, err, context.Canceled)
+				observer.queries = 0
+				started, release := make(chan struct{}), make(chan struct{})
+				var once sync.Once
+				observer.before = func(tx *gorm.DB) {
+					once.Do(func() {
+						close(started)
+						select {
+						case <-release:
+						case <-tx.Statement.Context.Done():
+							tx.AddError(tx.Statement.Context.Err())
+						}
+					})
+				}
+				type response struct {
+					usage map[int]model.RankingUserUsage
+					err   error
+				}
+				firstDone, broaderDone := make(chan response, 1), make(chan response, 1)
+				go func() {
+					usage, err := model.GetUserRankingUsage(t.Context(), userIDs, day, day+daySeconds-1)
+					firstDone <- response{usage, err}
+				}()
+				<-started
+				waitingCtx := &rankingWaitContext{Context: t.Context(), waiting: make(chan struct{})}
+				go func() {
+					usage, err := model.GetUserRankingUsage(waitingCtx, userIDs, day-daySeconds, day+2*daySeconds-1)
+					broaderDone <- response{usage, err}
+				}()
+				<-waitingCtx.waiting
+				assert.Equal(t, 1, observer.queries, "another period must wait while one payload batch is active")
+				close(release)
+				first, broader := <-firstDone, <-broaderDone
+				require.NoError(t, first.err)
+				require.NoError(t, broader.err)
+				assert.Equal(t, first.usage, broader.usage)
+				assert.Equal(t, int64(501), first.usage[userID].TotalTokens)
+				assert.Equal(t, int64(1002), first.usage[userID].TotalQuota)
+				assert.Equal(t, int64(500), first.usage[userID+1].TotalTokens)
+				assert.Equal(t, int64(1000), first.usage[userID+1].TotalQuota)
+				assert.Equal(t, 2, observer.queries, "retry must scan only the two unfinished pages")
+				observer.before, observer.queries = nil, 0
+				cached, err := model.GetUserRankingUsage(t.Context(), userIDs, day-daySeconds, day+2*daySeconds-1)
+				require.NoError(t, err)
+				assert.Equal(t, first.usage, cached)
+				assert.Zero(t, observer.queries, "another period must reuse the completed day")
+				// Imported history can arrive after a warm snapshot with a lower ID
+				// and a later timestamp than every row already scanned.
+				require.NoError(t, logs.Create(&model.Log{
+					Id: firstPageID - 20, UserId: userID, CreatedAt: day + daySeconds - 1,
+					Type: model.LogTypeConsume, ModelName: "late-low-id", PromptTokens: 17, Quota: 19,
+				}).Error)
+				refreshed, err := model.GetUserRankingUsage(t.Context(), userIDs, day, day+daySeconds-1)
+				require.NoError(t, err)
+				assert.Equal(t, int64(518), refreshed[userID].TotalTokens)
+				assert.Equal(t, int64(1021), refreshed[userID].TotalQuota)
+				assert.Equal(t, model.RankingModelUsage{TotalTokens: 17, TotalQuota: 19}, refreshed[userID].Models["late-low-id"])
+				assert.Equal(t, first.usage[userID+1], refreshed[userID+1])
+				assert.Positive(t, observer.queries, "a low-ID backfill must invalidate the completed signature")
+				observer.queries = 0
+				again, err := model.GetUserRankingUsage(t.Context(), userIDs, day, day+daySeconds-1)
+				require.NoError(t, err)
+				assert.Equal(t, refreshed, again)
+				assert.Zero(t, observer.queries)
 			})
 			t.Run("cancellation_keeps_completed_day_progress", func(t *testing.T) {
 				logs, observer := newUserRankingUsageFixture(t, db)
@@ -869,4 +978,513 @@ func TestUserRankingSharedFlightCancellation(t *testing.T) {
 	assert.Equal(t, int64(5), got.value.TotalQuota)
 	require.NotNil(t, got.value.Self)
 	assert.True(t, got.value.Self.IsSelf)
+}
+
+// A fixture must not restore global database handles before detached work exits.
+func waitForRankingBuilds(t *testing.T) {
+	t.Helper()
+	rankingBuilds.Lock()
+	done := make([]<-chan struct{}, 0, len(rankingBuilds.items))
+	for _, job := range rankingBuilds.items {
+		done = append(done, job.done)
+	}
+	rankingBuilds.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for _, finished := range done {
+		select {
+		case <-finished:
+		case <-ctx.Done():
+			t.Fatal("ranking background work did not finish before fixture cleanup")
+		}
+	}
+}
+
+func TestUserRankingBackgroundRequests(t *testing.T) {
+	for _, engine := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(engine, func(t *testing.T) {
+			db := openUserRankingTestDatabase(t, engine)
+			require.NoError(t, db.AutoMigrate(&model.Log{}))
+			logs, observer := newUserRankingUsageFixture(t, db)
+			const userID = 96001
+			require.NoError(t, model.DB.Create(&[]model.User{
+				{Id: userID, Username: "background-user", AffCode: "background-user", Status: common.UserStatusEnabled},
+				{Id: userID + 1, Username: "later-user", AffCode: "later-user", Status: common.UserStatusEnabled},
+			}).Error)
+			require.NoError(t, model.DB.Create(&model.UserRankingPreference{
+				UserID: userID, Participating: true, SpendingParticipating: true, TokenUsagePublic: true, SpendingUsagePublic: true,
+			}).Error)
+			now := time.Now().Unix()
+			require.NoError(t, logs.Create(&[]model.Log{
+				{UserId: userID, CreatedAt: now - 10, Type: model.LogTypeConsume, ModelName: "visible", PromptTokens: 30, Quota: 4},
+				{UserId: userID + 1, CreatedAt: now - 10, Type: model.LogTypeConsume, ModelName: "later", PromptTokens: 50, Quota: 8},
+			}).Error)
+			started, release := make(chan context.Context, 1), make(chan struct{})
+			var once sync.Once
+			observer.before = func(tx *gorm.DB) {
+				once.Do(func() {
+					started <- tx.Statement.Context
+					select {
+					case <-release:
+					case <-tx.Statement.Context.Done():
+						tx.AddError(tx.Statement.Context.Err())
+					}
+				})
+			}
+			requestCtx, cancelRequest := context.WithCancel(t.Context())
+			defer cancelRequest()
+			requestDone := make(chan error, 1)
+			go func() {
+				_, err := RequestUserRankings(requestCtx, "24h", userID, model.RankingMetricTokens)
+				requestDone <- err
+			}()
+			barrierCtx, stopBarrier := context.WithTimeout(t.Context(), 10*time.Second)
+			defer stopBarrier()
+			var buildCtx context.Context
+			select {
+			case buildCtx = <-started:
+			case <-barrierCtx.Done():
+				t.Fatal("ranking request did not reach its controlled payload query")
+			}
+			cancelRequest()
+			require.ErrorIs(t, <-requestDone, context.Canceled)
+			assert.NoError(t, buildCtx.Err(), "an HTTP cancellation must not cancel the shared build")
+			_, err := RequestUserRankings(t.Context(), "24h", userID, model.RankingMetricSpending)
+			require.ErrorIs(t, err, ErrRankingsPending)
+			assert.Equal(t, 1, observer.queries, "both metrics must wait for the same payload scan")
+			close(release)
+			waitForRankingBuilds(t)
+			observer.before, observer.queries = nil, 0
+			for _, metric := range []string{model.RankingMetricTokens, model.RankingMetricSpending} {
+				got, err := RequestUserRankings(t.Context(), "24h", userID, metric)
+				require.NoError(t, err)
+				require.Len(t, got.Users, 1)
+				assert.Equal(t, int64(30), got.TotalTokens)
+				assert.Equal(t, int64(4), got.TotalQuota)
+			}
+			assert.Zero(t, observer.queries, "warm responses must not read log payloads")
+			public, private := true, false
+			require.NoError(t, model.UpdateUserRankingPreference(t.Context(), userID, model.UserRankingPreferenceUpdate{
+				SpendingParticipating: &private, ModelDetailsPublic: &private,
+			}))
+			got, err := RequestUserRankings(t.Context(), "24h", userID, model.RankingMetricTokens)
+			require.NoError(t, err)
+			require.NotNil(t, got.Self)
+			assert.Nil(t, got.Self.TotalQuota)
+			assert.Empty(t, got.Self.Models)
+			assert.Zero(t, got.TotalQuota)
+			// Force an expired snapshot while its refresh is held at a fixed barrier.
+			userRankingCache.Lock()
+			for key, cached := range userRankingCache.items {
+				cached.expires = time.Now().Add(-time.Second)
+				userRankingCache.items[key] = cached
+			}
+			userRankingCache.Unlock()
+			require.NoError(t, logs.Create(&model.Log{UserId: userID, CreatedAt: now - 5, Type: model.LogTypeConsume, PromptTokens: 10, Quota: 2}).Error)
+			refreshStarted, refreshRelease := make(chan struct{}), make(chan struct{})
+			var refreshOnce sync.Once
+			observer.before = func(tx *gorm.DB) {
+				refreshOnce.Do(func() {
+					close(refreshStarted)
+					select {
+					case <-refreshRelease:
+					case <-tx.Statement.Context.Done():
+						tx.AddError(tx.Statement.Context.Err())
+					}
+				})
+			}
+			stale, err := RequestUserRankings(t.Context(), "24h", userID, model.RankingMetricTokens)
+			require.NoError(t, err)
+			assert.Equal(t, int64(30), stale.TotalTokens, "the complete stale snapshot must remain usable during refresh")
+			<-refreshStarted
+			require.NoError(t, model.UpdateUserRankingPreference(t.Context(), userID, model.UserRankingPreferenceUpdate{Participating: &private}))
+			withdrawn, err := RequestUserRankings(t.Context(), "24h", userID, model.RankingMetricTokens)
+			require.NoError(t, err)
+			assert.Empty(t, withdrawn.Users, "withdrawal must apply while stale totals are still served")
+			close(refreshRelease)
+			waitForRankingBuilds(t)
+			observer.before, observer.queries = nil, 0
+			// A participant joining a warm snapshot is filled once, then shared.
+			require.NoError(t, model.UpdateUserRankingPreference(t.Context(), userID+1, model.UserRankingPreferenceUpdate{Participating: &public}))
+			_, err = RequestUserRankings(t.Context(), "24h", userID+1, model.RankingMetricTokens)
+			if err != nil {
+				require.ErrorIs(t, err, ErrRankingsPending)
+			}
+			waitForRankingBuilds(t)
+			observer.queries = 0
+			joined, err := RequestUserRankings(t.Context(), "24h", userID+1, model.RankingMetricTokens)
+			require.NoError(t, err)
+			require.NotNil(t, joined.Self)
+			assert.Equal(t, int64(50), joined.TotalTokens)
+			assert.Zero(t, observer.queries, "the completed missing-user fill must be published to the shared snapshot")
+			// A cancelled worker remains active until its actual query callback exits.
+			require.NoError(t, logs.Create(&model.Log{UserId: userID, CreatedAt: now - 3, Type: model.LogTypeConsume, PromptTokens: 1}).Error)
+			workerStarted, workerCancelled, releaseExit := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var workerOnce, exitOnce sync.Once
+			t.Cleanup(func() { exitOnce.Do(func() { close(releaseExit) }) })
+			observer.before = func(tx *gorm.DB) {
+				workerOnce.Do(func() {
+					close(workerStarted)
+					<-tx.Statement.Context.Done()
+					close(workerCancelled)
+					<-releaseExit
+					tx.AddError(tx.Statement.Context.Err())
+				})
+			}
+			go func() {
+				_, err := RequestAdminUserRankings(t.Context(), "24h", 0, model.RankingMetricTokens)
+				requestDone <- err
+			}()
+			<-workerStarted
+			InvalidateUserRankings()
+			<-workerCancelled
+			require.ErrorIs(t, <-requestDone, ErrRankingsPending, "worker completion must wait for the underlying callback to exit")
+			exitOnce.Do(func() { close(releaseExit) })
+			waitForRankingBuilds(t)
+		})
+	}
+}
+
+func TestUserRankingGenerationCancellation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	userRankingCache.Lock()
+	generation := userRankingCache.generation
+	userRankingCache.Unlock()
+	oldKey := fmt.Sprintf("users:%d:test-generation-old", generation)
+	newKey := fmt.Sprintf("users:%d:test-generation-new", generation+1)
+	started := make(chan context.Context, 2)
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		rankingBuilds.Lock()
+		for _, key := range []string{oldKey, newKey} {
+			if job := rankingBuilds.items[key]; job != nil {
+				job.cancel()
+			}
+		}
+		rankingBuilds.Unlock()
+		waitForRankingBuilds(t)
+		rankingBuilds.Lock()
+		delete(rankingBuilds.items, oldKey)
+		delete(rankingBuilds.items, newKey)
+		rankingBuilds.Unlock()
+	})
+	for _, key := range []string{oldKey, newKey} {
+		err := runRankingBuild(ctx, key, func(buildCtx context.Context) error {
+			started <- buildCtx
+			select {
+			case <-release:
+				return nil
+			case <-buildCtx.Done():
+				return buildCtx.Err()
+			}
+		}, 0)
+		require.ErrorIs(t, err, ErrRankingsPending)
+	}
+	first, second := <-started, <-started
+	cancelUserRankingBuilds(generation)
+	// Whichever goroutine started first, exactly the old generation is cancelled.
+	assert.NotEqual(t, first.Err(), second.Err())
+	newErr := runRankingBuild(ctx, newKey, func(context.Context) error {
+		t.Error("the live generation was replaced")
+		return nil
+	}, 0)
+	require.ErrorIs(t, newErr, ErrRankingsPending)
+	close(release)
+	waitForRankingBuilds(t)
+}
+
+func TestUserRankingBackgroundWorkerBound(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	t.Cleanup(func() {
+		rankingBuilds.Lock()
+		for key, job := range rankingBuilds.items {
+			if strings.HasPrefix(key, "test:worker-bound:") {
+				job.cancel()
+			}
+		}
+		rankingBuilds.Unlock()
+		waitForRankingBuilds(t)
+	})
+	started, release := make(chan struct{}, 16), make(chan struct{})
+	for i := range 16 {
+		err := runRankingBuild(ctx, fmt.Sprintf("test:worker-bound:%d", i), func(buildCtx context.Context) error {
+			started <- struct{}{}
+			select {
+			case <-release:
+				return nil
+			case <-buildCtx.Done():
+				return buildCtx.Err()
+			}
+		}, 0)
+		require.ErrorIs(t, err, ErrRankingsPending)
+	}
+	for range 16 {
+		select {
+		case <-started:
+		case <-ctx.Done():
+			t.Fatal("background workers did not reach their controlled barriers")
+		}
+	}
+	err := runRankingBuild(ctx, "test:worker-bound:overflow", func(context.Context) error {
+		t.Error("a seventeenth concurrent background build was started")
+		return nil
+	}, 0)
+	require.ErrorIs(t, err, ErrRankingsPending)
+	close(release)
+	waitForRankingBuilds(t)
+}
+
+func TestUserRankingModelBucketDatabaseMatrix(t *testing.T) {
+	for _, engine := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(engine, func(t *testing.T) {
+			db := openUserRankingTestDatabase(t, engine)
+			require.NoError(t, db.AutoMigrate(&model.QuotaData{}, &model.Ability{}, &model.Channel{}, &model.Model{}, &model.Vendor{}))
+			require.NoError(t, db.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&model.QuotaData{}).Error)
+			previousDB, previousType := model.DB, common.MainDatabaseType()
+			model.DB = db
+			common.SetMainDatabaseType(common.DatabaseType(engine))
+			model.InvalidatePricingCache()
+			t.Cleanup(func() {
+				waitForRankingBuilds(t)
+				model.DB = previousDB
+				common.SetMainDatabaseType(previousType)
+				model.InvalidatePricingCache()
+			})
+			now := time.Date(2026, 1, 12, 12, 30, 0, 0, time.UTC)
+			config, err := rankingConfig("24h")
+			require.NoError(t, err)
+			start, end := rankingTimeRange(config, now)
+			entries := []model.QuotaData{
+				{ModelName: "alpha", CreatedAt: start + 1, TokenUsed: 100},
+				{ModelName: "alpha", CreatedAt: start + 2, TokenUsed: -20},
+				{ModelName: "alpha", CreatedAt: start + 3600, TokenUsed: -30},
+				{ModelName: "alpha", CreatedAt: start + 7200, TokenUsed: 5},
+				{ModelName: "alpha", CreatedAt: start + 7201, TokenUsed: -5},
+				{ModelName: "beta", CreatedAt: start + 1, TokenUsed: 50},
+				{ModelName: "zero", CreatedAt: start + 1, TokenUsed: 20},
+				{ModelName: "zero", CreatedAt: start + 3600, TokenUsed: -20},
+				{ModelName: "negative", CreatedAt: start + 1, TokenUsed: 10},
+				{ModelName: "negative", CreatedAt: start + 3600, TokenUsed: -20},
+				{CreatedAt: start + 1, TokenUsed: 1000},
+				{ModelName: "alpha", CreatedAt: start - 1, TokenUsed: 25},
+				{ModelName: "beta", CreatedAt: start - 1, TokenUsed: 100},
+			}
+			require.NoError(t, db.Create(&entries).Error)
+			legacy, err := model.GetRankingQuotaTotalsWithContext(t.Context(), start, end)
+			require.NoError(t, err)
+			assert.Equal(t, []model.RankingQuotaTotal{{ModelName: "alpha", TotalTokens: 50}, {ModelName: "beta", TotalTokens: 50}}, legacy)
+			got, err := buildRankingsSnapshotWithContext(t.Context(), config, now)
+			require.NoError(t, err)
+			require.Len(t, got.Models, 2)
+			for i, item := range legacy {
+				assert.Equal(t, item.ModelName, got.Models[i].ModelName)
+				assert.Equal(t, item.TotalTokens, got.Models[i].TotalTokens)
+			}
+			assert.Equal(t, 100.0, got.Models[0].GrowthPct)
+			assert.Equal(t, -50.0, got.Models[1].GrowthPct)
+			require.Len(t, got.Vendors, 1)
+			assert.Equal(t, int64(100), got.Vendors[0].TotalTokens)
+			var historyTotal int64
+			for _, point := range got.ModelsHistory.Points {
+				assert.Positive(t, point.Tokens)
+				historyTotal += point.Tokens
+			}
+			assert.Equal(t, int64(130), historyTotal, "positive-only history must not inflate signed period totals")
+			// Request tests use recent data so their rolling window survives calendar changes.
+			require.NoError(t, db.Session(&gorm.Session{AllowGlobalUpdate: true}).Delete(&model.QuotaData{}).Error)
+			recent := time.Now().Unix() - 10
+			require.NoError(t, db.Create(&[]model.QuotaData{
+				{ModelName: "alpha", CreatedAt: recent, TokenUsed: 75},
+				{ModelName: "beta", CreatedAt: recent, TokenUsed: 150},
+			}).Error)
+			started, release := make(chan context.Context, 1), make(chan struct{})
+			var once sync.Once
+			const callback = "test:ranking_model_background"
+			require.NoError(t, db.Callback().Query().Before("gorm:query").Register(callback, func(tx *gorm.DB) {
+				if tx.Statement.Table != "quota_data" {
+					return
+				}
+				once.Do(func() {
+					started <- tx.Statement.Context
+					select {
+					case <-release:
+					case <-tx.Statement.Context.Done():
+						tx.AddError(tx.Statement.Context.Err())
+					}
+				})
+			}))
+			t.Cleanup(func() {
+				rankingBuilds.Lock()
+				for key, job := range rankingBuilds.items {
+					if strings.HasPrefix(key, fmt.Sprintf("models:%p:", db)) {
+						job.cancel()
+					}
+				}
+				rankingBuilds.Unlock()
+				waitForRankingBuilds(t)
+				assert.NoError(t, db.Callback().Query().Remove(callback))
+			})
+			requestCtx, cancelRequest := context.WithCancel(t.Context())
+			defer cancelRequest()
+			requestDone := make(chan error, 1)
+			go func() {
+				_, err := RequestRankingsSnapshot(requestCtx, "24h")
+				requestDone <- err
+			}()
+			barrierCtx, stopBarrier := context.WithTimeout(t.Context(), 10*time.Second)
+			defer stopBarrier()
+			var buildCtx context.Context
+			select {
+			case buildCtx = <-started:
+			case <-barrierCtx.Done():
+				t.Fatal("model ranking request did not reach its controlled quota query")
+			}
+			cancelRequest()
+			require.ErrorIs(t, <-requestDone, context.Canceled)
+			assert.NoError(t, buildCtx.Err())
+			close(release)
+			waitForRankingBuilds(t)
+			ready, err := RequestRankingsSnapshot(t.Context(), "24h")
+			require.NoError(t, err)
+			require.Len(t, ready.Models, 2)
+			assert.Equal(t, int64(150), ready.Models[0].TotalTokens)
+			assert.Equal(t, int64(75), ready.Models[1].TotalTokens)
+			rankingCacheMu.Lock()
+			for key, cached := range rankingCache {
+				if cached.data == ready {
+					cached.expiresAt = time.Now().Add(-time.Second)
+					rankingCache[key] = cached
+				}
+			}
+			rankingCacheMu.Unlock()
+			once = sync.Once{}
+			started, release = make(chan context.Context, 1), make(chan struct{})
+			stale, err := RequestRankingsSnapshot(t.Context(), "24h")
+			require.NoError(t, err)
+			assert.Same(t, ready, stale, "an expired complete snapshot must return while refresh is blocked")
+			select {
+			case <-started:
+			case <-barrierCtx.Done():
+				t.Fatal("stale model ranking refresh did not reach its controlled quota query")
+			}
+			close(release)
+			waitForRankingBuilds(t)
+		})
+	}
+}
+
+func TestUserRankingClickHouseUsage(t *testing.T) {
+	logs := openUserRankingTestDatabase(t, "clickhouse")
+	require.False(t, logs.Migrator().HasTable(&model.Log{}), "ClickHouse DSN must point to this task's isolated database")
+	require.NoError(t, logs.Exec(`CREATE TABLE logs (
+		id Int64, user_id Int32, created_at Int64, type Int32,
+		prompt_tokens Nullable(Int32), completion_tokens Nullable(Int32),
+		quota Nullable(Int32), other Nullable(String), model_name Nullable(String)
+	) ENGINE = MergeTree() ORDER BY (created_at, user_id)`).Error)
+	t.Cleanup(func() { assert.NoError(t, logs.Migrator().DropTable(&model.Log{})) })
+	mainDB := openUserRankingTestDatabase(t, "sqlite")
+	require.NoError(t, mainDB.AutoMigrate(&model.Log{}))
+	previousDB, previousLogs := model.DB, model.LOG_DB
+	previousMainType, previousLogType := common.MainDatabaseType(), common.LogDatabaseType()
+	model.DB, model.LOG_DB = mainDB, logs
+	common.SetDatabaseTypes(common.DatabaseTypeSQLite, common.DatabaseTypeClickHouse)
+	InvalidateUserRankings()
+	t.Cleanup(func() {
+		InvalidateUserRankings()
+		waitForRankingBuilds(t)
+		model.DB, model.LOG_DB = previousDB, previousLogs
+		common.SetDatabaseTypes(previousMainType, previousLogType)
+	})
+	const userID = 97001
+	day := time.Date(2026, 1, 10, 0, 0, 0, 0, time.UTC).Unix()
+	for _, entry := range []struct {
+		user, offset              int64
+		prompt, completion, quota any
+		other, modelName          any
+	}{
+		{userID, 1, 100, 20, 7, `{"cache_tokens":80}`, "openai"},
+		{userID, 1, 100, 20, 11, `{"usage_semantic":"anthropic","cache_tokens":80,"cache_creation_tokens":30}`, "claude"},
+		{userID, 3601, nil, 5, nil, nil, nil},
+		{userID + 1, 1, 9999, 0, 9999, "", "other-user"},
+	} {
+		require.NoError(t, logs.Exec("INSERT INTO logs (id, user_id, created_at, type, prompt_tokens, completion_tokens, quota, other, model_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			0, entry.user, day+entry.offset, model.LogTypeConsume, entry.prompt, entry.completion, entry.quota, entry.other, entry.modelName).Error)
+	}
+	require.NoError(t, mainDB.Create(&model.Log{UserId: userID, CreatedAt: day + 1, Type: model.LogTypeConsume, PromptTokens: 99999}).Error)
+	for range 2 {
+		got, err := model.GetUserRankingUsage(t.Context(), []int{userID}, day, day+7200)
+		require.NoError(t, err)
+		assert.Equal(t, model.RankingUserUsage{TotalTokens: 355, TotalQuota: 18, Models: map[string]model.RankingModelUsage{
+			"openai": {TotalTokens: 120, TotalQuota: 7}, "claude": {TotalTokens: 230, TotalQuota: 11}, "": {TotalTokens: 5},
+		}}, got[userID], "zero and duplicate ClickHouse IDs must retain every log row")
+	}
+}
+
+func TestUserRankingRedisPersistsAcrossLogConnections(t *testing.T) {
+	cache := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: cache.Addr(), MaxRetries: -1})
+	previousRedis, previousEnabled := common.RDB, common.RedisEnabled
+	previousLogs, previousLogType := model.LOG_DB, common.LogDatabaseType()
+	common.RDB, common.RedisEnabled = client, true
+	common.SetLogDatabaseType(common.DatabaseTypeSQLite)
+	t.Cleanup(func() {
+		common.RDB, common.RedisEnabled = previousRedis, previousEnabled
+		model.LOG_DB = previousLogs
+		common.SetLogDatabaseType(previousLogType)
+		assert.NoError(t, client.Close())
+	})
+	root := t.TempDir()
+	source, other := filepath.Join(root, "source.db"), filepath.Join(root, "other.db")
+	const userID = 98001
+	hour := time.Date(2026, 1, 10, 1, 0, 0, 0, time.UTC).Unix()
+	for _, test := range []struct {
+		name, path           string
+		insert, remove, want int
+		payload, disconnect  bool
+	}{
+		{"cold_source", source, 42, 0, 42, true, false},
+		{"same_dsn_new_handle", source, 0, 0, 42, false, false},
+		{"other_dsn_same_ids_and_count", other, 90, 0, 90, true, false},
+		{"backfill_changes_signature", source, 8, 0, 50, true, false},
+		{"delete_nonmaximum_id", source, 0, 1, 8, true, false},
+		{"redis_disconnect_falls_back", source, 0, 0, 8, true, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, err := gorm.Open(sqlite.Open(test.path), &gorm.Config{})
+			require.NoError(t, err)
+			pool, err := db.DB()
+			require.NoError(t, err)
+			pool.SetMaxOpenConns(1)
+			t.Cleanup(func() { assert.NoError(t, pool.Close()) })
+			require.NoError(t, db.AutoMigrate(&model.Log{}))
+			model.LOG_DB = db
+			if test.insert > 0 {
+				require.NoError(t, db.Create(&model.Log{UserId: userID, CreatedAt: hour + 1, Type: model.LogTypeConsume, PromptTokens: test.insert, Quota: test.insert}).Error)
+			}
+			if test.remove > 0 {
+				require.NoError(t, db.Delete(&model.Log{}, test.remove).Error)
+			}
+			if test.disconnect {
+				cache.Close()
+			}
+			observer := &rankingPayloadObserver{}
+			const callback = "test:ranking_redis_payload"
+			require.NoError(t, db.Callback().Row().Before("gorm:row").Register(callback, observer.observe))
+			t.Cleanup(func() { assert.NoError(t, db.Callback().Row().Remove(callback)) })
+			got, err := model.GetUserRankingUsage(t.Context(), []int{userID}, hour, hour+3599)
+			require.NoError(t, err)
+			assert.Equal(t, int64(test.want), got[userID].TotalTokens)
+			assert.Equal(t, int64(test.want), got[userID].TotalQuota)
+			if test.payload {
+				assert.Positive(t, observer.queries)
+			} else {
+				assert.Zero(t, observer.queries, "a new connection must load completed usage from Redis")
+			}
+			if !test.disconnect {
+				assert.NotEmpty(t, cache.Keys())
+			}
+		})
+	}
 }

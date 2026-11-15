@@ -35,9 +35,14 @@ func getUserRankings(c *gin.Context, administrator bool) {
 	var result *service.UserRankingsResponse
 	var err error
 	if administrator {
-		result, err = service.GetAdminUserRankings(c.Request.Context(), period, c.GetInt("id"), metric)
+		result, err = service.RequestAdminUserRankings(c.Request.Context(), period, c.GetInt("id"), metric)
 	} else {
-		result, err = service.GetUserRankings(c.Request.Context(), period, c.GetInt("id"), metric)
+		result, err = service.RequestUserRankings(c.Request.Context(), period, c.GetInt("id"), metric)
+	}
+	if errors.Is(err, service.ErrRankingsPending) {
+		c.Header("Retry-After", "1")
+		c.JSON(http.StatusAccepted, gin.H{"success": true, "pending": true})
+		return
 	}
 	if err != nil {
 		common.SysError("user rankings query failed: " + err.Error())

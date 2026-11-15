@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"sort"
 	"sync"
@@ -59,6 +60,8 @@ var userRankingBuild singleflight.Group
 
 type userRankingOptions struct {
 	administrator bool
+	cachedOnly    bool
+	background    bool
 }
 
 func (options userRankingOptions) participants(ctx context.Context, metric string) ([]model.RankingParticipant, error) {
@@ -71,8 +74,10 @@ func (options userRankingOptions) participants(ctx context.Context, metric strin
 func InvalidateUserRankings() {
 	userRankingCache.Lock()
 	clear(userRankingCache.items)
+	generation := userRankingCache.generation
 	userRankingCache.generation++
 	userRankingCache.Unlock()
+	cancelUserRankingBuilds(generation)
 }
 
 // The optional metric keeps existing token-board callers source compatible.
@@ -87,6 +92,64 @@ func GetUserRankings(ctx context.Context, period string, viewerID int, metrics .
 // Callers must enforce administrator authorization before requesting this view.
 func GetAdminUserRankings(ctx context.Context, period string, viewerID int, metric string) (*UserRankingsResponse, error) {
 	return getUserRankings(ctx, period, viewerID, metric, userRankingOptions{administrator: true})
+}
+
+func RequestUserRankings(ctx context.Context, period string, viewerID int, metric string) (*UserRankingsResponse, error) {
+	return requestUserRankings(ctx, period, viewerID, metric, userRankingOptions{})
+}
+
+func RequestAdminUserRankings(ctx context.Context, period string, viewerID int, metric string) (*UserRankingsResponse, error) {
+	return requestUserRankings(ctx, period, viewerID, metric, userRankingOptions{administrator: true})
+}
+
+func requestUserRankings(ctx context.Context, period string, viewerID int, metric string, options userRankingOptions) (*UserRankingsResponse, error) {
+	options.cachedOnly = true
+	result, err := getUserRankings(ctx, period, viewerID, metric, options)
+	if err != nil && !errors.Is(err, ErrRankingsPending) {
+		return nil, err
+	}
+	config, err := rankingConfig(period)
+	if err != nil {
+		return nil, err
+	}
+	audience := "public"
+	if options.administrator {
+		audience = "admin"
+	}
+	cacheKey := fmt.Sprintf("%p:%p:%s:%s", model.DB, model.LOG_DB, audience, config.cacheKey(time.Now()))
+	userRankingCache.Lock()
+	cached, ok := userRankingCache.items[cacheKey]
+	generation := userRankingCache.generation
+	userRankingCache.Unlock()
+	if result != nil && ok && time.Now().Before(cached.expires) {
+		return result, nil
+	}
+	options.cachedOnly, options.background = false, true
+	wait := 150 * time.Millisecond
+	if result != nil {
+		wait = 0
+	}
+	buildErr := runRankingBuild(ctx, fmt.Sprintf("users:%d:%s", generation, cacheKey), func(buildCtx context.Context) error {
+		userRankingCache.Lock()
+		currentGeneration := userRankingCache.generation
+		userRankingCache.Unlock()
+		if currentGeneration != generation {
+			return context.Canceled
+		}
+		_, err := getUserRankings(buildCtx, period, 0, metric, options)
+		return err
+	}, wait)
+	if result != nil {
+		return result, nil
+	}
+	if buildErr != nil {
+		if errors.Is(buildErr, context.Canceled) && ctx.Err() == nil {
+			return nil, ErrRankingsPending
+		}
+		return nil, buildErr
+	}
+	options.cachedOnly, options.background = true, false
+	return getUserRankings(ctx, period, viewerID, metric, options)
 }
 
 func getUserRankings(ctx context.Context, period string, viewerID int, metric string, options userRankingOptions) (*UserRankingsResponse, error) {
@@ -104,7 +167,11 @@ func getUserRankings(ctx context.Context, period string, viewerID int, metric st
 	}
 	// Both metrics are derived from the same usage; build it once even when
 	// older clients request the two boards concurrently.
-	cacheKey := audience + ":" + config.cacheKey(now)
+	cacheKey := fmt.Sprintf("%p:%p:%s:%s", model.DB, model.LOG_DB, audience, config.cacheKey(now))
+	queryTimeout := 20 * time.Second
+	if options.background {
+		queryTimeout = rankingBackgroundTimeout
+	}
 	build := func() (any, error) {
 		userRankingCache.Lock()
 		cached, ok := userRankingCache.items[cacheKey]
@@ -141,7 +208,7 @@ func getUserRankings(ctx context.Context, period string, viewerID int, metric st
 			}
 		}
 		start, end := rankingTimeRange(config, now)
-		queryCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		queryCtx, cancel := context.WithTimeout(ctx, queryTimeout)
 		defer cancel()
 		totals, err := model.GetUserRankingUsage(queryCtx, ids, start, end)
 		if err != nil {
@@ -152,7 +219,7 @@ func getUserRankings(ctx context.Context, period string, viewerID int, metric st
 		if generation == userRankingCache.generation {
 			// Drop expired calendar-period keys along with other stale snapshots.
 			for key, item := range userRankingCache.items {
-				if !now.Before(item.expires) {
+				if now.After(item.expires.Add(rankingSnapshotMaxStale)) {
 					delete(userRankingCache.items, key)
 				}
 			}
@@ -162,7 +229,27 @@ func getUserRankings(ctx context.Context, period string, viewerID int, metric st
 		return cached, nil
 	}
 	var cached userRankingTotals
-	for {
+	if options.cachedOnly {
+		userRankingCache.Lock()
+		var ok bool
+		cached, ok = userRankingCache.items[cacheKey]
+		userRankingCache.Unlock()
+		if !ok || now.After(cached.expires.Add(rankingSnapshotMaxStale)) {
+			return nil, ErrRankingsPending
+		}
+	}
+	for !options.cachedOnly {
+		if options.background {
+			value, err, _ := userRankingBuild.Do(cacheKey, build)
+			if errors.Is(err, context.Canceled) && ctx.Err() == nil {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			cached = value.(userRankingTotals)
+			break
+		}
 		result := userRankingBuild.DoChan(cacheKey, build)
 		select {
 		case <-ctx.Done():
@@ -195,7 +282,10 @@ func getUserRankings(ctx context.Context, period string, viewerID int, metric st
 		}
 	}
 	if len(missing) > 0 {
-		queryCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		if options.cachedOnly {
+			return nil, ErrRankingsPending
+		}
+		queryCtx, cancel := context.WithTimeout(ctx, queryTimeout)
 		defer cancel()
 		totals, err := model.GetUserRankingUsage(queryCtx, missing, cached.start, cached.end)
 		if err != nil {
@@ -203,6 +293,13 @@ func getUserRankings(ctx context.Context, period string, viewerID int, metric st
 		}
 		cached.totals = maps.Clone(cached.totals)
 		maps.Copy(cached.totals, totals)
+		userRankingCache.Lock()
+		if current, ok := userRankingCache.items[cacheKey]; ok && current.end == cached.end && current.expires.Equal(cached.expires) {
+			current.totals = maps.Clone(current.totals)
+			maps.Copy(current.totals, totals)
+			userRankingCache.items[cacheKey] = current
+		}
+		userRankingCache.Unlock()
 	}
 	sort.SliceStable(participants, func(i, j int) bool {
 		left, right := cached.totals[participants[i].ID], cached.totals[participants[j].ID]

@@ -224,24 +224,43 @@ type RankingUserUsage struct {
 	Models      map[string]RankingModelUsage
 }
 
-func scanUserRankingUsage(ctx context.Context, userIDs []int, start, end int64) (map[int]rankingUsageDay, error) {
+func scanUserRankingUsage(db *gorm.DB, userIDs []int, start, end int64, cursors ...rankingUsageCursor) (map[int]rankingUsageDay, error) {
 	totals := make(map[int]rankingUsageDay, len(userIDs))
 	for _, userID := range userIDs {
 		totals[userID] = rankingUsageDay{usage: RankingUserUsage{Models: make(map[string]RankingModelUsage)}}
 	}
 	for offset := 0; offset < len(userIDs); offset += 500 {
 		batch := userIDs[offset:min(offset+500, len(userIDs))]
-		rows, err := LOG_DB.WithContext(ctx).Model(&Log{}).
+		query := db.Model(&Log{}).
 			Select("id, user_id, prompt_tokens, completion_tokens, other, model_name, quota").
-			Where("type = ? AND user_id IN ? AND created_at >= ? AND created_at <= ?", LogTypeConsume, batch, start, end).
-			Rows()
+			Where("type = ? AND user_id IN ? AND created_at >= ? AND created_at <= ?", LogTypeConsume, batch, start, end)
+		if len(cursors) > 0 {
+			conditions := make([]string, 0, len(cursors))
+			arguments := make([]any, 0, 3*len(cursors))
+			lowerID, upperID := cursors[0].afterID, cursors[0].lastID
+			for _, cursor := range cursors {
+				conditions = append(conditions, "(user_id = ? AND id > ? AND id <= ?)")
+				arguments = append(arguments, cursor.userID, cursor.afterID, cursor.lastID)
+				lowerID = min(lowerID, cursor.afterID)
+				upperID = max(upperID, cursor.lastID)
+			}
+			// The envelope is implied by the per-user cursors. Making it
+			// explicit prevents an ordered plan from starting at historical ID 0.
+			query = query.Where("id > ? AND id <= ?", lowerID, upperID).
+				Where("("+strings.Join(conditions, " OR ")+")", arguments...).Order("id").Limit(rankingUsageBatchSize)
+		}
+		rows, err := query.Rows()
 		if err != nil {
 			return nil, err
 		}
 		for rows.Next() {
+			if err := db.Statement.Context.Err(); err != nil {
+				rows.Close()
+				return nil, err
+			}
 			var userID int
 			var id int64
-			var prompt, completion int64
+			var prompt, completion *int64
 			var quota *int64
 			var other, modelName *string
 			if err := rows.Scan(&id, &userID, &prompt, &completion, &other, &modelName, &quota); err != nil {
@@ -252,7 +271,14 @@ func scanUserRankingUsage(ctx context.Context, userIDs []int, start, end int64) 
 			if other != nil {
 				metadata = *other
 			}
-			tokens := RankingTokenTotal(prompt, completion, metadata)
+			var input, output int64
+			if prompt != nil {
+				input = *prompt
+			}
+			if completion != nil {
+				output = *completion
+			}
+			tokens := RankingTokenTotal(input, output, metadata)
 			var consumed int64
 			if quota != nil {
 				consumed = max(*quota, 0)

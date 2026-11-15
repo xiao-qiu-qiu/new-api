@@ -23,6 +23,7 @@ import { ROLE } from '@/lib/roles'
 import { requireServerSuccess } from '@/lib/server-error-message'
 import { useAuthStore } from '@/stores/auth-store'
 
+import { getRankingSnapshot } from '../api'
 import type { RankingPeriod } from '../types'
 
 export type RankingMetric = 'tokens' | 'spending'
@@ -91,11 +92,12 @@ export function useUserRankings(
       adminMode ? 'admin' : 'public',
     ],
     queryFn: async ({ signal }) => {
-      const response = await api.get<Response<UserRankingSnapshot>>(
+      const response = await getRankingSnapshot<UserRankingSnapshot>(
         adminMode ? '/api/rankings/users/admin' : '/api/rankings/users',
-        { params: { period, metric }, signal }
+        { period, metric },
+        signal
       )
-      return requireServerSuccess(response.data).data
+      return response.data
     },
     staleTime: 30_000,
     // Polling and the existing Retry action handle recovery without retry bursts.

@@ -17,18 +17,54 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { api } from '@/lib/api'
+import { requireServerSuccess } from '@/lib/server-error-message'
 
 import type { RankingPeriod, RankingsSnapshot } from './types'
 
-type RankingsResponse = {
+type RankingsResponse<T> = {
   success: boolean
   message?: string
-  data: RankingsSnapshot
+  pending?: boolean
+  data: T
+}
+
+// Keep the existing loading state until a complete snapshot is available.
+// Polling belongs to the query's AbortSignal, so leaving a board stops it.
+export async function getRankingSnapshot<T>(
+  url: string,
+  params: Record<string, string>,
+  signal?: AbortSignal
+): Promise<RankingsResponse<T>> {
+  for (;;) {
+    signal?.throwIfAborted()
+    const response = await api.get<RankingsResponse<T>>(url, { params, signal })
+    if (response.status !== 202 || response.data.pending !== true) {
+      return requireServerSuccess(response.data)
+    }
+    const retryAfter = Number(response.headers?.['retry-after'])
+    const delay =
+      Number.isFinite(retryAfter) && retryAfter > 0
+        ? Math.min(5_000, Math.max(500, retryAfter * 1_000))
+        : 1_000
+    await new Promise<void>((resolve, reject) => {
+      const abort = () => {
+        clearTimeout(timer)
+        signal?.removeEventListener('abort', abort)
+        reject(signal?.reason ?? new DOMException('Aborted', 'AbortError'))
+      }
+      const timer = setTimeout(() => {
+        signal?.removeEventListener('abort', abort)
+        resolve()
+      }, delay)
+      signal?.addEventListener('abort', abort, { once: true })
+      if (signal?.aborted) abort()
+    })
+  }
 }
 
 export async function getRankings(
-  period: RankingPeriod
-): Promise<RankingsResponse> {
-  const res = await api.get('/api/rankings', { params: { period } })
-  return res.data
+  period: RankingPeriod,
+  signal?: AbortSignal
+): Promise<RankingsResponse<RankingsSnapshot>> {
+  return getRankingSnapshot('/api/rankings', { period }, signal)
 }
