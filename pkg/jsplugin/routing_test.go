@@ -831,6 +831,11 @@ func TestDeclarativeRouteValidationProtectsNamespacesAndCanonicalSyntax(t *testi
 			expectedError: "reserved namespace /security",
 		},
 		{
+			name:          "admin API keys page",
+			route:         Route{Method: "GET", Path: "/admin/keys", Type: RouteTypeQuery, Render: "native"},
+			expectedError: "reserved namespace /admin",
+		},
+		{
 			name:          "dynamic root can claim reserved subtree",
 			route:         Route{Method: "POST", Path: "/:root/jobs", Type: RouteTypeSubmit},
 			expectedError: "intersects reserved namespace",
@@ -1095,7 +1100,7 @@ func TestReservedNamespaceChecksUseSegmentBoundaries(t *testing.T) {
 // TypeSafe 1.2.0 declares /v1/systemone and /typesafe/v1/systemone; the
 // declaration serves it and the copy is not added again.
 func TestPluginKeyAndKeyAddressesAreValidated(t *testing.T) {
-	for _, key := range []string{"api", "v1", "assets", "console"} {
+	for _, key := range []string{"api", "v1", "assets", "console", "admin"} {
 		meta := Meta{APIVersion: 1, Key: key, Name: "Key", Version: "1.0.0", Author: AuthorMeta{Name: "Test"}, Models: []string{"model"}, FetchMode: "per_task"}
 		require.ErrorContains(t, ValidateV1Meta(meta), "is a reserved path segment", key)
 	}
