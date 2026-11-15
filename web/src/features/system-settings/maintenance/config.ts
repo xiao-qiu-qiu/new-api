@@ -88,6 +88,7 @@ export const SIDEBAR_MODULES_DEFAULT: SidebarModulesAdminConfig = {
     models: true,
     redemption: true,
     user: true,
+    apiKeys: true,
     setting: true,
     subscription: true,
   },

@@ -222,6 +222,8 @@ func TokenOperationAudit() gin.HandlerFunc {
 			if c.Query("status_only") != "" {
 				action, content = "token.status_update", "API token status update"
 			}
+		case "PUT /api/token/admin/group":
+			action, content = "token.admin_group_update", "Administrator updated API token groups"
 		case "DELETE /api/token/:id":
 			action, content = "token.delete", "API token deletion"
 		case "POST /api/token/batch":
@@ -256,6 +258,7 @@ func TokenOperationAudit() gin.HandlerFunc {
 			entry.Success = entry.Status < 400 && common.GetContextKeyBool(c, constant.ContextKeyTokenAuditSucceeded)
 		}
 		model.RecordAuditLog(c, entry)
+		common.SetContextKey(c, constant.ContextKeyAuditLogged, true)
 	}
 }
 

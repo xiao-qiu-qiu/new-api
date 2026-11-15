@@ -1093,4 +1093,8 @@ export const STATIC_I18N_KEYS = [
   'Channel priorities changed. Refresh and try again.',
   'Invalid channel priority move',
   'Channel priority is outside the sortable range',
+  // Administrator API key management errors and audit events.
+  'Some API keys or their owners no longer exist',
+  'Failed to update API key groups',
+  'Updated API key groups',
 ] as const

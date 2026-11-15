@@ -2,6 +2,7 @@ package controller
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -20,8 +21,11 @@ import (
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/glebarez/sqlite"
+	"github.com/go-redis/redis/v8"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/mysql"
@@ -1101,5 +1105,305 @@ func verifyAPITokenAudit(t *testing.T) {
 		var count int64
 		require.NoError(t, model.DB.Model(&model.Token{}).Where("name = ?", "audit-down").Count(&count).Error)
 		assert.EqualValues(t, 1, count)
+	})
+}
+
+func TestAdminTokenManagementDatabaseMatrix(t *testing.T) {
+	for _, database := range []struct {
+		name, env string
+		typ       common.DatabaseType
+	}{
+		{"sqlite", "", common.DatabaseTypeSQLite},
+		{"mysql", "ADMIN_TOKEN_MYSQL_DSN", common.DatabaseTypeMySQL},
+		{"postgres", "ADMIN_TOKEN_POSTGRES_DSN", common.DatabaseTypePostgreSQL},
+	} {
+		t.Run(database.name, func(t *testing.T) {
+			dsn := os.Getenv(database.env)
+			if database.env != "" && dsn == "" {
+				t.Skip(database.env + " is not configured")
+			}
+			previousDB, previousLogDB, previousRedis := model.DB, model.LOG_DB, common.RedisEnabled
+			previousMain, previousLog := common.MainDatabaseType(), common.LogDatabaseType()
+			previousMaster, previousSecret := common.IsMasterNode, common.SessionSecret
+			t.Cleanup(func() {
+				model.DB, model.LOG_DB, common.RedisEnabled = previousDB, previousLogDB, previousRedis
+				common.SetDatabaseTypes(previousMain, previousLog)
+				common.IsMasterNode, common.SessionSecret = previousMaster, previousSecret
+			})
+			gin.SetMode(gin.TestMode)
+			common.RedisEnabled, common.IsMasterNode = false, true
+			common.SessionSecret = "admin-token-controller-test-secret"
+			t.Setenv("LOG_SQL_DSN", "")
+			db, _ := newAuditTestDatabase(t, database.name, dsn)
+			model.DB = db
+			common.SetDatabaseTypes(database.typ, database.typ)
+			require.NoError(t, db.AutoMigrate(&model.User{}, &model.UserSession{}, &model.UserAccessToken{}, &model.Token{}, &model.Option{}))
+			require.NoError(t, model.EnsureLegacyAccessTokenRetireAt(time.Now().Unix()))
+			require.NoError(t, model.InitLogDB())
+			logDB, _ := newAuditTestDatabase(t, database.name, dsn)
+			model.LOG_DB = logDB
+			require.NoError(t, model.MigrateAuditLogs())
+			versionSQL := "SELECT version()"
+			if database.name == "sqlite" {
+				versionSQL = "SELECT sqlite_version()"
+			}
+			var version string
+			require.NoError(t, db.Raw(versionSQL).Scan(&version).Error)
+			t.Logf("database version: %s", version)
+			configureTokenAutoGroupsTest(t, "2", `["default","vip"]`)
+			special := ratio_setting.GetGroupRatioSetting().GroupSpecialUsableGroup
+			require.NoError(t, special.UnmarshalJSON([]byte(`{"alpha":{"-:vip":""},"adminOnly":{"+:blocked":"Blocked"}}`)))
+			verifyAdminTokenManagement(t)
+			var mainAuditCount int64
+			require.NoError(t, db.Model(&model.AuditLog{}).Count(&mainAuditCount).Error)
+			assert.Zero(t, mainAuditCount, "admin token audits must use the separately configured log database")
+		})
+	}
+}
+
+func adminTokenTestRequest(t *testing.T, router *gin.Engine, credential, method, path string, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	var payload []byte
+	if body != nil {
+		var err error
+		payload, err = common.Marshal(body)
+		require.NoError(t, err)
+	}
+	request := httptest.NewRequest(method, "/api/token/admin"+path, bytes.NewReader(payload))
+	request.Header.Set("Content-Type", "application/json")
+	if credential != "" {
+		request.Header.Set("Authorization", "Bearer "+credential)
+	}
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	return response
+}
+
+func verifyAdminTokenManagement(t *testing.T) {
+	t.Helper()
+	users := make([]model.User, 5)
+	credentials := make([]string, len(users))
+	for i, role := range []int{common.RoleRootUser, common.RoleAdminUser, common.RoleAdminUser, common.RoleCommonUser, common.RoleCommonUser} {
+		users[i] = model.User{Username: []string{"root-owner", "admin-owner", "peer-owner", "alpha-owner", "beta-owner"}[i], Password: "unused", Role: role, Status: common.UserStatusEnabled, Group: "default", AuthVersion: 1, AffCode: fmt.Sprintf("admin-token-%d", i)}
+		if i == 1 {
+			users[i].Group = "adminOnly"
+			legacy := "admin-token-legacy-secret"
+			users[i].AccessToken = &legacy
+		}
+		if i == 3 {
+			users[i].Group, users[i].DisplayName = "alpha", "展示名"
+		}
+		require.NoError(t, model.DB.Create(&users[i]).Error)
+		_, credentials[i] = createAccessTokenTestSession(t, users[i].Id, fmt.Sprintf("admin-token-session-%d", i))
+	}
+	tokens := make([]model.Token, 6)
+	for i := range tokens {
+		owner := min(i, 4)
+		if i == 5 {
+			owner = 3
+		}
+		tokens[i] = model.Token{UserId: users[owner].Id, Key: fmt.Sprintf("private-admin-api-key-secret-%d", i), Name: fmt.Sprintf("named-%d", i), Group: "old%_", Status: common.TokenStatusEnabled, CreatedTime: 11, AccessedTime: 12, ExpiredTime: -1, RemainQuota: 234, UsedQuota: 56, ModelLimitsEnabled: true, ModelLimits: "private-model", AllowUserQuotaQuery: true, OpenAITierPolicy: model.OpenAITierPolicyUltrafast}
+		if i == 5 {
+			tokens[i].Name, tokens[i].Group, tokens[i].AutoGroups, tokens[i].CrossGroupRetry = "literal_%", "auto", `["old%_","old%_longer"]`, true
+		}
+		require.NoError(t, model.DB.Create(&tokens[i]).Error)
+	}
+	deletedOwner := model.User{Username: "deleted-owner", Password: "unused", AffCode: "deleted-admin-token"}
+	require.NoError(t, model.DB.Create(&deletedOwner).Error)
+	require.NoError(t, model.DB.Delete(&deletedOwner).Error)
+	require.NoError(t, model.DB.Create(&model.Token{UserId: deletedOwner.Id, Key: "deleted-owner-secret"}).Error)
+	deletedToken := model.Token{UserId: users[3].Id, Key: "deleted-token-secret"}
+	require.NoError(t, model.DB.Create(&deletedToken).Error)
+	require.NoError(t, model.DB.Delete(&deletedToken).Error)
+	router := gin.New()
+	router.Use(middleware.RequestId(), middleware.AccessTokenAudit())
+	routes := router.Group("/api/token/admin", middleware.DisableCache(), middleware.AdminAuth(), middleware.TokenOperationAudit())
+	routes.GET("", GetAdminTokens)
+	routes.GET("/groups", GetAdminTokenGroups)
+	routes.PUT("/group", UpdateAdminTokenGroup)
+
+	t.Run("authorization", func(t *testing.T) {
+		pat, _ := createScopedAccessToken(t, users[1].Id, 0, "api_key:read", "api_key:write")
+		for _, route := range []struct{ method, path string }{{"GET", ""}, {"GET", "/groups?ids=1"}, {"PUT", "/group"}} {
+			for _, tc := range []struct {
+				credential string
+				status     int
+			}{{"", 401}, {credentials[3], 403}, {pat, 403}, {users[1].GetAccessToken(), 403}} {
+				response := adminTokenTestRequest(t, router, tc.credential, route.method, route.path, gin.H{"ids": []int{tokens[3].Id}, "group": "default"})
+				assert.Equal(t, tc.status, response.Code, response.Body.String())
+				assert.Contains(t, response.Header().Get("Cache-Control"), "no-store")
+				for _, token := range tokens {
+					assert.NotContains(t, response.Body.String(), token.Key)
+				}
+			}
+		}
+		request := httptest.NewRequest("PUT", "/api/token/admin/group", strings.NewReader(`{"ids":[1],"group":"default"}`))
+		request.AddCookie(&http.Cookie{Name: service.RefreshCookieName, Value: "cookie-only-secret"})
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		assert.Equal(t, http.StatusUnauthorized, response.Code, "cookies cannot authenticate this administrative mutation")
+	})
+
+	t.Run("masked pagination and search", func(t *testing.T) {
+		for _, tc := range []struct {
+			query string
+			ids   []int
+			total int
+		}{
+			{"?p=2&page_size=2", []int{tokens[3].Id, tokens[2].Id}, 6},
+			{"?keyword=ALPHA", []int{tokens[5].Id, tokens[3].Id}, 2},
+			{"?keyword=" + "%E5%B1%95%E7%A4%BA%E5%90%8D", []int{tokens[5].Id, tokens[3].Id}, 2},
+			{"?keyword=" + strconv.Itoa(users[4].Id), []int{tokens[4].Id}, 1},
+			{"?keyword=literal_%25", []int{tokens[5].Id}, 1},
+			{"?user_id=" + strconv.Itoa(users[3].Id), []int{tokens[5].Id, tokens[3].Id}, 2},
+			{"?group=old%25_", []int{tokens[5].Id, tokens[4].Id, tokens[3].Id, tokens[2].Id, tokens[1].Id, tokens[0].Id}, 6},
+			{"?group=old", []int{}, 0},
+			{"?group=auto", []int{tokens[5].Id}, 1},
+		} {
+			response := adminTokenTestRequest(t, router, credentials[1], "GET", tc.query, nil)
+			api := decodeAPIResponse(t, response)
+			require.True(t, api.Success, response.Body.String())
+			var page struct {
+				Total int                  `json:"total"`
+				Items []adminTokenResponse `json:"items"`
+			}
+			require.NoError(t, common.Unmarshal(api.Data, &page))
+			assert.Equal(t, tc.total, page.Total, tc.query)
+			ids := make([]int, 0, len(page.Items))
+			for _, token := range page.Items {
+				ids = append(ids, token.ID)
+				assert.Equal(t, model.MaskTokenKey(tokens[token.ID-1].Key), token.Key)
+				assert.Equal(t, token.UserID > users[2].Id, token.Editable)
+				assert.NotContains(t, response.Body.String(), "remain_quota")
+			}
+			assert.Equal(t, tc.ids, ids, tc.query)
+		}
+		assert.False(t, decodeAPIResponse(t, adminTokenTestRequest(t, router, credentials[1], "GET", "?user_id=oops", nil)).Success)
+	})
+
+	t.Run("owner group intersection", func(t *testing.T) {
+		response := adminTokenTestRequest(t, router, credentials[1], "GET", fmt.Sprintf("/groups?ids=%d,%d", tokens[3].Id, tokens[4].Id), nil)
+		api := decodeAPIResponse(t, response)
+		require.True(t, api.Success, response.Body.String())
+		assert.JSONEq(t, `{"groups":["default"],"max_count":2}`, string(api.Data))
+		for _, query := range []string{"/groups?ids=0", "/groups?ids=99999", fmt.Sprintf("/groups?ids=%d", tokens[0].Id)} {
+			assert.False(t, decodeAPIResponse(t, adminTokenTestRequest(t, router, credentials[1], "GET", query, nil)).Success)
+		}
+	})
+
+	t.Run("atomic validation and field isolation", func(t *testing.T) {
+		for _, body := range []any{
+			gin.H{"ids": []int{}, "group": "default"},
+			gin.H{"ids": []int{tokens[3].Id, 99999}, "group": "default"},
+			gin.H{"ids": []int{tokens[3].Id, tokens[2].Id}, "group": "default"},
+			gin.H{"ids": []int{tokens[3].Id, tokens[4].Id}, "group": "vip"},
+			gin.H{"ids": []int{tokens[3].Id}, "group": "blocked"},
+			gin.H{"ids": []int{tokens[3].Id}, "group": "auto", "auto_groups": []string{"default", "vip"}},
+			gin.H{"ids": []int{tokens[3].Id}, "group": "auto", "auto_groups": []string{"default", "default"}},
+			gin.H{"ids": []int{tokens[3].Id}, "group": "auto", "auto_groups": []string{}},
+			gin.H{"ids": make([]int, 101), "group": "default"},
+		} {
+			response := adminTokenTestRequest(t, router, credentials[1], "PUT", "/group", body)
+			assert.False(t, decodeAPIResponse(t, response).Success, response.Body.String())
+			var stored model.Token
+			require.NoError(t, model.DB.First(&stored, tokens[3].Id).Error)
+			assert.Equal(t, tokens[3].Group, stored.Group, "a failed batch must not partially update a token")
+		}
+		body := gin.H{"ids": []int{tokens[3].Id, tokens[4].Id, tokens[3].Id}, "group": "auto", "auto_groups": []string{"default"}, "cross_group_retry": true, "key": "injected-secret", "remain_quota": 999, "status": 2}
+		response := adminTokenTestRequest(t, router, credentials[1], "PUT", "/group", body)
+		api := decodeAPIResponse(t, response)
+		require.True(t, api.Success, response.Body.String())
+		assert.JSONEq(t, `{"count":2}`, string(api.Data))
+		for _, token := range tokens[3:5] {
+			var stored model.Token
+			require.NoError(t, model.DB.First(&stored, token.Id).Error)
+			assert.Equal(t, "auto", stored.Group)
+			assert.Equal(t, `["default"]`, stored.AutoGroups)
+			assert.True(t, stored.CrossGroupRetry)
+			stored.Group, stored.AutoGroups, stored.CrossGroupRetry = token.Group, token.AutoGroups, token.CrossGroupRetry
+			assert.Equal(t, token, stored, "only routing group fields may be updated")
+		}
+		response = adminTokenTestRequest(t, router, credentials[1], "PUT", "/group", gin.H{"ids": []int{tokens[3].Id}, "group": "default", "auto_groups": []string{"vip"}, "cross_group_retry": true})
+		require.True(t, decodeAPIResponse(t, response).Success, response.Body.String())
+		var stored model.Token
+		require.NoError(t, model.DB.First(&stored, tokens[3].Id).Error)
+		assert.Equal(t, "default", stored.Group)
+		assert.Empty(t, stored.AutoGroups)
+		assert.False(t, stored.CrossGroupRetry)
+		response = adminTokenTestRequest(t, router, credentials[0], "PUT", "/group", gin.H{"ids": []int{tokens[0].Id, tokens[1].Id, tokens[2].Id}, "group": "default"})
+		require.True(t, decodeAPIResponse(t, response).Success, response.Body.String())
+		var audits []model.AuditLog
+		require.NoError(t, model.LOG_DB.Where("action = ?", "token.admin_group_update").Find(&audits).Error)
+		require.Len(t, audits, 12, "one audit per authorized attempt, without the admin fallback duplicate")
+		for _, audit := range audits {
+			encoded, err := common.Marshal(audit)
+			require.NoError(t, err)
+			assert.NotContains(t, string(encoded), "injected-secret")
+			for _, token := range tokens {
+				assert.NotContains(t, string(encoded), token.Key)
+			}
+		}
+		assert.True(t, audits[len(audits)-1].Success)
+	})
+
+	t.Run("cache invalidation fences concurrent old readers", func(t *testing.T) {
+		oldRDB, oldRedis := common.RDB, common.RedisEnabled
+		server := miniredis.RunT(t)
+		client := redis.NewClient(&redis.Options{Addr: server.Addr(), MaxRetries: -1})
+		common.RDB, common.RedisEnabled = client, true
+		t.Cleanup(func() { common.RDB, common.RedisEnabled = oldRDB, oldRedis; require.NoError(t, client.Close()) })
+		token := tokens[4]
+		cached, err := model.GetTokenByKey(token.Key, false)
+		require.NoError(t, err)
+		require.Equal(t, "auto", cached.Group)
+		cacheKey := "token:" + common.GenerateHMAC(token.Key)
+		require.NoError(t, client.Del(context.Background(), cacheKey).Err())
+		readReady, resumeReader := make(chan struct{}), make(chan struct{})
+		readerDone := make(chan error, 1)
+		callback := "admin-token:stale-reader"
+		require.NoError(t, model.DB.Callback().Query().After("gorm:query").Register(callback, func(tx *gorm.DB) {
+			if _, ok := tx.Statement.Dest.(*model.Token); ok && tx.Statement.Table == "tokens" {
+				close(readReady)
+				<-resumeReader
+			}
+		}))
+		go func() { _, err := model.GetTokenByKey(token.Key, false); readerDone <- err }()
+		<-readReady
+		response := adminTokenTestRequest(t, router, credentials[1], "PUT", "/group", gin.H{"ids": []int{token.Id}, "group": "vip"})
+		close(resumeReader)
+		require.NoError(t, <-readerDone)
+		require.NoError(t, model.DB.Callback().Query().Remove(callback))
+		require.True(t, decodeAPIResponse(t, response).Success, response.Body.String())
+		assert.False(t, server.Exists(cacheKey), "the concurrent pre-update snapshot cannot resurrect the cached routing scope")
+		cached, err = model.GetTokenByKey(token.Key, false)
+		require.NoError(t, err)
+		assert.Equal(t, "vip", cached.Group)
+		assert.Empty(t, cached.AutoGroups)
+		assert.False(t, cached.CrossGroupRetry)
+		server.SetError("private-redis-error")
+		ctx, recorder := newAuthenticatedContext(t, "PUT", "/api/token/admin/group", gin.H{"ids": []int{token.Id}, "group": "default"}, users[1].Id)
+		ctx.Set("role", common.RoleAdminUser)
+		UpdateAdminTokenGroup(ctx)
+		assert.False(t, decodeAPIResponse(t, recorder).Success)
+		assert.NotContains(t, recorder.Body.String(), "private-redis-error")
+		var stored model.Token
+		require.NoError(t, model.DB.First(&stored, token.Id).Error)
+		assert.Equal(t, "vip", stored.Group, "cache invalidation failure must roll back the database mutation")
+		server.SetError("")
+		postCommitCallback := "admin-token:redis-post-commit-failure"
+		require.NoError(t, model.DB.Callback().Update().After("gorm:update").Register(postCommitCallback, func(tx *gorm.DB) {
+			if tx.Statement.Table == "tokens" {
+				server.SetError("private-post-commit-redis-error")
+			}
+		}))
+		response = adminTokenTestRequest(t, router, credentials[1], "PUT", "/group", gin.H{"ids": []int{token.Id}, "group": "default"})
+		require.NoError(t, model.DB.Callback().Update().Remove(postCommitCallback))
+		server.SetError("")
+		require.True(t, decodeAPIResponse(t, response).Success, "a committed mutation must retain its successful outcome")
+		assert.NotContains(t, response.Body.String(), "private-post-commit-redis-error")
+		stored = model.Token{}
+		require.NoError(t, model.DB.First(&stored, token.Id).Error)
+		assert.Equal(t, "default", stored.Group)
+		assert.False(t, server.Exists(cacheKey))
 	})
 }

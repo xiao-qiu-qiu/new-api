@@ -182,6 +182,12 @@ export function useSidebarData(badges: SidebarBadges = {}): SidebarData {
             icon: Users,
           },
           {
+            title: t('API Key Management'),
+            url: '/admin/keys',
+            icon: Key,
+            requiredRole: ROLE.ADMIN,
+          },
+          {
             title: t('Redemption Codes'),
             url: '/redemption-codes',
             icon: Ticket,

@@ -20,7 +20,9 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import {
   createMemoryHistory,
   createRootRoute,
+  createRoute,
   createRouter,
+  Outlet,
   RouterProvider,
 } from '@tanstack/react-router'
 import {
@@ -46,6 +48,7 @@ import {
 } from '@/features/system-settings/models/pricing-issues'
 import { api } from '@/lib/api'
 import { ROLE } from '@/lib/roles'
+import { Route as AdminApiKeysRoute } from '@/routes/_authenticated/admin/keys/index'
 import { useAuthStore } from '@/stores/auth-store'
 
 import { useSidebarConfig } from '../use-sidebar-config'
@@ -271,6 +274,151 @@ describe('affinity session sidebar configuration', () => {
       expect(titles).toContain('Channels')
     }
   )
+})
+
+describe('administrator API key navigation', () => {
+  it('legacy settings show API Key Management after Users and keep its toggle independent', () => {
+    const config = parseSidebarModulesAdmin(
+      '{"admin":{"enabled":true,"user":true}}'
+    )
+    expect(config.admin.apiKeys).toBe(true)
+    const { result } = sidebarFor(config)
+    const items =
+      result.current.find((group) => group.id === 'admin')?.items ?? []
+    const usersIndex = items.findIndex((item) => item.title === 'Users')
+    expect(items[usersIndex + 1]).toMatchObject({
+      title: 'API Key Management',
+      url: '/admin/keys',
+      requiredRole: ROLE.ADMIN,
+    })
+    config.admin.apiKeys = false
+    expect(
+      parseSidebarModulesAdmin(serializeSidebarModulesAdmin(config)).admin
+        .apiKeys
+    ).toBe(false)
+  })
+
+  it.each([
+    [{ admin: { enabled: true, apiKeys: false } }, undefined],
+    [undefined, { admin: { enabled: true, apiKeys: false } }],
+  ])(
+    'either visibility layer can hide management while retaining personal keys (%j, %j)',
+    (admin, user) => {
+      const { result } = sidebarFor(admin, user)
+      const titles = result.current.flatMap((group) =>
+        group.items.map((item) => item.title)
+      )
+      expect(titles).not.toContain('API Key Management')
+      expect(titles).toContain('API Keys')
+      expect(titles).toContain('Users')
+    }
+  )
+
+  async function openManagementPage(role?: number, search = '') {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    client.setQueryData(['status'], { SidebarModulesAdmin: '' })
+    useAuthStore
+      .getState()
+      .auth.setUser(
+        role === undefined ? null : { id: 2, username: 'viewer', role }
+      )
+    function NavigationFixture() {
+      const { navGroups } = useSidebarView()
+      return (
+        <>
+          <nav aria-label='Console'>
+            {navGroups.flatMap((group) =>
+              group.items.map((item) =>
+                item.url ? (
+                  <a key={item.url} href={item.url}>
+                    {item.title}
+                  </a>
+                ) : null
+              )
+            )}
+          </nav>
+          <Outlet />
+        </>
+      )
+    }
+    const root = createRootRoute({ component: NavigationFixture })
+    const management = createRoute({
+      getParentRoute: () => root,
+      path: '/admin/keys',
+      beforeLoad: AdminApiKeysRoute.options.beforeLoad as () => void,
+      validateSearch: AdminApiKeysRoute.options.validateSearch,
+      component: () => <h1>API key management panel</h1>,
+    })
+    const forbidden = createRoute({
+      getParentRoute: () => root,
+      path: '/403',
+      component: () => <h1>Forbidden</h1>,
+    })
+    const router = createRouter({
+      routeTree: root.addChildren([management, forbidden]),
+      history: createMemoryHistory({
+        initialEntries: [`/admin/keys${search}`],
+      }),
+    })
+    render(
+      <QueryClientProvider client={client}>
+        <RouterProvider router={router} />
+      </QueryClientProvider>
+    )
+    await act(() => router.load())
+    return router
+  }
+
+  it.each([undefined, ROLE.USER])(
+    'role %s has no management menu and direct access redirects to 403',
+    async (role) => {
+      const router = await openManagementPage(role)
+      expect(
+        await screen.findByRole('heading', { name: 'Forbidden' })
+      ).toBeVisible()
+      expect(router.state.location.pathname).toBe('/403')
+      expect(
+        screen.queryByRole('link', { name: 'API Key Management' })
+      ).not.toBeInTheDocument()
+    }
+  )
+
+  it.each([ROLE.ADMIN, ROLE.SUPER_ADMIN])(
+    'role %s sees management and can open a filtered direct URL',
+    async (role) => {
+      const router = await openManagementPage(
+        role,
+        '?page=2&pageSize=50&filter=production&user_id=12&group=premium'
+      )
+      expect(
+        await screen.findByRole('heading', { name: 'API key management panel' })
+      ).toBeVisible()
+      expect(
+        screen.getByRole('link', { name: 'API Key Management' })
+      ).toHaveAttribute('href', '/admin/keys')
+      expect(router.state.matches.at(-1)?.search).toMatchObject({
+        page: 2,
+        pageSize: 50,
+        filter: 'production',
+        user_id: '12',
+        group: 'premium',
+      })
+    }
+  )
+
+  it('invalid pagination and owner filters fall back without forwarding invalid search values', async () => {
+    const router = await openManagementPage(
+      ROLE.ADMIN,
+      '?page=-2&pageSize=0&filter=2&user_id=-12&group=true'
+    )
+    await screen.findByRole('heading', { name: 'API key management panel' })
+    expect(router.state.matches.at(-1)?.search).toEqual({
+      page: 1,
+      filter: '',
+    })
+  })
 })
 
 describe('model pricing badge', () => {

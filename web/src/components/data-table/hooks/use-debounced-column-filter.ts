@@ -41,6 +41,7 @@ export function useDebouncedColumnFilter({
   const [inputValue, setInputValue] = React.useState(value)
   const [pendingValue, setPendingValue] = React.useState(value)
   const isComposingRef = React.useRef(false)
+  const previousValueRef = React.useRef(value)
   const debouncedValue = useDebounce(pendingValue, delay)
   const onColumnFiltersChangeRef = React.useRef(onColumnFiltersChange)
   onColumnFiltersChangeRef.current = onColumnFiltersChange
@@ -56,7 +57,18 @@ export function useDebouncedColumnFilter({
   }, [value])
 
   React.useEffect(() => {
-    if (debouncedValue === value) return
+    const valueChanged = previousValueRef.current !== value
+    previousValueRef.current = value
+    // Navigation synchronizes pendingValue in the preceding effect. Never
+    // publish a debounce that still belongs to the previous URL or draft.
+    if (
+      valueChanged ||
+      isComposingRef.current ||
+      debouncedValue !== pendingValue ||
+      debouncedValue === value
+    ) {
+      return
+    }
 
     onColumnFiltersChangeRef.current((previous) => {
       const filters = previous.filter((filter) => filter.id !== columnId)
@@ -64,7 +76,7 @@ export function useDebouncedColumnFilter({
         ? [...filters, { id: columnId, value: debouncedValue }]
         : filters
     })
-  }, [columnId, debouncedValue, value])
+  }, [columnId, debouncedValue, pendingValue, value])
 
   const updateInputValue = React.useCallback((nextValue: string) => {
     setInputValue(nextValue)
@@ -83,7 +95,10 @@ export function useDebouncedColumnFilter({
 
   const handleCompositionStart = React.useCallback(() => {
     isComposingRef.current = true
-  }, [])
+    // Resume the complete text only after composition ends, even if the
+    // browser keeps the same text when the composition is cancelled.
+    setPendingValue(value)
+  }, [value])
 
   const handleCompositionEnd = React.useCallback(
     (event: React.CompositionEvent<HTMLInputElement>) => {
