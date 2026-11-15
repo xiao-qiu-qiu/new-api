@@ -88,6 +88,7 @@ import { DetailsDialog } from '../dialogs/details-dialog'
 import { LogCacheHitRate } from '../log-cache-hit-rate'
 import { LogCostDisplay } from '../log-cost-display'
 import { ModelBadge } from '../model-badge'
+import { RequestPluginLogMarker } from '../request-plugin-record'
 import { TimingMetricsCell, StreamTpsCell } from '../timing-metrics-cell'
 import { useUsageLogsContext } from '../usage-logs-provider'
 
@@ -718,6 +719,7 @@ export function useCommonLogsColumns(
 
           const modelInfo = formatModelName(log)
           const other = parseLogOther(log.other)
+          const requestPlugins = other?.request_plugins
 
           return (
             <div className='flex w-fit items-center'>
@@ -731,6 +733,9 @@ export function useCommonLogsColumns(
                 outboundServiceTier={other?.outbound_service_tier}
                 observedServiceTier={other?.observed_service_tier}
               />
+              {requestPlugins?.length ? (
+                <RequestPluginLogMarker items={requestPlugins} />
+              ) : null}
             </div>
           )
         },

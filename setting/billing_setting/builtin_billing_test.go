@@ -519,7 +519,7 @@ func TestServiceTierObservedPriceCap(t *testing.T) {
 func TestServiceTierSDKDispatchRequiresReservation(t *testing.T) {
 	expression, ok := billing_setting.GetBuiltinBillingExpr("gpt-6-astra")
 	require.True(t, ok)
-	for _, adaptor := range []channel.Adaptor{&aws.Adaptor{ClientMode: aws.ClientModeAKSK}, &xunfei.Adaptor{}} {
+	for _, adaptor := range []channel.Adaptor{&aws.Adaptor{}, &xunfei.Adaptor{}} {
 		t.Run(adaptor.GetChannelName(), func(t *testing.T) {
 			info := &relaycommon.RelayInfo{DeferServiceTierReservation: true, Billing: &serviceTierReservation{limit: 1},
 				ChannelMeta: &relaycommon.ChannelMeta{},

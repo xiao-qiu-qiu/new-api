@@ -367,6 +367,7 @@ func UpdateGroupSettingsOptions(values map[string]string) error {
 	if err != nil {
 		return err
 	}
+	BumpSyncTopic(SyncTopicOptions)
 	setting.GroupSettingsPublicationMutex.Lock()
 	defer setting.GroupSettingsPublicationMutex.Unlock()
 	for key, value := range updates {

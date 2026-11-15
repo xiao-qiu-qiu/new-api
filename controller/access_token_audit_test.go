@@ -1079,6 +1079,9 @@ func TestAuditDatabaseMatrix(t *testing.T) {
 					}
 					for range 2 {
 						require.NoError(t, model.InitDB())
+						connection, err := model.DB.DB()
+						require.NoError(t, err)
+						t.Cleanup(func() { require.NoError(t, connection.Close()) })
 						require.NoError(t, model.InitLogDB())
 					}
 					if !upgrade {

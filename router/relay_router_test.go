@@ -31,6 +31,7 @@ func TestListModelsSupportsOpenAIAndGeminiAuthentication(t *testing.T) {
 	require.NoError(t, model.DB.Create(&model.Token{
 		UserId:         user.Id,
 		Key:            "modelstestkey",
+		Group:          "default",
 		Status:         common.TokenStatusEnabled,
 		ExpiredTime:    -1,
 		UnlimitedQuota: true,
@@ -97,7 +98,7 @@ func TestGeminiRelayHandsLongRunningPredictionToPluginRoute(t *testing.T) {
 	require.NoError(t, i18n.Init())
 	user := model.User{Username: "veo-user", Status: common.UserStatusEnabled, Group: "default", Quota: 100}
 	require.NoError(t, model.DB.Create(&user).Error)
-	require.NoError(t, model.DB.Create(&model.Token{UserId: user.Id, Key: "veotestkey", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true}).Error)
+	require.NoError(t, model.DB.Create(&model.Token{UserId: user.Id, Key: "veotestkey", Group: "default", Status: common.TokenStatusEnabled, ExpiredTime: -1, UnlimitedQuota: true}).Error)
 
 	engine := gin.New()
 	SetRelayRouter(engine)

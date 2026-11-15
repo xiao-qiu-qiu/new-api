@@ -42,6 +42,7 @@ relay.shared_task_price_needs_override: "Model {{.Model}} shares its billing exp
 relay.special_price_needs_image_request: "Per-image special pricing requires an image request"
 relay.special_price_needs_image_meter: "Per-image special pricing requires the selected task model to declare image_count with unit count"
 relay.special_price_invalid_image_count: "Per-image special pricing requires an integer image_count between 1 and {{.Max}}"
+relay.task_price_not_configured: "Model {{.Model}} has no task price for plugin {{.Plugin}}; set a separate price for this plugin in model pricing"
 relay.task_channel_disabled: "The channel of this task has been disabled"
 relay.group_saturated: "The current group is at capacity. Please try again later, or upgrade your account for better service."
 relay.group_upstream_saturated: "The upstream of the current group is at capacity. Please try again later"
@@ -49,6 +50,9 @@ relay.retry_get_channel_failed: "Failed to get available channel for model {{.Mo
 relay.retry_no_available_channel: "No available channel for model {{.Model}} under group {{.Group}} (retry)"
 relay.access_token_unsupported: "Access tokens are not supported here"
 relay.cyber_session_blocked: "This session is temporarily blocked by the cyber policy. Please try again after the block expires."
+relay.request_rejected: "Request rejected by policy"
+relay.request_plugin_failed: "A request plugin failed"
+relay.response_rejected: "Response stopped by policy"
 
 # Emails and the name of the token created at registration
 user.default_token_name: "{{.Username}}'s initial token"
@@ -101,3 +105,5 @@ channel.upstream_update_added_models: "Added model examples (showing {{.Shown}}/
 channel.upstream_update_removed_models: "Removed model examples (showing {{.Shown}}/{{.Total}}): {{.Models}}"
 channel.upstream_update_failed_channels: "Failed channel IDs (showing {{.Shown}}/{{.Total}}): {{.Ids}}"
 channel.upstream_update_more_omitted: " ({{.Count}} more omitted)"
+
+channel.notify_scheduled_subject: "Channel \"{{.Name}}\" (#{{.Id}}) plugin notification"

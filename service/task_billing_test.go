@@ -1898,8 +1898,10 @@ func TestRealtimePreConsumeKeepsGroupSnapshot(t *testing.T) {
 				PriceData: types.PriceData{ModelRatio: 2, GroupRatioInfo: types.GroupRatioInfo{GroupRatio: groupRatio}}}
 			usage := &dto.RealtimeUsage{InputTokens: 80, TotalTokens: 80}
 			usage.InputTokenDetails.TextTokens = 80
-			require.NoError(t, PreWssConsumeQuota(ctx, info, usage))
+			charged, err := PreWssConsumeQuota(ctx, info, usage)
+			require.NoError(t, err)
 			want := common.QuotaFromFloat(160 * groupRatio)
+			assert.Equal(t, want, charged)
 			assert.Equal(t, 10000-want, getUserQuota(t, userID))
 			assert.Equal(t, 10000-want, getTokenRemainQuota(t, tokenID))
 		})

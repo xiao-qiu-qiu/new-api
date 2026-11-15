@@ -66,9 +66,11 @@ func TestAccessAndPanicLogsFollowLogRotation(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	*common.LogDir = t.TempDir()
 	t.Cleanup(func() {
+		*common.LogDir = ""
+		logger.SetupLogger()
+		*common.LogDir = previousLogDir
 		gin.SetMode(previousMode)
 		gin.DefaultWriter, gin.DefaultErrorWriter = previousWriter, previousErrorWriter
-		*common.LogDir = previousLogDir
 	})
 
 	logger.SetupLogger()
@@ -98,6 +100,11 @@ func TestAccessAndPanicLogsFollowLogRotation(t *testing.T) {
 	assert.Contains(t, string(content), "[Recovery]")
 	assert.Contains(t, string(content), "rotation-panic-marker\n")
 	assert.Contains(t, string(content), "middleware/logger_test.go")
+	logPath := logger.GetCurrentLogPath()
+	*common.LogDir = ""
+	logger.SetupLogger()
+	assert.Empty(t, logger.GetCurrentLogPath())
+	require.NoError(t, os.Remove(logPath), "disabling file logs releases the active file")
 }
 
 func TestSetUpLoggerOmitsQueryCredentialsTakenOutByHandlers(t *testing.T) {

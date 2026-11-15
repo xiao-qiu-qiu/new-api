@@ -86,8 +86,8 @@ func TestRequestPolicyDatabaseMatrix(t *testing.T) {
 			assert.Error(t, UpdateRequestPolicyOptions(map[string]string{"request_policy_setting.mode": "off"}), "the removed mode switch is not a policy option")
 			assert.False(t, CurrentRequestPolicy().Affinity.Rules[0].SkipRetryOnFailure)
 			assert.Equal(t, rules, CurrentRequestPolicy().Options["channel_affinity_setting.rules"])
-			loadOptionsFromDatabase()
-			loadOptionsFromDatabase()
+			LoadOptionsFromDatabase()
+			LoadOptionsFromDatabase()
 			assert.Equal(t, rules, CurrentRequestPolicy().Options["channel_affinity_setting.rules"], "legacy rule JSON survives reloads without dropping extension fields")
 			require.NoError(t, UpdateRequestPolicyOptions(map[string]string{"channel_affinity_setting.session_mode": "strict"}))
 			assert.Empty(t, CurrentRequestPolicy().Failover.FallbackRules, "existing settings default to no model overrides")
@@ -103,8 +103,8 @@ func TestRequestPolicyDatabaseMatrix(t *testing.T) {
 				"channel_failover_setting.recovery_successes":    "2",
 			}
 			require.NoError(t, UpdateRequestPolicyOptions(failover))
-			loadOptionsFromDatabase()
-			loadOptionsFromDatabase()
+			require.NoError(t, LoadOptionsFromDatabase())
+			require.NoError(t, LoadOptionsFromDatabase())
 			assert.Equal(t, operation_setting.ChannelFailoverSetting{
 				Enabled: true, PrimaryChannelID: 101, FallbackChannelID: 102,
 				FallbackRules: []operation_setting.ChannelFailoverFallbackRule{
@@ -176,11 +176,11 @@ func TestRequestPolicyDatabaseMatrix(t *testing.T) {
 			option = Option{}
 			require.NoError(t, db.Where(map[string]any{"key": "RetryTimes"}).First(&option).Error)
 			assert.Equal(t, "2", option.Value)
-			loadOptionsFromDatabase()
+			LoadOptionsFromDatabase()
 			assert.Equal(t, "strict", CurrentRequestPolicy().Affinity.SessionMode, "a failed save keeps the persisted global mode")
 			assert.Equal(t, backupRules, CurrentRequestPolicy().Options["channel_failover_setting.fallback_rules"], "invalid writes cannot replace persisted model backup rules")
 			require.NoError(t, UpdateRequestPolicyOptions(map[string]string{"channel_failover_setting.fallback_rules": "[]"}))
-			loadOptionsFromDatabase()
+			require.NoError(t, LoadOptionsFromDatabase())
 			assert.Empty(t, CurrentRequestPolicy().Failover.FallbackRules, "clearing rules persists instead of reusing old entries")
 		})
 	}

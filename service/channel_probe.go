@@ -438,6 +438,11 @@ func RunChannelProbeTarget(parent context.Context, probe model.ChannelProbe, run
 			result.Success, result.ErrorCode = false, "cancelled"
 		}
 		result.Model, result.Source, result.CheckedAt, result.LatencyMS = probe.Model, "active", time.Now().Unix(), time.Since(started).Milliseconds()
+		// First-response timestamps use Unix milliseconds, whose rounding can
+		// put them one millisecond beyond a duration rounded down here.
+		if result.TTFTMS != nil {
+			result.LatencyMS = max(result.LatencyMS, *result.TTFTMS)
+		}
 		result.Status = ChannelProbeResultStatus(result, probe)
 	}()
 	return runner(ctx, probe)

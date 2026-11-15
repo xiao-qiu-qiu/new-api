@@ -175,12 +175,17 @@ func TestCyberSessionBlockRelayHTTPAndSSE(t *testing.T) {
 			if tc.block {
 				wantAttempts = 1
 			}
-			assert.Equal(t, tc.status, firstResponse.Code, firstResponse.Body.String())
+			wantStatus := tc.status
+			if tc.stream {
+				wantStatus = http.StatusForbidden
+			}
+			assert.Equal(t, wantStatus, firstResponse.Code, firstResponse.Body.String())
 			assert.EqualValues(t, wantAttempts, attempts.Load(), "cyber must stop the current request even when 403/502 retries are configured")
 			assert.Len(t, first.GetStringSlice("use_channel"), wantAttempts)
 			assert.Greater(t, reservations.Load(), beforeReservations, "the paid fixture must actually exercise pre-consumption")
 			if tc.stream {
-				assert.Contains(t, firstResponse.Body.String(), "cyber_policy", "the upstream terminal event must reach the client")
+				assert.Contains(t, firstResponse.Body.String(), "cyber_policy", "a terminal error before output must retain its upstream code")
+				assert.Contains(t, firstResponse.Body.String(), "request rejected")
 			}
 
 			beforeAttempts, beforeReservations := attempts.Load(), reservations.Load()
@@ -315,6 +320,9 @@ func TestMediaGenerationRelaySingleAttempt(t *testing.T) {
 }
 
 func TestMediaGenerationTaskSubmissionSingleAttempt(t *testing.T) {
+	previousRedis := common.RedisEnabled
+	common.RedisEnabled = false
+	t.Cleanup(func() { common.RedisEnabled = previousRedis })
 	previousRetries, previousErrorLog := common.RetryTimes, constant.ErrorLogEnabled
 	common.RetryTimes, constant.ErrorLogEnabled = 2, false
 	t.Cleanup(func() { common.RetryTimes, constant.ErrorLogEnabled = previousRetries, previousErrorLog })

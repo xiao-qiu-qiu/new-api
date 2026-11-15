@@ -27,14 +27,17 @@ func setupOriginTaskDB(t *testing.T) {
 	t.Helper()
 	previousDB := model.DB
 	previousType := common.MainDatabaseType()
+	previousCache, previousRedis := common.MemoryCacheEnabled, common.RedisEnabled
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, database.AutoMigrate(&model.Task{}, &model.Channel{}))
 	model.DB = database
 	common.SetMainDatabaseType(common.DatabaseTypeSQLite)
+	common.MemoryCacheEnabled, common.RedisEnabled = false, false
 	t.Cleanup(func() {
 		model.DB = previousDB
 		common.SetMainDatabaseType(previousType)
+		common.MemoryCacheEnabled, common.RedisEnabled = previousCache, previousRedis
 	})
 }
 

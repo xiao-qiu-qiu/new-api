@@ -87,7 +87,7 @@ func TestGetModelListGroupsUsesExplicitTokenGroup(t *testing.T) {
 	require.Equal(t, []string{"vip"}, groups.ownerGroups)
 }
 
-func TestGetModelListGroupsUsesFilteredTokenAutoGroupsSnapshot(t *testing.T) {
+func TestGetModelListGroupsRejectsInvalidTokenAutoGroupsSnapshot(t *testing.T) {
 	originalMax := setting.GetMaxTokenAutoGroups()
 	originalUsableGroups := setting.UserUsableGroups2JSONString()
 	originalRatios := ratio_setting.GroupRatio2JSONString()
@@ -108,9 +108,13 @@ func TestGetModelListGroupsUsesFilteredTokenAutoGroupsSnapshot(t *testing.T) {
 
 	groups, err := getModelListGroups(ctx)
 	require.NoError(t, err)
-	require.Equal(t, []string{"vip"}, groups.ownerGroups)
+	require.Empty(t, groups.ownerGroups, "an oversized selection must not be silently truncated")
 
 	common.SetContextKey(ctx, constant.ContextKeyTokenAutoGroups, []string{"vip"})
+	groups, err = getModelListGroups(ctx)
+	require.NoError(t, err)
+	require.Equal(t, []string{"vip"}, groups.ownerGroups)
+
 	require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{"default":"Default"}`))
 	groups, err = getModelListGroups(ctx)
 	require.NoError(t, err)

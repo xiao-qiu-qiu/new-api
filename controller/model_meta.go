@@ -31,11 +31,15 @@ func listModelsMeta(c *gin.Context, keyword, vendor string) {
 		return
 	}
 
-	pageInfo := common.GetPageQuery(c)
-	if squareState != "" && (pageInfo.GetPage() < 1 || pageInfo.GetPageSize() < 1) {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid pagination"})
-		return
+	if squareState != "" {
+		for _, key := range []string{"p", "page_size"} {
+			if value, err := strconv.Atoi(c.Query(key)); err == nil && value < 0 {
+				c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "Invalid pagination"})
+				return
+			}
+		}
 	}
+	pageInfo := common.GetPageQuery(c)
 	offset, limit := pageInfo.GetStartIdx(), pageInfo.GetPageSize()
 	if squareState != "" {
 		// Visibility depends on live channels and metadata rules. Filter the
@@ -160,6 +164,7 @@ func UpdateModelMeta(c *gin.Context) {
 			common.ApiError(c, err)
 			return
 		}
+		model.BumpSyncTopic(model.SyncTopicModels)
 	} else {
 		if strings.TrimSpace(m.ModelName) == "" {
 			common.ApiErrorT(c, "Model name cannot be empty")

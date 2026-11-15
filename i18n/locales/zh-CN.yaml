@@ -43,6 +43,7 @@ relay.shared_task_price_needs_override: "模型 {{.Model}} 与任务插件 {{.Pl
 relay.special_price_needs_image_request: "按张特殊定价仅适用于图片请求"
 relay.special_price_needs_image_meter: "按张特殊定价要求所选任务模型声明 image_count，且单位为 count"
 relay.special_price_invalid_image_count: "按张特殊价要求 image_count 为 1 到 {{.Max}} 的整数"
+relay.task_price_not_configured: "模型 {{.Model}} 没有插件 {{.Plugin}} 的任务价格，请在模型定价中为该插件单独设置价格"
 relay.task_channel_disabled: "该任务所属渠道已被禁用"
 relay.group_saturated: "当前分组负载已饱和，请稍后再试，或升级账户以提升服务质量。"
 relay.group_upstream_saturated: "当前分组上游负载已饱和，请稍后再试"
@@ -50,6 +51,9 @@ relay.retry_get_channel_failed: "获取分组 {{.Group}} 下模型 {{.Model}} �
 relay.retry_no_available_channel: "分组 {{.Group}} 下模型 {{.Model}} 的可用渠道不存在（retry）"
 relay.access_token_unsupported: "暂不支持使用 access token"
 relay.cyber_session_blocked: "此会话已触发 cyber 策略，暂时无法继续请求，请在屏蔽到期后重试。"
+relay.request_rejected: "请求被策略拒绝"
+relay.request_plugin_failed: "请求处理插件执行失败"
+relay.response_rejected: "回复被策略中止"
 
 # Emails and the name of the token created at registration
 user.default_token_name: "{{.Username}}的初始令牌"
@@ -102,3 +106,5 @@ channel.upstream_update_added_models: "新增模型示例（展示 {{.Shown}}/{{
 channel.upstream_update_removed_models: "删除模型示例（展示 {{.Shown}}/{{.Total}}）：{{.Models}}"
 channel.upstream_update_failed_channels: "失败渠道 ID（展示 {{.Shown}}/{{.Total}}）：{{.Ids}}"
 channel.upstream_update_more_omitted: "（其余 {{.Count}} 个已省略）"
+
+channel.notify_scheduled_subject: "渠道“{{.Name}}” (#{{.Id}}) 插件通知"

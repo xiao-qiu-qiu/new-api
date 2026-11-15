@@ -16,6 +16,7 @@ import (
 	"github.com/QuantumNous/new-api/dto"
 	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
+	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
@@ -24,6 +25,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	relayconstant "github.com/QuantumNous/new-api/relay/constant"
 	"github.com/QuantumNous/new-api/relay/helper"
+	"github.com/QuantumNous/new-api/relay/requestplugin"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting"
@@ -205,6 +207,16 @@ func ApplyOriginTaskAffinity(c *gin.Context, info *relaycommon.RelayInfo) *dto.T
 func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitResult, *dto.TaskError) {
 	info.InitChannelMeta(c)
 
+	// The attempt's late request plugins see the client body before it is
+	// validated and priced; a changed body is decoded again.
+	if changed, apiErr := requestplugin.TaskAttempt(c, info); apiErr != nil {
+		return nil, requestplugin.TaskError(apiErr)
+	} else if changed {
+		if taskErr := middleware.RefreshTaskPluginRequest(c); taskErr != nil {
+			return nil, taskErr
+		}
+	}
+
 	// 1. 确定 platform → 创建适配器 → 验证请求
 	platform := constant.TaskPlatform(c.GetString("platform"))
 	if platform == "" {
@@ -278,7 +290,7 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 	if pinnedPlugin.Plugin != nil {
 		pluginKey = pinnedPlugin.Plugin.Meta.Key
 	}
-	exprStr, exists := billing_setting.ResolveTaskBillingExpr(pluginKey, modelName, info.UpstreamModelName)
+	exprStr, overridden, exists := billing_setting.ResolveTaskBillingExpr(pluginKey, modelName, info.UpstreamModelName)
 	specialRule, specialPricing := setting.RequestGroupSettings(c).ResolveSpecialPricing(info.UserGroup, info.GetOriginModelName())
 	specialPerRequest := specialPricing && specialRule.BillingUnit == "request"
 	if specialPricing {
@@ -305,6 +317,14 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		if !originOverride && (mappedOverride || billing_setting.GetBillingMode(modelName) != billing_setting.BillingModeTieredExpr) {
 			info.BillingModelName = info.UpstreamModelName
 		}
+	}
+	// A plugin that also relays the model charges its chat requests with the
+	// model-level price. Its tasks share only a per-call price or a usage
+	// expression; any other price would charge them a chat price.
+	relaysModel := pinnedPlugin.Plugin != nil && pinnedPlugin.Plugin.Meta.RelaysModel(modelName)
+	if exists && !specialPricing && !billing_setting.TaskPriceExpr(exprStr, overridden, relaysModel) {
+		err = errors.New(i18n.T(c, i18n.MsgRelayTaskPriceNotConfigured, map[string]any{"Model": modelName, "Plugin": pluginKey}))
+		return nil, service.TaskErrorWrapper(err, "model_price_error", http.StatusBadRequest, common.UpstreamAddresses(c)...)
 	}
 	if useTiered {
 		provider, supported := adaptor.(channel.TaskUsageFactsProvider)
@@ -359,6 +379,9 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 		}
 	} else {
 		priceData, err = helper.ModelPriceHelperPerCall(c, info)
+		if err == nil && relaysModel && !priceData.UsePrice {
+			err = errors.New(i18n.T(c, i18n.MsgRelayTaskPriceNotConfigured, map[string]any{"Model": modelName, "Plugin": pluginKey}))
+		}
 		if err != nil {
 			return nil, service.TaskErrorWrapper(err, "model_price_error", http.StatusBadRequest, common.UpstreamAddresses(c)...)
 		}
@@ -406,6 +429,12 @@ func RelayTaskSubmit(c *gin.Context, info *relaycommon.RelayInfo) (*TaskSubmitRe
 	requestBody, err := adaptor.BuildRequestBody(c, info)
 	if err != nil {
 		return nil, service.TaskErrorWrapper(err, "build_request_failed", http.StatusInternalServerError, common.UpstreamAddresses(c)...)
+	}
+	// The egress request plugins check the body the attempt sends; the
+	// reservation of a stopped attempt is refunded.
+	requestBody, apiErr := requestplugin.TaskEgress(c, info, requestBody)
+	if apiErr != nil {
+		return nil, requestplugin.TaskError(apiErr)
 	}
 
 	// 9. 发送请求

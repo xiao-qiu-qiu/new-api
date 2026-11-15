@@ -1,8 +1,12 @@
 package model
 
 import (
+	"context"
+	"fmt"
 	"os"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/glebarez/sqlite"
@@ -15,46 +19,54 @@ import (
 	"gorm.io/gorm/schema"
 )
 
+// useSystemTaskMatrixDB points DB at a fresh system_tasks table on dialect,
+// skipping MySQL and PostgreSQL unless TEST_MYSQL_DSN / TEST_POSTGRES_DSN are set.
+func useSystemTaskMatrixDB(t *testing.T, dialect string) *gorm.DB {
+	t.Helper()
+	var dialector gorm.Dialector
+	switch dialect {
+	case "sqlite":
+		dialector = sqlite.Open(":memory:")
+	case "mysql":
+		dsn := os.Getenv("TEST_MYSQL_DSN")
+		if dsn == "" {
+			t.Skip("TEST_MYSQL_DSN is not configured")
+		}
+		dialector = mysql.Open(dsn)
+	case "postgres":
+		dsn := os.Getenv("TEST_POSTGRES_DSN")
+		if dsn == "" {
+			t.Skip("TEST_POSTGRES_DSN is not configured")
+		}
+		dialector = postgres.Open(dsn)
+	}
+	db, err := gorm.Open(dialector, &gorm.Config{NamingStrategy: schema.NamingStrategy{TablePrefix: "history_test_"}})
+	require.NoError(t, err)
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	sqlDB.SetMaxOpenConns(1)
+	previousDB := DB
+	DB = db
+	t.Cleanup(func() {
+		DB = previousDB
+		require.NoError(t, db.Migrator().DropTable(&SystemTask{}))
+		require.NoError(t, sqlDB.Close())
+	})
+	require.NoError(t, db.AutoMigrate(&SystemTask{}))
+	var version string
+	versionQuery := "SELECT version()"
+	if dialect == "sqlite" {
+		versionQuery = "SELECT sqlite_version()"
+	}
+	require.NoError(t, db.Raw(versionQuery).Scan(&version).Error)
+	t.Logf("database version: %s", version)
+	return db
+}
+
 func TestSystemTaskHistoryDatabaseMatrix(t *testing.T) {
 	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
 		t.Run(dialect, func(t *testing.T) {
-			var dialector gorm.Dialector
-			switch dialect {
-			case "sqlite":
-				dialector = sqlite.Open(":memory:")
-			case "mysql":
-				dsn := os.Getenv("TEST_MYSQL_DSN")
-				if dsn == "" {
-					t.Skip("TEST_MYSQL_DSN is not configured")
-				}
-				dialector = mysql.Open(dsn)
-			case "postgres":
-				dsn := os.Getenv("TEST_POSTGRES_DSN")
-				if dsn == "" {
-					t.Skip("TEST_POSTGRES_DSN is not configured")
-				}
-				dialector = postgres.Open(dsn)
-			}
-			db, err := gorm.Open(dialector, &gorm.Config{NamingStrategy: schema.NamingStrategy{TablePrefix: "history_test_"}})
-			require.NoError(t, err)
-			sqlDB, err := db.DB()
-			require.NoError(t, err)
-			sqlDB.SetMaxOpenConns(1)
-			previousDB := DB
-			DB = db
-			t.Cleanup(func() {
-				DB = previousDB
-				require.NoError(t, db.Migrator().DropTable(&SystemTask{}))
-				require.NoError(t, sqlDB.Close())
-			})
-			require.NoError(t, db.AutoMigrate(&SystemTask{}))
-			var version string
-			versionQuery := "SELECT version()"
-			if dialect == "sqlite" {
-				versionQuery = "SELECT sqlite_version()"
-			}
-			require.NoError(t, db.Raw(versionQuery).Scan(&version).Error)
-			t.Logf("database version: %s", version)
+			db := useSystemTaskMatrixDB(t, dialect)
 
 			tasks := []SystemTask{
 				{TaskID: "model-failed-old", Type: SystemTaskTypeModelUpdate, Status: SystemTaskStatusFailed},
@@ -115,6 +127,226 @@ func TestSystemTaskHistoryDatabaseMatrix(t *testing.T) {
 			require.NoError(t, err)
 			assert.Zero(t, deleted, "repeated cleanup preserves the scheduler's latest runs")
 		})
+	}
+}
+
+// The daily cleanup deletes finished rows older than the retention in
+// batches, and keeps active rows, newer rows and the newest row of each type.
+func TestDeleteFinishedSystemTasksDatabaseMatrix(t *testing.T) {
+	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+		t.Run(dialect, func(t *testing.T) {
+			db := useSystemTaskMatrixDB(t, dialect)
+			const cutoff int64 = 1_000_000
+			old := make([]SystemTask, systemTaskCleanupBatchSize+1)
+			for i := range old {
+				old[i] = SystemTask{TaskID: fmt.Sprintf("sync-old-%d", i), Type: SyncTaskType(SyncTopicChannels), Status: SystemTaskStatusSucceeded, CreatedAt: 10, UpdatedAt: cutoff - 1}
+			}
+			require.NoError(t, db.CreateInBatches(&old, 200).Error)
+			kept := []SystemTask{
+				{TaskID: "test-old-pending", Type: SystemTaskTypeChannelTest, Status: SystemTaskStatusPending, CreatedAt: 10, UpdatedAt: 10},
+				{TaskID: "test-old-running", Type: SystemTaskTypeChannelTest, Status: SystemTaskStatusRunning, CreatedAt: 10, UpdatedAt: 10},
+				{TaskID: "sync-at-cutoff", Type: SyncTaskType(SyncTopicChannels), Status: SystemTaskStatusSucceeded, CreatedAt: 10, UpdatedAt: cutoff},
+				{TaskID: "sync-newest", Type: SyncTaskType(SyncTopicChannels), Status: SystemTaskStatusFailed, CreatedAt: 10, UpdatedAt: 10},
+				{TaskID: "log-newest", Type: SystemTaskTypeLogCleanup, Status: SystemTaskStatusFailed, CreatedAt: 10, UpdatedAt: 10},
+			}
+			deletedRows := []SystemTask{
+				{TaskID: "log-old-failed", Type: SystemTaskTypeLogCleanup, Status: SystemTaskStatusFailed, CreatedAt: 10, UpdatedAt: 10},
+			}
+			require.NoError(t, db.Create(&deletedRows).Error)
+			require.NoError(t, db.Create(&kept).Error)
+
+			deleted, err := DeleteFinishedSystemTasks(context.Background(), cutoff)
+			require.NoError(t, err)
+			assert.EqualValues(t, len(old)+len(deletedRows), deleted)
+			var remaining []string
+			require.NoError(t, db.Model(&SystemTask{}).Order("id").Pluck("task_id", &remaining).Error)
+			assert.Equal(t, []string{"test-old-pending", "test-old-running", "sync-at-cutoff", "sync-newest", "log-newest"}, remaining)
+
+			deleted, err = DeleteFinishedSystemTasks(context.Background(), cutoff)
+			require.NoError(t, err)
+			assert.Zero(t, deleted)
+		})
+	}
+}
+
+// A waiter must keep using the same topic lock after the previous writer
+// commits. Otherwise a third writer can commit a higher revision before the
+// waiter, and a node that applied it never reloads the waiter's later commit.
+func TestSyncTopicRevisionCommitOrderDatabaseMatrix(t *testing.T) {
+	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+		for _, existingAnchor := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/existing_anchor=%t", dialect, existingAnchor), func(t *testing.T) {
+				db := useSystemTaskMatrixDB(t, dialect)
+				previousType := common.MainDatabaseType()
+				common.SetMainDatabaseType(map[string]common.DatabaseType{"sqlite": common.DatabaseTypeSQLite, "mysql": common.DatabaseTypeMySQL, "postgres": common.DatabaseTypePostgreSQL}[dialect])
+				t.Cleanup(func() { common.SetMainDatabaseType(previousType) })
+				require.NoError(t, db.AutoMigrate(&SystemTaskLock{}, &Option{}))
+				t.Cleanup(func() { require.NoError(t, db.Migrator().DropTable(&SystemTaskLock{}, &Option{})) })
+				const topic = SyncTopicOAuthProviders
+				if existingAnchor {
+					require.NoError(t, db.Transaction(func(tx *gorm.DB) error { return bumpSyncTopic(tx, topic) }))
+					// Both automatic and manual task-history cleanup leave the
+					// fixed topic row available to every subsequent transaction.
+					require.NoError(t, ExpireStaleSystemTaskLocks(common.GetTimestamp()+1))
+					var anchor SystemTaskLock
+					require.NoError(t, db.First(&anchor, "type = ?", SyncTaskType(topic)).Error)
+					assert.Empty(t, anchor.TaskID)
+				}
+
+				// SQLite permits only one writer. Exercise its real transaction
+				// commit/rollback behavior without pretending it has row locks.
+				if dialect == "sqlite" {
+					for _, key := range []string{"first", "rolled-back", "last"} {
+						err := db.Transaction(func(tx *gorm.DB) error {
+							if err := tx.Create(&Option{Key: key, Value: key}).Error; err != nil {
+								return err
+							}
+							if err := bumpSyncTopic(tx, topic); err != nil {
+								return err
+							}
+							if key == "rolled-back" {
+								return ErrSystemTaskLockLost
+							}
+							return nil
+						})
+						if key == "rolled-back" {
+							require.ErrorIs(t, err, ErrSystemTaskLockLost)
+						} else {
+							require.NoError(t, err)
+						}
+					}
+					var count int64
+					require.NoError(t, db.Model(&Option{}).Count(&count).Error)
+					assert.EqualValues(t, 2, count)
+					require.NoError(t, db.Model(&SystemTask{}).Where("type = ?", SyncTaskType(topic)).Count(&count).Error)
+					expectedTasks := 2
+					if existingAnchor {
+						expectedTasks++
+					}
+					assert.EqualValues(t, expectedTasks, count)
+					return
+				}
+
+				pool, err := db.DB()
+				require.NoError(t, err)
+				pool.SetMaxOpenConns(8)
+				ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+				var workers sync.WaitGroup
+				t.Cleanup(func() { cancel(); workers.Wait() })
+				type writer struct {
+					pid      chan int64
+					inserted chan struct{}
+					release  func()
+					finished chan struct{}
+					err      error
+				}
+				start := func(key string) *writer {
+					release := make(chan struct{})
+					w := &writer{pid: make(chan int64, 1), inserted: make(chan struct{}), release: sync.OnceFunc(func() { close(release) }), finished: make(chan struct{})}
+					t.Cleanup(w.release)
+					workers.Go(func() {
+						defer close(w.finished)
+						w.err = db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+							query := "SELECT pg_backend_pid()"
+							if dialect == "mysql" {
+								query = "SELECT CONNECTION_ID()"
+							}
+							var pid int64
+							if err := tx.Raw(query).Scan(&pid).Error; err != nil {
+								return err
+							}
+							w.pid <- pid
+							if err := tx.Create(&Option{Key: key, Value: key}).Error; err != nil {
+								return err
+							}
+							if err := bumpSyncTopic(tx, topic); err != nil {
+								return err
+							}
+							close(w.inserted)
+							select {
+							case <-release:
+								return nil
+							case <-ctx.Done():
+								return ctx.Err()
+							}
+						})
+					})
+					return w
+				}
+				wait := func(ready <-chan struct{}) {
+					select {
+					case <-ready:
+					case <-ctx.Done():
+						t.Fatal("transaction barrier timed out")
+					}
+				}
+				waitForLock := func(w *writer) {
+					var pid int64
+					select {
+					case pid = <-w.pid:
+					case <-w.finished:
+						require.NoError(t, w.err)
+						t.Fatal("writer finished without opening its transaction")
+					case <-ctx.Done():
+						t.Fatal("writer did not open its transaction")
+					}
+					t.Logf("waiting for transaction connection %d", pid)
+					pollInterval := 5 * time.Millisecond
+					if dialect == "mysql" {
+						// InnoDB caches these diagnostic tables; leave enough time
+						// between reads for a lock-wait snapshot to refresh.
+						pollInterval = 200 * time.Millisecond
+					}
+					require.Eventually(t, func() bool {
+						select {
+						case <-w.finished:
+							return true
+						default:
+						}
+						var waiting int64
+						query := "SELECT count(*) FROM pg_stat_activity WHERE pid = ? AND wait_event_type = 'Lock'"
+						if dialect == "mysql" {
+							query = "SELECT count(*) FROM information_schema.innodb_lock_waits w JOIN information_schema.innodb_trx t ON t.trx_id = w.requesting_trx_id WHERE t.trx_mysql_thread_id = ?"
+						}
+						err := db.Raw(query, pid).Scan(&waiting).Error
+						require.NoError(t, err, "database test user must be allowed to inspect lock waits")
+						return waiting > 0
+					}, 5*time.Second, pollInterval, "writer must wait on the database lock")
+					select {
+					case <-w.finished:
+						require.NoError(t, w.err)
+						t.Fatal("a later revision committed before the writer holding the topic lock")
+					default:
+					}
+				}
+				first := start("first")
+				wait(first.inserted)
+				second := start("second")
+				waitForLock(second)
+				first.release()
+				wait(first.finished)
+				require.NoError(t, first.err)
+				wait(second.inserted)
+				last := start("last")
+				last.release()
+				waitForLock(last)
+				before, err := GetLatestSyncRevisions()
+				require.NoError(t, err)
+				var visible int64
+				require.NoError(t, db.Model(&Option{}).Count(&visible).Error)
+				assert.EqualValues(t, 1, visible)
+				second.release()
+				wait(second.finished)
+				wait(last.finished)
+				require.NoError(t, second.err)
+				require.NoError(t, last.err)
+				after, err := GetLatestSyncRevisions()
+				require.NoError(t, err)
+				assert.Greater(t, after[topic], before[topic])
+				require.NoError(t, db.Model(&Option{}).Count(&visible).Error)
+				assert.EqualValues(t, 3, visible)
+			})
+		}
 	}
 }
 

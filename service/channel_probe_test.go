@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -8,6 +9,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRunChannelProbeTargetTotalLatencyIncludesFirstResponse(t *testing.T) {
+	probe := model.ChannelProbe{Model: "probe-model", TimeoutSeconds: 1, GreenMS: 200, YellowMS: 500}
+	result := RunChannelProbeTarget(context.Background(), probe, func(context.Context, model.ChannelProbe) model.ChannelProbeResult {
+		return model.ChannelProbeResult{Success: true, TTFTMS: common.GetPointer(int64(150))}
+	})
+	require.NotNil(t, result.TTFTMS)
+	assert.GreaterOrEqual(t, result.LatencyMS, *result.TTFTMS)
+	assert.Equal(t, "green", result.Status)
+}
 
 func TestRecentChannelProbeAverageTTFT(t *testing.T) {
 	for _, tc := range []struct {

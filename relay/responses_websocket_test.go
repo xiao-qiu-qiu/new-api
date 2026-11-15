@@ -1391,6 +1391,7 @@ func TestResponsesWSErrorAttribution(t *testing.T) {
 }
 
 func TestServiceTierHTTPRoutingAndOutboundValidation(t *testing.T) {
+	useResponsesWSLocalConcurrency(t)
 	require.NoError(t, i18n.Init())
 	database := setupRelayChannelDB(t)
 	require.NoError(t, database.AutoMigrate(&model.Ability{}))
