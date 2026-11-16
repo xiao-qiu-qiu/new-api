@@ -161,6 +161,7 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 	}
 	idle := time.NewTimer(streamingTimeout)
 	general := operation_setting.GetGeneralSetting()
+	deferKeepAlive := service.ShouldDeferChannelStreamKeepAlive(c, info.ChannelMeta)
 	var ping *time.Ticker
 	var pingC <-chan time.Time
 	if general.PingIntervalEnabled && !info.DisablePing {
@@ -269,6 +270,9 @@ func StreamScannerHandler(c *gin.Context, resp *http.Response, info *relaycommon
 				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonTimeout, nil)
 				return
 			case <-pingC:
+				if deferKeepAlive && !c.Writer.Written() {
+					continue
+				}
 				if err := PingData(c); err != nil {
 					lifecycle.Disconnect(err)
 				}

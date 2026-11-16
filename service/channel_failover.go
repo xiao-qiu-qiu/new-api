@@ -293,6 +293,12 @@ func (r *channelFailoverRuntime) finish(entry *channelFailoverEntry, revision ui
 		entry.state = "rotation_wait"
 		entry.recovering = false
 	}
+	if result.State == "busy" && result.Reason == "upstream_auth_recovery_pending" {
+		// The upstream owns the per-request recovery deadline. Dispatch there
+		// directly instead of spending another capacity wait budget here.
+		entry.state = "auth_recovery_wait"
+		entry.recovering = false
+	}
 	if result.State != "unknown" {
 		entry.lastValid = now
 	}
@@ -409,7 +415,7 @@ func probeChannelAvailability(parent context.Context, entry *channelFailoverEntr
 		case "busy":
 			// A rotating credential can resume on this upstream. Keep that
 			// signal even if another credential is merely at capacity.
-			if result.Reason != "account_rotation" {
+			if result.Reason != "account_rotation" && result.Reason != "upstream_auth_recovery_pending" {
 				result = availability
 			}
 		case "empty":
@@ -421,15 +427,16 @@ func probeChannelAvailability(parent context.Context, entry *channelFailoverEntr
 }
 
 type channelFailoverRequest struct {
-	key              channelFailoverKey
-	setting          operation_setting.ChannelFailoverSetting
-	modelName        string
-	group            string
-	order            []int
-	visited          map[int]bool
-	current          int
-	state            string
-	busyWaitDeadline time.Time
+	key                  channelFailoverKey
+	setting              operation_setting.ChannelFailoverSetting
+	modelName            string
+	group                string
+	order                []int
+	visited              map[int]bool
+	current              int
+	state                string
+	busyWaitDeadline     time.Time
+	authRecoveryFinished bool
 }
 
 func requestChannelFailover(c *gin.Context) *channelFailoverRequest {
@@ -438,6 +445,24 @@ func requestChannelFailover(c *gin.Context) *channelFailoverRequest {
 		return state
 	}
 	return nil
+}
+
+// ShouldDeferChannelStreamKeepAlive preserves the ability to switch channels
+// after Sub2API's silent authentication recovery wait. A heartbeat commits the
+// downstream response just as a business event does, so defer it until output
+// actually reaches the client. Other providers keep their usual keepalive.
+func ShouldDeferChannelStreamKeepAlive(c *gin.Context, channel *relaycommon.ChannelMeta) bool {
+	if channel == nil {
+		return false
+	}
+	if channel.ChannelType == constant.ChannelTypeSub2API {
+		return true
+	}
+	if c == nil {
+		return false
+	}
+	state := requestChannelFailover(c)
+	return state != nil && state.setting.PrimaryChannelID == channel.ChannelId
 }
 
 // The global filter gates every rule. The first matching rule replaces the
@@ -525,7 +550,7 @@ func prepareChannelFailover(c *gin.Context, modelName, usingGroup string, prefer
 	key := makeChannelFailoverKey(c, primary, modelName, setting)
 	availability := channelFailover.observe(key, primary, setting, time.Now())
 	order := []int{setting.PrimaryChannelID, fallbackID}
-	if availability == "rotation_wait" {
+	if availability == "rotation_wait" || availability == "auth_recovery_wait" {
 		order = []int{setting.PrimaryChannelID}
 	} else if availability == "empty" || availability == "recovering" {
 		if fallback := eligibleFailoverChannel(c, fallbackID, group, modelName); fallback != nil {
@@ -606,7 +631,7 @@ func selectChannelFailover(c *gin.Context, state *channelFailoverRequest) (*mode
 			return nil, state.group, err
 		}
 		state.order = []int{state.setting.PrimaryChannelID, state.key.FallbackChannelID}
-		if state.state == "rotation_wait" {
+		if state.state == "rotation_wait" || state.state == "auth_recovery_wait" {
 			state.order = []int{state.setting.PrimaryChannelID}
 		} else if state.state == "empty" || state.state == "busy" || state.state == "recovering" {
 			if eligibleFailoverChannel(c, state.key.FallbackChannelID, state.group, state.modelName) != nil {
@@ -616,13 +641,16 @@ func selectChannelFailover(c *gin.Context, state *channelFailoverRequest) (*mode
 	}
 	// The primary may enter rotation after the route or retry was planned.
 	// Re-read the latest observation before admitting a request to the backup.
-	if state.current == 0 || state.current == state.setting.PrimaryChannelID {
+	if !state.authRecoveryFinished && (state.current == 0 || state.current == state.setting.PrimaryChannelID) {
 		channelFailover.mu.Lock()
 		entry := channelFailover.entries[state.key]
-		rotating := entry != nil && entry.availability(time.Now()) == "rotation_wait"
+		waiting := ""
+		if entry != nil {
+			waiting = entry.availability(time.Now())
+		}
 		channelFailover.mu.Unlock()
-		if rotating {
-			state.state, state.order = "rotation_wait", []int{state.setting.PrimaryChannelID}
+		if waiting == "rotation_wait" || waiting == "auth_recovery_wait" {
+			state.state, state.order = waiting, []int{state.setting.PrimaryChannelID}
 		}
 	}
 	var selectionErr error
@@ -686,15 +714,28 @@ func channelRotationWaiting(err *types.NewAPIError) bool {
 	return code == "account_rotation"
 }
 
-// Capacity is a pool scheduling signal, not a failed credential. Keeping the
-// primary enabled lets availability checks observe its recovery even when a
-// broad global automatic-disable rule includes 429 or 503.
+func channelAuthRecoveryFinished(err *types.NewAPIError) bool {
+	if err == nil || err.StatusCode != http.StatusServiceUnavailable || err.GetErrorType() == types.ErrorTypeNewAPIError || types.IsChannelError(err) {
+		return false
+	}
+	code, _ := err.ToOpenAIError().Code.(string)
+	switch code {
+	case "upstream_auth_recovery_timeout", "upstream_auth_recovery_failed", "upstream_auth_recovery_queue_full":
+		return true
+	default:
+		return false
+	}
+}
+
+// Pool capacity, rotation and account recovery are scheduling signals. Keeping
+// the primary enabled lets availability checks observe its recovery even when
+// a broad global automatic-disable rule includes 429 or 503.
 func channelFailoverTransientCapacity(c *gin.Context, channelID int, err *types.NewAPIError) bool {
 	state := requestChannelFailover(c)
 	if state == nil || state.setting.PrimaryChannelID != channelID || err == nil {
 		return false
 	}
-	if channelCapacityExhausted(err) || channelRotationWaiting(err) {
+	if channelCapacityExhausted(err) || channelRotationWaiting(err) || channelAuthRecoveryFinished(err) {
 		return true
 	}
 	// Only temporary upstream 503s inherit a known rotation wait. Authentication,
@@ -734,12 +775,21 @@ func channelFailoverRetry(c *gin.Context, err *types.NewAPIError, retryTimes int
 	decision := PolicyDecision{Action: "stop", Source: "channel_failover"}
 	capacity := channelCapacityExhausted(err)
 	rotation := channelRotationWaiting(err)
+	recoveryFinished := channelAuthRecoveryFinished(err)
 	if state.current == state.setting.PrimaryChannelID {
 		channelFailover.mu.Lock()
 		entry := channelFailover.entries[state.key]
 		now := time.Now()
-		if rotation || entry != nil && entry.availability(now) == "rotation_wait" {
+		if recoveryFinished {
+			// This request has already spent its recovery budget upstream. A
+			// cached wait still protects other requests, but cannot trap this
+			// one on the primary or restart its recovery window.
+			state.authRecoveryFinished = true
+			state.state, state.order = "auth_recovery_finished", []int{state.setting.PrimaryChannelID, state.key.FallbackChannelID}
+		} else if rotation || entry != nil && entry.availability(now) == "rotation_wait" {
 			state.state, state.order = "rotation_wait", []int{state.setting.PrimaryChannelID}
+		} else if entry != nil && entry.availability(now) == "auth_recovery_wait" {
+			state.state, state.order = "auth_recovery_wait", []int{state.setting.PrimaryChannelID}
 		}
 		if rotation && entry != nil {
 			// A structured rotation rejection also protects cold-cache requests;
@@ -754,7 +804,7 @@ func channelFailoverRetry(c *gin.Context, err *types.NewAPIError, retryTimes int
 				entry.nextCheck = now
 			}
 		}
-		observedEmpty := capacity && state.state != "rotation_wait" && entry != nil && !entry.channel.ChannelInfo.IsMultiKey
+		observedEmpty := capacity && state.state != "rotation_wait" && state.state != "auth_recovery_wait" && entry != nil && !entry.channel.ChannelInfo.IsMultiKey
 		if observedEmpty {
 			entry.revision++
 			entry.state, entry.readyCount, entry.recovering = "empty", 0, true
@@ -779,6 +829,10 @@ func channelFailoverRetry(c *gin.Context, err *types.NewAPIError, retryTimes int
 		decision.Reason = "primary_rotation_wait"
 		return decision, true
 	}
+	if state.state == "auth_recovery_wait" {
+		decision.Reason = "primary_auth_recovery_wait"
+		return decision, true
+	}
 	if retryTimes <= 0 && len(state.visited) >= 2 {
 		decision.Reason = "attempt_budget_exhausted"
 		return decision, true
@@ -800,6 +854,10 @@ func channelFailoverRetry(c *gin.Context, err *types.NewAPIError, retryTimes int
 	}
 	if capacity {
 		decision.Action, decision.Reason = "retry", "primary_capacity_exhausted"
+		return decision, true
+	}
+	if recoveryFinished {
+		decision.Action, decision.Reason = "retry", "primary_auth_recovery_finished"
 		return decision, true
 	}
 	if types.IsChannelError(err) || !operation_setting.IsAlwaysSkipRetryStatusCode(err.StatusCode) && operation_setting.ShouldRetryByStatusCode(err.StatusCode) {

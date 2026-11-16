@@ -198,7 +198,7 @@ func openaiStreamError(data string) *types.NewAPIError {
 		status = http.StatusNotFound
 	case "rate_limit_error", "rate_limit_exceeded", "insufficient_quota", "usage_limit_reached":
 		status = http.StatusTooManyRequests
-	case "overloaded_error", "service_unavailable":
+	case "overloaded_error", "service_unavailable", "upstream_auth_recovery_timeout", "upstream_auth_recovery_failed", "upstream_auth_recovery_queue_full":
 		status = http.StatusServiceUnavailable
 	}
 	for _, path := range []string{"response.error.status", "error.status", "status"} {

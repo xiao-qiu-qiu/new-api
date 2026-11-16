@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/QuantumNous/new-api/common"
@@ -564,6 +566,188 @@ func TestRelayKeepAliveHonorsStreamSettings(t *testing.T) {
 			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
 			require.Equal(t, "error", response["type"])
 		})
+	}
+}
+
+type relayRecoveryTransport func(*http.Request) (*http.Response, error)
+
+func (transport relayRecoveryTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return transport(request)
+}
+
+func TestRelayAuthRecoveryPreservesFailoverBeforeOutput(t *testing.T) {
+	db := modelManagementDB(t, "sqlite", "")
+	t.Setenv("CYBER_SESSION_BLOCK_ENABLED", "false")
+	// Prepared statement rendezvous channels cannot cross synctest bubbles.
+	connection, err := db.DB()
+	require.NoError(t, err)
+	db = db.Session(&gorm.Session{NewDB: true, Context: context.Background()})
+	db.Config.PrepareStmt = false
+	db.Config.ConnPool, db.Statement.ConnPool = connection, connection
+	model.DB, model.LOG_DB = db, db
+	require.NoError(t, i18n.Init())
+	previousOptions := maps.Clone(model.CurrentRequestPolicy().Options)
+	previousRetries, previousCount := common.RetryTimes, constant.CountToken
+	previousLogs, previousErrors := common.LogConsumeEnabled, constant.ErrorLogEnabled
+	previousDisable := common.AutomaticDisableChannelEnabled
+	general := operation_setting.GetGeneralSetting()
+	previousGeneral := *general
+	common.RetryTimes, constant.CountToken = 1, false
+	common.LogConsumeEnabled, constant.ErrorLogEnabled = false, false
+	common.AutomaticDisableChannelEnabled = false
+	general.PingIntervalEnabled, general.PingIntervalSeconds = true, 1
+	t.Cleanup(func() {
+		require.NoError(t, model.UpdateRequestPolicyOptions(previousOptions))
+		common.RetryTimes, constant.CountToken = previousRetries, previousCount
+		common.LogConsumeEnabled, constant.ErrorLogEnabled = previousLogs, previousErrors
+		common.AutomaticDisableChannelEnabled = previousDisable
+		*general = previousGeneral
+	})
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"default":1}`))
+	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"auth-recovery":0}`))
+	user := &model.User{Username: "auth-recovery", Group: "default", Quota: 100000, Status: common.UserStatusEnabled, Setting: `{"billing_preference":"wallet_only"}`}
+	require.NoError(t, db.Create(user).Error)
+	service.InitHttpClient()
+	client := service.GetHttpClient()
+	previousTransport := client.Transport
+	t.Cleanup(func() { client.Transport = previousTransport })
+	const failure = `{"error":{"type":"api_error","code":"upstream_auth_recovery_timeout","message":"recovery timed out"}}`
+	const failedEvent = "data: " + failure + "\n\n"
+	const completed = "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_recovered\",\"status\":\"completed\"}}\n\n"
+	const created = "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_started\",\"status\":\"in_progress\"}}\n\n"
+
+	for _, channelType := range []int{constant.ChannelTypeSub2API, constant.ChannelTypeOpenAI} {
+		for _, scenario := range []string{"late HTTP rejection", "recovered request", "comment-only rejection", "accepted stream failure"} {
+			t.Run(fmt.Sprintf("type_%d/%s", channelType, scenario), func(t *testing.T) {
+				primaryURL, backupURL := "https://recovery-primary.example", "https://recovery-backup.example"
+				primary := &model.Channel{Name: "auth-primary", Type: channelType, Key: "primary-test-key", Status: common.ChannelStatusEnabled, Group: "default", Models: "auth-recovery", BaseURL: &primaryURL}
+				backup := &model.Channel{Name: "auth-backup", Type: constant.ChannelTypeOpenAI, Key: "backup-test-key", Status: common.ChannelStatusEnabled, Group: "default", Models: "auth-recovery", BaseURL: &backupURL}
+				for _, candidate := range []*model.Channel{primary, backup} {
+					require.NoError(t, db.Create(candidate).Error)
+					require.NoError(t, candidate.AddAbilities(db))
+					t.Cleanup(func() {
+						require.NoError(t, db.Where("channel_id = ?", candidate.Id).Delete(&model.Ability{}).Error)
+						require.NoError(t, db.Delete(candidate).Error)
+					})
+				}
+				require.NoError(t, model.UpdateRequestPolicyOptions(map[string]string{
+					"channel_failover_setting.enabled": "true", "channel_failover_setting.primary_channel_id": strconv.Itoa(primary.Id),
+					"channel_failover_setting.fallback_channel_id": strconv.Itoa(backup.Id), "channel_failover_setting.model_regex": "[]",
+					"channel_failover_setting.fallback_rules": "[]", "channel_affinity_setting.enabled": "false",
+				}))
+				if scenario == "comment-only rejection" {
+					polled := make(chan struct{})
+					observed := sync.OnceFunc(func() { close(polled) })
+					client.Transport = relayRecoveryTransport(func(request *http.Request) (*http.Response, error) {
+						defer observed()
+						body := fmt.Sprintf(`{"object":"routing.availability","model":"auth-recovery","state":"busy","reason":"upstream_auth_recovery_pending","checked_at":%d}`, time.Now().Unix())
+						return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(body)), Request: request}, nil
+					})
+					runtimeContext, cancelRuntime := context.WithCancel(context.Background())
+					runtimeDone := make(chan struct{})
+					go func() {
+						defer close(runtimeDone)
+						service.RunChannelFailoverRuntime(runtimeContext)
+					}()
+					stopRuntime := sync.OnceFunc(func() { cancelRuntime(); <-runtimeDone })
+					t.Cleanup(stopRuntime)
+					seed, _ := gin.CreateTestContext(httptest.NewRecorder())
+					seed.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+					_, _, selectErr := service.SelectChannelForRequest(seed, "auth-recovery", &service.RetryParam{Ctx: seed, TokenGroup: "default", ModelName: "auth-recovery"})
+					require.Nil(t, selectErr)
+					service.ReleaseChannelConcurrency(seed)
+					select {
+					case <-polled:
+					case <-time.After(5 * time.Second):
+						t.Fatal("availability probe did not populate the pending observation")
+					}
+					stopRuntime()
+				}
+				synctest.Test(t, func(t *testing.T) {
+					var primaryCalls, backupCalls int
+					client.Transport = relayRecoveryTransport(func(request *http.Request) (*http.Response, error) {
+						if request.Body != nil {
+							defer request.Body.Close()
+						}
+						response := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/event-stream"}}, Request: request}
+						if request.URL.Path == "/v1/routing/availability" {
+							response.Header.Set("Content-Type", "application/json")
+							response.Body = io.NopCloser(strings.NewReader(fmt.Sprintf(`{"object":"routing.availability","model":"auth-recovery","state":"busy","reason":"upstream_auth_recovery_pending","checked_at":%d}`, time.Now().Unix())))
+							return response, nil
+						}
+						if request.URL.Host == "recovery-backup.example" {
+							backupCalls++
+							response.Body = io.NopCloser(strings.NewReader(completed))
+							return response, nil
+						}
+						primaryCalls++
+						switch scenario {
+						case "late HTTP rejection":
+							time.Sleep(60 * time.Second)
+							response.StatusCode = http.StatusServiceUnavailable
+							response.Header.Set("Content-Type", "application/json")
+							response.Body = io.NopCloser(strings.NewReader(failure))
+						case "recovered request":
+							time.Sleep(59 * time.Second)
+							response.Body = io.NopCloser(strings.NewReader(completed))
+						default:
+							reader, writer := io.Pipe()
+							response.Body = reader
+							go func() {
+								defer writer.Close()
+								prefix := ": recovery pending\n\n"
+								if scenario == "accepted stream failure" {
+									prefix = created
+								}
+								_, _ = io.WriteString(writer, prefix)
+								time.Sleep(60 * time.Second)
+								_, _ = io.WriteString(writer, failedEvent)
+							}()
+						}
+						return response, nil
+					})
+					engine := gin.New()
+					engine.POST("/v1/responses", middleware.BodyStorageCleanup(), func(c *gin.Context) {
+						c.Set(common.RequestIdKey, common.NewRequestId())
+						common.SetContextKey(c, constant.ContextKeyUserId, user.Id)
+						user.ToBaseUser().WriteContext(c)
+						common.SetContextKey(c, constant.ContextKeyUsingGroup, "default")
+						common.SetContextKey(c, constant.ContextKeyTokenGroup, "default")
+					}, middleware.Distribute(), func(c *gin.Context) {
+						if scenario == "comment-only rejection" {
+							pending := false
+							for _, event := range service.RequestPolicy(c).Events() {
+								pending = pending || event.Decision.Reason == "primary_auth_recovery_wait"
+							}
+							assert.True(t, pending, "the SSE terminal must escape a live pending availability observation")
+						}
+						Relay(c, types.RelayFormatOpenAIResponses)
+					})
+					request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"auth-recovery","stream":true,"max_output_tokens":16,"input":"hello"}`))
+					request.Header.Set("Content-Type", "application/json")
+					recorder := httptest.NewRecorder()
+					engine.ServeHTTP(recorder, request)
+					require.Equal(t, 1, primaryCalls)
+					require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+					body := recorder.Body.String()
+					if scenario == "accepted stream failure" {
+						assert.Zero(t, backupCalls, "an accepted response must never be replayed")
+						assert.Contains(t, body, "resp_started")
+						assert.Contains(t, body, "upstream_auth_recovery_timeout")
+						assert.Contains(t, body, ": PING", "keepalive resumes after business output")
+					} else {
+						wantBackups := 1
+						if scenario == "recovered request" {
+							wantBackups = 0
+						}
+						assert.Equal(t, wantBackups, backupCalls)
+						assert.Contains(t, body, "resp_recovered")
+						assert.NotContains(t, body, "upstream_auth_recovery_timeout")
+						assert.NotContains(t, body, ": PING", "the waiting attempt must stay uncommitted until its result")
+					}
+				})
+			})
+		}
 	}
 }
 

@@ -1012,6 +1012,56 @@ func TestChannelFailoverCacheSingleflightAndStaleProbe(t *testing.T) {
 	assert.False(t, channelCapacityExhausted(types.NewOpenAIError(errors.New("model_capacity_exhausted in free text"), types.ErrorCodeBadResponse, 503)), "free text never marks account exhaustion")
 }
 
+func TestChannelFailoverAuthRecoveryWait(t *testing.T) {
+	db := channelFailoverDatabase(t, sqlite.Open(":memory:"))
+	primary, setting := channelFailoverFixture(t, db, true)
+	entry := recordChannelFailoverAvailability(t, primary, setting, "ready")
+
+	for _, reason := range []string{"upstream_auth_recovery_pending", "account_rotation"} {
+		for _, code := range []string{"upstream_auth_recovery_timeout", "upstream_auth_recovery_failed", "upstream_auth_recovery_queue_full"} {
+			t.Run(reason+"/"+code, func(t *testing.T) {
+				channelFailover.finish(entry, entry.revision, channelAvailability{State: "busy", Reason: reason}, time.Now())
+				c := newChannelFailoverContext(t)
+				ctx, cancel := context.WithTimeout(c.Request.Context(), time.Second)
+				defer cancel()
+				c.Request = c.Request.WithContext(ctx)
+				require.Equal(t, primary.Id, selectChannelFailoverForTest(t, c).Id, "recovery waits belong to the upstream, without another 30-second capacity wait")
+				assert.True(t, ShouldDeferChannelStreamKeepAlive(c, &relaycommon.ChannelMeta{ChannelId: primary.Id, ChannelType: primary.Type}))
+				assert.False(t, ShouldDeferChannelStreamKeepAlive(c, &relaycommon.ChannelMeta{ChannelId: 15, ChannelType: constant.ChannelTypeOpenAI}))
+				assert.True(t, ShouldDeferChannelStreamKeepAlive(c, &relaycommon.ChannelMeta{ChannelId: 15, ChannelType: constant.ChannelTypeSub2API}))
+				err := types.WithOpenAIError(types.OpenAIError{Type: "api_error", Code: code}, http.StatusServiceUnavailable)
+				assert.True(t, channelFailoverTransientCapacity(c, primary.Id, err), "an account's recovery failure must not disable its gateway")
+				before := entry.availability(time.Now())
+				decision := DecideRelayRetry(c, err, 1)
+				assert.Equal(t, "retry", decision.Action)
+				assert.Equal(t, "primary_auth_recovery_finished", decision.Reason)
+				backup, _, selectErr := CacheGetRandomSatisfiedChannel(&RetryParam{Ctx: c, ModelName: "alias", TokenGroup: "default", Retry: common.GetPointer(1)})
+				require.NoError(t, selectErr)
+				require.NotNil(t, backup)
+				assert.Equal(t, 15, backup.Id, "a newer pending probe cannot restart this request's completed recovery wait")
+				assert.Equal(t, before, entry.availability(time.Now()), "terminal errors change only this request's routing")
+				assert.Equal(t, primary.Id, selectChannelFailoverForTest(t, newChannelFailoverContext(t)).Id, "other requests retain their own recovery opportunity")
+			})
+		}
+	}
+	t.Run("unstructured errors do not finish recovery", func(t *testing.T) {
+		channelFailover.finish(entry, entry.revision, channelAvailability{State: "busy", Reason: "upstream_auth_recovery_pending"}, time.Now())
+		c := newChannelFailoverContext(t)
+		require.Equal(t, primary.Id, selectChannelFailoverForTest(t, c).Id)
+		apiErr := types.NewOpenAIError(errors.New("upstream_auth_recovery_timeout"), types.ErrorCodeBadResponse, 503)
+		assert.Equal(t, "primary_auth_recovery_wait", DecideRelayRetry(c, apiErr, 1).Reason)
+		assert.False(t, channelAuthRecoveryFinished(types.WithOpenAIError(types.OpenAIError{Code: "upstream_auth_recovery_timeout"}, http.StatusUnauthorized)))
+	})
+	t.Run("committed business output cannot replay", func(t *testing.T) {
+		c := newChannelFailoverContext(t)
+		require.Equal(t, primary.Id, selectChannelFailoverForTest(t, c).Id)
+		_, err := c.Writer.WriteString("data: accepted\n\n")
+		require.NoError(t, err)
+		apiErr := types.WithOpenAIError(types.OpenAIError{Code: "upstream_auth_recovery_timeout"}, http.StatusServiceUnavailable)
+		assert.Equal(t, "response_started", DecideRelayRetry(c, apiErr, 1).Reason)
+	})
+}
+
 func TestChannelFailoverRotationWaitAtConcurrencyLimit(t *testing.T) {
 	db := channelFailoverDatabase(t, sqlite.Open(":memory:"))
 	primary, setting := channelFailoverFixture(t, db, true)

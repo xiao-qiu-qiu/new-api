@@ -983,6 +983,10 @@ func TestResponsesStreamFailureStatusAndPolicy(t *testing.T) {
 		{"standard rate limit", `{"type":"error","code":"rate_limit_exceeded","message":"retry later"}`, 429, "rate_limit_exceeded", false},
 		{"explicit status takes precedence", `{"type":"error","status":503,"code":"context_length_exceeded","message":"retry later"}`, 503, "context_length_exceeded", false},
 		{"legacy permission error", `{"type":"error","error":{"type":"permission_error","code":"access_denied","message":"not allowed"}}`, 403, "access_denied", false},
+		{"recovery timeout after comments", `{"type":"response.failed","response":{"status":"failed","error":{"type":"api_error","code":"upstream_auth_recovery_timeout","message":"timed out"}}}`, 503, "upstream_auth_recovery_timeout", false},
+		{"recovery failure", `{"type":"error","error":{"type":"api_error","code":"upstream_auth_recovery_failed","message":"failed"}}`, 503, "upstream_auth_recovery_failed", false},
+		{"recovery queue full", `{"type":"error","code":"upstream_auth_recovery_queue_full","message":"full"}`, 503, "upstream_auth_recovery_queue_full", false},
+		{"explicit recovery rejection status", `{"type":"error","status":401,"code":"upstream_auth_recovery_timeout","message":"rejected"}`, 401, "upstream_auth_recovery_timeout", false},
 		{"policy rejection", `{"type":"error","code":"cyber_policy","message":"rejected"}`, 403, "cyber_policy", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
