@@ -273,6 +273,9 @@ func readChannelAffinityBinding(meta *channelAffinityMeta) (int, bool, error) {
 func nextChannelAffinityLifetime(meta channelAffinityMeta, snapshot channelAffinityBindingSnapshot, channelID, ttlSeconds int, now int64) (channelAffinityLifetimeState, time.Duration, bool) {
 	state := snapshot.lifetime
 	observed := meta.LifetimeObserved
+	if meta.PreserveConcurrentBinding && (observed == nil || !observed.LiveBinding) && snapshot.live(now) && snapshot.channelID != channelID {
+		return state, 0, false
+	}
 	if observed != nil && observed.LiveBinding && observed.ManagementEpoch != "" && observed.ManagementEpoch != snapshot.management.ResidenceEpoch {
 		return state, 0, false
 	}

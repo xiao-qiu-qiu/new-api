@@ -64,10 +64,7 @@ func prepareChannelMaintenanceScope(c *gin.Context, modelName, usingGroup string
 		return
 	}
 	setting := model.CurrentRequestPolicy().Failover
-	if channelFailoverBackup(setting, modelName) == 0 {
-		return
-	}
-	if pin, pinned, _ := GetChannelConstraints(c).ResolvedPin(); pinned && !isChannelFailoverMember(setting, pin.ChannelId) {
+	if !setting.Enabled || setting.PrimaryChannelID <= 0 {
 		return
 	}
 	primary, err := model.CacheGetChannel(setting.PrimaryChannelID)
@@ -83,6 +80,16 @@ func prepareChannelMaintenanceScope(c *gin.Context, modelName, usingGroup string
 	}
 	for _, group := range groups {
 		if model.IsChannelEnabledForGroupModel(group, modelName, primary.Id) {
+			backups, ordered := channelFailoverBackups(setting, modelName, group)
+			if len(backups) == 0 {
+				return
+			}
+			if pin, pinned, _ := GetChannelConstraints(c).ResolvedPin(); pinned {
+				if ordered && pin.ChannelId != primary.Id && !slices.Contains(backups, pin.ChannelId) ||
+					!ordered && !isChannelFailoverMember(setting, pin.ChannelId) {
+					return
+				}
+			}
 			c.Set(channelMaintenanceScopeKey, []int{primary.Id})
 			return
 		}

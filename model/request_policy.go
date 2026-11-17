@@ -52,6 +52,7 @@ func requestPolicyDefaultOptions() map[string]string {
 		}
 	}
 	defaults["RetryTimes"] = strconv.Itoa(common.RetryTimes)
+	defaults[operation_setting.ChannelFailoverFallbackChainsOption] = "[]"
 	defaults["AutomaticRetryStatusCodes"] = operation_setting.AutomaticRetryStatusCodesToString()
 	defaults["AutomaticDisableStatusCodes"] = operation_setting.AutomaticDisableStatusCodesToString()
 	defaults["AutomaticDisableKeywords"] = operation_setting.AutomaticDisableKeywordsToString()
@@ -66,7 +67,8 @@ func IsRequestPolicyOption(key string) bool {
 		return true
 	}
 	switch key {
-	case "AutomaticEnableChannelEnabled", "ChannelDisableThreshold", "monitor_setting.auto_test_channel_enabled", "monitor_setting.auto_test_channel_minutes", "monitor_setting.channel_test_concurrency", "monitor_setting.channel_test_mode", "RetryTimes", "AutomaticRetryStatusCodes", "AutomaticDisableChannelEnabled", "AutomaticDisableStatusCodes", "AutomaticDisableKeywords":
+	case operation_setting.ChannelFailoverFallbackChainsOption,
+		"AutomaticEnableChannelEnabled", "ChannelDisableThreshold", "monitor_setting.auto_test_channel_enabled", "monitor_setting.auto_test_channel_minutes", "monitor_setting.channel_test_concurrency", "monitor_setting.channel_test_mode", "RetryTimes", "AutomaticRetryStatusCodes", "AutomaticDisableChannelEnabled", "AutomaticDisableStatusCodes", "AutomaticDisableKeywords":
 		return true
 	}
 	return false
@@ -141,6 +143,9 @@ func BuildRequestPolicy(options map[string]string) (*RequestPolicySnapshot, erro
 	if err := common.Unmarshal(encoded, &snapshot.Failover); err != nil {
 		return nil, common.NewMessage("Invalid primary and backup settings")
 	}
+	if err := snapshot.Failover.LoadFallbackChains(raw[operation_setting.ChannelFailoverFallbackChainsOption]); err != nil {
+		return nil, err
+	}
 	if err := snapshot.Failover.Validate(); err != nil {
 		return nil, err
 	}
@@ -193,6 +198,14 @@ func BuildRequestPolicy(options map[string]string) (*RequestPolicySnapshot, erro
 		return nil, fmt.Errorf("invalid global session mode")
 	}
 	for _, rule := range snapshot.Affinity.Rules {
+		if len(rule.UsingGroups) > 32 {
+			return nil, fmt.Errorf("too many groups for affinity rule %q", rule.Name)
+		}
+		for _, group := range rule.UsingGroups {
+			if group == "" || group != strings.TrimSpace(group) || len(group) > 64 {
+				return nil, fmt.Errorf("invalid group for affinity rule %q", rule.Name)
+			}
+		}
 		seenLifetimeIDs := make(map[int]struct{}, len(rule.ChannelLifetimes))
 		for _, lifetime := range rule.ChannelLifetimes {
 			if lifetime.ChannelID <= 0 || lifetime.IdleTTLSeconds <= 0 || lifetime.MaxResidenceSeconds <= 0 ||

@@ -47,29 +47,30 @@ var (
 )
 
 type channelAffinityMeta struct {
-	FallbackChannelIDs []int
-	ChannelLifetimes   []operation_setting.ChannelAffinityLifetime
-	LifetimeObserved   *channelAffinityLifetimeObservation
-	CacheKey           string
-	TTLSeconds         int
-	RuleName           string
-	SkipRetry          bool
-	ParamTemplate      map[string]any
-	KeySourceType      string
-	KeySourceKey       string
-	KeySourcePath      string
-	KeyHint            string
-	KeyFingerprint     string
-	UsingGroup         string
-	ModelName          string
-	RequestPath        string
-	UserID             int
-	UserName           string
-	TokenID            int
-	TokenName          string
-	SessionMode        string
-	Groups             []string
-	Filters            []requestdto.ChannelFilter
+	FallbackChannelIDs        []int
+	ChannelLifetimes          []operation_setting.ChannelAffinityLifetime
+	LifetimeObserved          *channelAffinityLifetimeObservation
+	PreserveConcurrentBinding bool
+	CacheKey                  string
+	TTLSeconds                int
+	RuleName                  string
+	SkipRetry                 bool
+	ParamTemplate             map[string]any
+	KeySourceType             string
+	KeySourceKey              string
+	KeySourcePath             string
+	KeyHint                   string
+	KeyFingerprint            string
+	UsingGroup                string
+	ModelName                 string
+	RequestPath               string
+	UserID                    int
+	UserName                  string
+	TokenID                   int
+	TokenName                 string
+	SessionMode               string
+	Groups                    []string
+	Filters                   []requestdto.ChannelFilter
 }
 
 type ChannelAffinityStatsContext struct {
@@ -566,6 +567,9 @@ func GetPreferredChannelByAffinity(c *gin.Context, modelName string, usingGroup 
 	}
 
 	for _, rule := range setting.Rules {
+		if len(rule.UsingGroups) > 0 && !slices.Contains(rule.UsingGroups, usingGroup) {
+			continue
+		}
 		if !matchAnyRegexCached(rule.ModelRegex, modelName) {
 			continue
 		}
@@ -772,6 +776,14 @@ func AppendChannelAffinityAdminInfo(c *gin.Context, other *model.LogOther) {
 }
 
 func RecordChannelAffinity(c *gin.Context, channelID int) {
+	if failover := requestChannelFailover(c); failover != nil && failover.stickyBackups {
+		// Ordered backups bind only after a successful relay outcome.
+		return
+	}
+	recordSuccessfulChannelAffinity(c, channelID, false)
+}
+
+func recordSuccessfulChannelAffinity(c *gin.Context, channelID int, orderedBackup bool) {
 	if channelID <= 0 {
 		return
 	}
@@ -783,7 +795,7 @@ func RecordChannelAffinity(c *gin.Context, channelID int) {
 	if setting == nil || !setting.Enabled {
 		return
 	}
-	if setting.SwitchOnSuccess && c != nil {
+	if !orderedBackup && setting.SwitchOnSuccess && c != nil {
 		if successChannelID := c.GetInt("channel_id"); successChannelID > 0 {
 			channelID = successChannelID
 		}
@@ -800,6 +812,7 @@ func RecordChannelAffinity(c *gin.Context, channelID int) {
 	}
 	meta, _ := getChannelAffinityMeta(c)
 	meta.CacheKey = cacheKey
+	meta.PreserveConcurrentBinding = orderedBackup
 	meta.Filters = cloneChannelAffinityFilters(GetChannelConstraints(c).Filters)
 	if err := recordChannelAffinityBinding(meta, channelID, ttlSeconds); err != nil {
 		common.SysError(common.LogText("channel affinity cache set failed: err=%v", err))

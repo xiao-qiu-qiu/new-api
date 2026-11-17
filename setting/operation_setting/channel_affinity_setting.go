@@ -18,6 +18,7 @@ type ChannelAffinityLifetime struct {
 
 type ChannelAffinityRule struct {
 	Name             string                     `json:"name"`
+	UsingGroups      []string                   `json:"using_groups,omitempty"`
 	ModelRegex       []string                   `json:"model_regex"`
 	PathRegex        []string                   `json:"path_regex"`
 	UserAgentInclude []string                   `json:"user_agent_include,omitempty"`

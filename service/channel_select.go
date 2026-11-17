@@ -437,7 +437,7 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 	}
 	failover := requestChannelFailover(c)
 	if failover == nil && retry.GetRetry() == 0 {
-		failover = prepareChannelFailover(c, modelName, usingGroup, preferredChannelID)
+		failover = prepareChannelFailover(c, modelName, usingGroup, preferredChannelID, 0)
 	}
 	if state := failover; state != nil {
 		channel, group, err := selectChannelFailover(c, state)

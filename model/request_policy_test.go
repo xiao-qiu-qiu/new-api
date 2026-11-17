@@ -182,6 +182,25 @@ func TestRequestPolicyDatabaseMatrix(t *testing.T) {
 			require.NoError(t, UpdateRequestPolicyOptions(map[string]string{"channel_failover_setting.fallback_rules": "[]"}))
 			require.NoError(t, LoadOptionsFromDatabase())
 			assert.Empty(t, CurrentRequestPolicy().Failover.FallbackRules, "clearing rules persists instead of reusing old entries")
+
+			const chainOption = operation_setting.ChannelFailoverFallbackChainsOption
+			const chainsJSON = `[{"groups":["gpt","gpt+deepseek"],"model_regex":["^gpt-test$"],"channel_ids":[82,39]}]`
+			assert.Empty(t, CurrentRequestPolicy().Failover.FallbackChains())
+			require.NoError(t, UpdateRequestPolicyOptions(map[string]string{chainOption: chainsJSON}))
+			for range 2 {
+				require.NoError(t, LoadOptionsFromDatabase())
+				assert.Equal(t, []operation_setting.ChannelFailoverChain{{
+					Groups: []string{"gpt", "gpt+deepseek"}, ModelRegex: []string{"^gpt-test$"}, ChannelIDs: []int{82, 39},
+				}}, CurrentRequestPolicy().Failover.FallbackChains())
+			}
+			snapshot = CurrentRequestPolicy()
+			assert.Error(t, UpdateRequestPolicyOptions(map[string]string{
+				chainOption: `[{"groups":["gpt","gpt+deepseek"],"model_regex":["^gpt-test$"],"channel_ids":[82,82]}]`,
+			}), "a fallback chain cannot repeat a channel")
+			assert.Same(t, snapshot, CurrentRequestPolicy())
+			option = Option{}
+			require.NoError(t, db.Where(map[string]any{"key": chainOption}).First(&option).Error)
+			assert.Equal(t, chainsJSON, option.Value, "a rejected chain leaves the persisted chain unchanged")
 		})
 	}
 }

@@ -142,6 +142,9 @@ func MarkRequestPolicySuccess(c *gin.Context, stream *relaycommon.StreamStatus) 
 		channelID = c.GetInt("channel_id")
 	}
 	state.AddEvent(PolicyEvent{ChannelID: channelID, Decision: decision})
+	if failover := requestChannelFailover(c); state.Successful && failover != nil && failover.stickyBackups && slices.Contains(failover.backups, failover.current) {
+		recordSuccessfulChannelAffinity(c, failover.current, true)
+	}
 }
 
 // Rules explicitly inherit the global default or override it. Rules without a
