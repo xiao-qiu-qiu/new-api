@@ -65,17 +65,30 @@ func appendUsageBillingPathForLog(other *model.LogOther, isLocalCountTokens bool
 		return
 	}
 	other.SetAdmin("usage_billing_path", usageBillingPathForLog(isLocalCountTokens, usage))
-	if usage == nil || usage.BillingUsage == nil || usage.BillingUsage.Source != dto.BillingUsageSourceOAIResponses {
+	if usage == nil {
+		other.SetPublic("usage_estimated", true)
+		other.SetPublic("cache_usage_known", false)
 		return
 	}
 	billing := usage.BillingUsage
+	if billing == nil {
+		other.SetPublic("usage_estimated", isLocalCountTokens)
+		if usage.UsageSemantic == "" || usage.UsageSemantic == dto.BillingUsageSemanticOpenAI {
+			other.SetPublic("cache_usage_known", !isLocalCountTokens && usage.PromptTokens > 0 && usage.PromptTokensDetails.HasReportedCachedTokens())
+		}
+		return
+	}
+	other.SetPublic("usage_estimated", billing.Estimated)
+	if billing.Source != dto.BillingUsageSourceOAIResponses && billing.Source != dto.BillingUsageSourceOAIChat {
+		return
+	}
 	upstream := billing.OpenAIUsage
 	cacheKnown := upstream != nil && (upstream.InputTokens > 0 || upstream.PromptTokens > 0) &&
-		(upstream.InputTokensDetails != nil || upstream.PromptTokensDetails.CachedTokens > 0 || upstream.PromptCacheHitTokens > 0)
+		((upstream.InputTokensDetails != nil && upstream.InputTokensDetails.HasCachedTokens()) || upstream.PromptCacheHitTokens > 0 ||
+			upstream.PromptTokensDetails.CachedTokens > 0 || (billing.Source == dto.BillingUsageSourceOAIChat && upstream.PromptTokensDetails.HasReportedCachedTokens()))
 	// Public completeness facts survive ordinary self/token log projections.
 	// A numeric cache_tokens=0 is only a measured zero when this flag is true;
 	// an absent flag retains historical behavior for older logs and formats.
-	other.SetPublic("usage_estimated", billing.Estimated)
 	other.SetPublic("cache_usage_known", cacheKnown)
 }
 

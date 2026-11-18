@@ -17,7 +17,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useForm } from 'react-hook-form'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -25,6 +25,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { Form } from '@/components/ui/form'
 import { api } from '@/lib/api'
 
+import { ProbeDialog } from '../components/probe-dialog'
 import { ProbeTargetFields } from '../components/probe-target-fields'
 import { defaultProbe } from '../lib/schema'
 import type { ProbeConfig } from '../types'
@@ -128,6 +129,72 @@ describe('probe target and multiple model selection', () => {
     await user.click(screen.getByRole('option', { name: 'Beta (#99)' }))
     expect(screen.getByLabelText('Selected models')).toBeEmptyDOMElement()
     expect(channel).toHaveValue('Beta (#99)')
+  })
+  it('reorders selected models with keyboard and move buttons without changing the selection', async () => {
+    mount(true)
+    const user = userEvent.setup()
+    await screen.findByText('1 selected · 2 available')
+    await user.click(screen.getByRole('button', { name: 'Select all' }))
+    expect(
+      screen.getByRole('button', { name: 'Move gpt-one up' })
+    ).toBeDisabled()
+    await user.click(screen.getByRole('button', { name: 'Move gpt-two up' }))
+    expect(screen.getByLabelText('Selected models')).toHaveTextContent(
+      'gpt-two,gpt-one'
+    )
+    screen.getByRole('button', { name: 'Drag gpt-two to reorder' }).focus()
+    await user.keyboard('{ArrowDown}')
+    expect(screen.getByLabelText('Selected models')).toHaveTextContent(
+      'gpt-one,gpt-two'
+    )
+  })
+  it('saves the model order and gives guests access only after explicit publication', async () => {
+    const save = vi
+      .spyOn(api, 'post')
+      .mockResolvedValue({ data: { success: true } })
+    const onClose = vi.fn()
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    render(
+      <QueryClientProvider client={queryClient}>
+        <ProbeDialog probe={null} onClose={onClose} />
+      </QueryClientProvider>
+    )
+    const user = userEvent.setup()
+    const guest = screen.getByRole('switch', {
+      name: 'Visible without signing in',
+    })
+    expect(guest).toHaveAttribute('aria-disabled', 'true')
+    expect(guest).not.toBeChecked()
+
+    const group = screen.getByRole('combobox', { name: 'Group' })
+    await waitFor(() => expect(group).toBeEnabled())
+    await user.click(group)
+    await user.click(await screen.findByRole('option', { name: 'default' }))
+    await user.click(screen.getByRole('button', { name: 'Select all' }))
+    await user.click(screen.getByRole('button', { name: 'Move gpt-two up' }))
+    await user.type(
+      screen.getByRole('textbox', { name: 'Public name' }),
+      'Shared GPT'
+    )
+    await user.click(
+      screen.getByRole('switch', { name: 'Publish on status page' })
+    )
+    expect(guest).not.toHaveAttribute('aria-disabled', 'true')
+    await user.click(guest)
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce())
+    expect(save).toHaveBeenCalledWith(
+      '/api/channel/probes',
+      expect.objectContaining({
+        models: ['gpt-two', 'gpt-one'],
+        public: true,
+        guest_visible: true,
+      })
+    )
+    queryClient.clear()
   })
   it('preserves edited selections if upstream discovery fails and disables actions during save', async () => {
     vi.mocked(api.get).mockRejectedValue(

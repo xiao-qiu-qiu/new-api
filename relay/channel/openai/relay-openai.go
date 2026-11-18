@@ -404,6 +404,7 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 			TotalTokens:      info.GetEstimatePromptTokens() + completionTokens,
 		}
 		simpleResponse.Usage = *fallbackUsage
+		common.SetContextKey(c, constant.ContextKeyLocalCountTokens, true)
 		usageModified = true
 	}
 

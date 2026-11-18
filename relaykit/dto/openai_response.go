@@ -262,8 +262,17 @@ type OpenAIVideoResponse struct {
 	Purpose   string `json:"purpose" example:"fine-tune"`
 }
 
+type cachedTokensPresence uint8
+
+const (
+	cachedTokensUntracked cachedTokensPresence = iota
+	cachedTokensMissing
+	cachedTokensReported
+)
+
 type InputTokenDetails struct {
-	CachedTokens         int                 `json:"cached_tokens"`
+	CachedTokens         int `json:"cached_tokens"`
+	cachedTokensPresence cachedTokensPresence
 	CachedTokensDetails  *CachedTokenDetails `json:"cached_tokens_details,omitempty"`
 	CachedCreationTokens int                 `json:"cached_creation_tokens,omitempty"`
 	// CacheWriteTokens is OpenAI's native cache-write count, reported as
@@ -280,6 +289,51 @@ type InputTokenDetails struct {
 	// takes the larger of this value, CacheWriteTokens, and CachedCreationTokens,
 	// and does not add them.
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+}
+
+func (d InputTokenDetails) HasCachedTokens() bool {
+	return d.CachedTokens != 0 || d.cachedTokensPresence != cachedTokensMissing
+}
+
+func (d InputTokenDetails) HasReportedCachedTokens() bool {
+	return d.CachedTokens != 0 || d.cachedTokensPresence == cachedTokensReported
+}
+
+func (d *InputTokenDetails) SetReportedCachedTokens(tokens int) {
+	d.CachedTokens = tokens
+	d.cachedTokensPresence = cachedTokensUntracked
+	if tokens == 0 {
+		d.cachedTokensPresence = cachedTokensReported
+	}
+}
+
+func (d *InputTokenDetails) UnmarshalJSON(data []byte) error {
+	type plain InputTokenDetails
+	var decoded struct {
+		plain
+		CachedTokens *int `json:"cached_tokens"`
+	}
+	if err := kitutil.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*d = InputTokenDetails(decoded.plain)
+	if decoded.CachedTokens == nil {
+		d.cachedTokensPresence = cachedTokensMissing
+	} else {
+		d.SetReportedCachedTokens(*decoded.CachedTokens)
+	}
+	return nil
+}
+
+func (d InputTokenDetails) MarshalJSON() ([]byte, error) {
+	type plain InputTokenDetails
+	if d.HasCachedTokens() {
+		return kitutil.Marshal(plain(d))
+	}
+	return kitutil.Marshal(struct {
+		CachedTokens *int `json:"cached_tokens,omitempty"`
+		plain
+	}{plain: plain(d)})
 }
 
 // CacheWriteTokenDetails is OpenAI's split of cache writes by lifetime. The

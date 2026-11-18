@@ -18,9 +18,11 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useQuery } from '@tanstack/react-query'
 import { Layers3, Radio, RefreshCw } from 'lucide-react'
+import { Reorder } from 'motion/react'
 import { useFormContext, useWatch } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 
+import { AutoGroupOrderItem } from '@/components/auto-group-order-item'
 import { MultiSelect } from '@/components/multi-select'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
@@ -108,6 +110,14 @@ export function ProbeTargetFields(props: { disabled: boolean }) {
     form.setValue('models', [], { shouldDirty: true })
     form.setValue('model', '', { shouldDirty: true })
     form.clearErrors('models')
+  }
+  const moveModel = (index: number, direction: 'up' | 'down') => {
+    const target = direction === 'up' ? index - 1 : index + 1
+    if (props.disabled || target < 0 || target >= selected.length) return
+    const next = [...selected]
+    const [model] = next.splice(index, 1)
+    next.splice(target, 0, model)
+    form.setValue('models', next, { shouldDirty: true })
   }
 
   return (
@@ -267,7 +277,7 @@ export function ProbeTargetFields(props: { disabled: boolean }) {
                 onChange={field.onChange}
                 allowCreate={scope === 'upstream'}
                 disabled={props.disabled || !targetReady}
-                maxVisibleChips={6}
+                maxVisibleChips={selected.length > 1 ? 0 : 6}
                 placeholder={
                   targetReady
                     ? t('Search and select multiple models')
@@ -291,7 +301,12 @@ export function ProbeTargetFields(props: { disabled: boolean }) {
                   disabled={
                     props.disabled || !models.length || models.length > 32
                   }
-                  onClick={() => field.onChange(models)}
+                  onClick={() =>
+                    field.onChange([
+                      ...selected.filter((model) => models.includes(model)),
+                      ...models.filter((model) => !selected.includes(model)),
+                    ])
+                  }
                 >
                   {t('Select all')}
                 </Button>
@@ -307,6 +322,33 @@ export function ProbeTargetFields(props: { disabled: boolean }) {
                 </Button>
               </div>
             </div>
+            {selected.length > 1 && (
+              <Reorder.Group
+                axis='y'
+                values={selected}
+                onReorder={(ordered) => {
+                  if (!props.disabled) field.onChange(ordered)
+                }}
+                aria-label={t('Model order')}
+                className='grid gap-1.5'
+              >
+                {selected.map((model, index) => (
+                  <AutoGroupOrderItem
+                    key={model}
+                    group={model}
+                    index={index}
+                    count={selected.length}
+                    disabled={props.disabled}
+                    onMove={moveModel}
+                    onRemove={(removed) =>
+                      field.onChange(
+                        selected.filter((name) => name !== removed)
+                      )
+                    }
+                  />
+                ))}
+              </Reorder.Group>
+            )}
             <FormMessage />
             {modelError && (
               <Alert variant='destructive'>

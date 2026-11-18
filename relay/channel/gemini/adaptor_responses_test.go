@@ -55,7 +55,9 @@ func TestEmbeddingHandlersUseUpstreamUsageWithEstimateFallback(t *testing.T) {
 				if protocol == "openai" {
 					var result dto.OpenAIEmbeddingResponse
 					require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &result))
-					assert.Equal(t, *usage, result.Usage)
+					wireUsage, err := common.Marshal(usage)
+					require.NoError(t, err)
+					assert.JSONEq(t, string(wireUsage), ojson.Get(recorder.Body.String(), "usage").Raw)
 					require.Len(t, result.Data, 1)
 					assert.Equal(t, []float64{0.25, 0.5}, result.Data[0].Embedding)
 				} else {

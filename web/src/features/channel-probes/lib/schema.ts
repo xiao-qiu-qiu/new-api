@@ -37,6 +37,7 @@ export const probeSchema = z
     model: z.string().trim().max(191, 'Model must be at most 191 characters'),
     enabled: z.boolean(),
     public: z.boolean(),
+    guest_visible: z.boolean(),
     active_enabled: z.boolean(),
     passive_enabled: z.boolean(),
     interval_seconds: z
@@ -115,6 +116,7 @@ export const defaultProbe: ProbeConfig = {
   model: '',
   enabled: true,
   public: false,
+  guest_visible: false,
   active_enabled: true,
   passive_enabled: true,
   interval_seconds: 300,

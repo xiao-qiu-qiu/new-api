@@ -184,7 +184,7 @@ describe('model status measurements', () => {
     )
     expect(screen.queryByText('Average cache hit rate')).not.toBeInTheDocument()
     expect(
-      screen.queryByText('Estimated price / 100M tokens')
+      screen.queryByText('Historical average / 100M tokens')
     ).not.toBeInTheDocument()
   })
   it.each([
@@ -216,8 +216,26 @@ describe('model status measurements', () => {
       />
     )
     expect(screen.queryByText('Average cache hit rate')).not.toBeInTheDocument()
-    expect(screen.getByText('Estimated price / 100M tokens')).toBeVisible()
+    expect(screen.getByText('Historical average / 100M tokens')).toBeVisible()
     expect(screen.getByText(/≈.*0/)).toBeVisible()
+  })
+
+  it('displays the applicable per-request price even when it is free', () => {
+    render(
+      <StatusCard
+        probe={{
+          ...probe,
+          estimated_price_per_100m_tokens: 12,
+          configured_price: 0,
+          configured_price_unit: 'request',
+        }}
+      />
+    )
+    expect(screen.getByText('Price per request')).toBeVisible()
+    expect(screen.getByText('$0')).toBeVisible()
+    expect(
+      screen.queryByText('Historical average / 100M tokens')
+    ).not.toBeInTheDocument()
   })
   it('keeps unsampled periods gray without inventing latency or availability', () => {
     render(

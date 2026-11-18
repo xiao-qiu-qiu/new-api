@@ -491,6 +491,9 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		other = GenerateTextOtherInfo(ctx, relayInfo, summary.ModelRatio, summary.GroupRatio, summary.CompletionRatio, summary.CacheTokens, summary.CacheRatio, summary.ModelPrice, relayInfo.PriceData.GroupRatioInfo.GroupSpecialRatio)
 	}
 	appendUsageBillingPathForLog(other, common.GetContextKeyBool(ctx, constant.ContextKeyLocalCountTokens), originUsage)
+	if relayInfo.OriginModelName != "" && relayInfo.OriginModelName != logModel {
+		other.SetAdmin("original_model_name", relayInfo.OriginModelName)
+	}
 	if adminRejectReason != "" {
 		other.SetAdmin("reject_reason", adminRejectReason)
 	}
@@ -528,7 +531,11 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 		// to cache_creation_tokens.
 		other.SetPublic("cache_write_tokens", cacheWriteTokens)
 	}
-	if relayInfo.GetFinalRequestRelayFormat() != types.RelayFormatClaude && billingUsage != nil && billingUsage.UsageSource != "" && billingUsage.InputTokens > 0 {
+	if summary.IsClaudeUsageSemantic && billingUsage != nil && billingUsage.UsageSource != "" &&
+		summary.PromptTokens >= 0 && summary.CacheTokens >= 0 && cacheWriteTokens >= 0 &&
+		summary.PromptTokens <= math.MaxInt-summary.CacheTokens && summary.PromptTokens+summary.CacheTokens <= math.MaxInt-cacheWriteTokens {
+		other.SetPublic("input_tokens_total", summary.PromptTokens+summary.CacheTokens+cacheWriteTokens)
+	} else if !summary.IsClaudeUsageSemantic && billingUsage != nil && billingUsage.UsageSource != "" && billingUsage.InputTokens > 0 {
 		// input_tokens_total: explicit normalized total input used by the usage log UI.
 		// Only write this field when upstream/current conversion has already provided a
 		// reliable total input value and tagged the usage source. Do not infer it from
@@ -537,7 +544,9 @@ func PostTextConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, us
 	}
 	if tieredBillingApplied {
 		InjectTieredBillingInfo(other, relayInfo, tieredResult)
-
+		if tieredResult == nil {
+			other.SetAdmin("billing_settlement_fallback", true)
+		}
 	}
 
 	attachQuotaSaturation(ctx, relayInfo, other)

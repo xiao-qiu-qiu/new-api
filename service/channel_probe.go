@@ -12,8 +12,18 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/billingexpr"
+	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/relayconvert/reasoning"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/billing_setting"
+	"github.com/QuantumNous/new-api/setting/model_setting"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
+	hostreasoning "github.com/QuantumNous/new-api/setting/reasoning"
+	"github.com/expr-lang/expr/ast"
+	"github.com/expr-lang/expr/parser"
+	"github.com/gin-gonic/gin"
 )
 
 type ChannelProbeView struct {
@@ -29,6 +39,11 @@ type ChannelProbeView struct {
 // would publish channel IDs and future internal configuration by accident.
 type PublicChannelProbeView struct {
 	model.ChannelProbeUsageStats
+	ProbeID             int                          `json:"probe_id,omitempty"`
+	SectionID           int                          `json:"section_id,omitempty"`
+	CanEstimatePrice    bool                         `json:"can_estimate_price"`
+	ConfiguredPrice     *float64                     `json:"configured_price,omitempty"`
+	ConfiguredPriceUnit string                       `json:"configured_price_unit,omitempty"`
 	PublicName          string                       `json:"public_name"`
 	Scope               string                       `json:"scope"`
 	WindowStart         int64                        `json:"window_start"`
@@ -152,6 +167,13 @@ func BuildChannelProbeView(probe model.ChannelProbe, now time.Time) (ChannelProb
 }
 
 func BuildPublicChannelProbeModel(probe model.ChannelProbe, name string, now time.Time, hours int, userGroup string) (PublicChannelProbeView, error) {
+	return BuildPublicChannelProbeModelWithSettings(probe, name, now, hours, userGroup, setting.CaptureGroupSettings())
+}
+
+func BuildPublicChannelProbeModelWithSettings(probe model.ChannelProbe, name string, now time.Time, hours int, userGroup string, groupSettings *setting.GroupSettingsSnapshot) (PublicChannelProbeView, error) {
+	if groupSettings == nil {
+		groupSettings = setting.CaptureGroupSettings()
+	}
 	probe.Normalize()
 	// All buckets contain whole minutes, including the current partial minute.
 	// Window bounds are rounded up by at most 59 seconds; no samples are invented.
@@ -224,19 +246,28 @@ func BuildPublicChannelProbeModel(probe model.ChannelProbe, name string, now tim
 	}
 	// Log storage is optional and may be independent from the probe database.
 	// An unavailable log database must not take the existing status page down.
-	if usage, err := model.GetChannelProbeUsageStats(probe, name, start, end); err == nil {
+	billingModelName := ResolveBillingModelName(name)
+	if usage, err := model.GetChannelProbeUsageStats(probe, name, start, end, billingModelName); err == nil {
 		view.ChannelProbeUsageStats = usage
 	}
 	basePrice := view.EstimatedPricePer100MTokens
 	view.EstimatedPricePer100MTokens = nil
-	groupSettings := setting.CaptureGroupSettings()
 	// An upstream can serve multiple billing groups, so it has no unique
 	// consumer price. Keep its operational/cache metrics without inventing one.
-	if basePrice == nil || probe.Scope != "group" || !groupSettings.Selectable(userGroup, probe.GroupName) {
+	if probe.Scope != "group" || !groupSettings.Selectable(userGroup, probe.GroupName) {
+		return view, nil
+	}
+	view.CanEstimatePrice = probe.Enabled && probe.Public && ChannelProbeSupportsPriceEstimate(name, userGroup, groupSettings)
+	if rule, matched := groupSettings.ResolveSpecialPricing(userGroup, name); matched {
+		price := rule.Price
+		view.ConfiguredPrice, view.ConfiguredPriceUnit = &price, rule.BillingUnit
+		return view, nil
+	}
+	if basePrice == nil {
 		return view, nil
 	}
 	ratio := groupSettings.GroupRatio(userGroup, probe.GroupName)
-	if billing_setting.IgnoreGroupRatio(name) {
+	if billing_setting.IgnoreGroupRatio(name, billingModelName) {
 		ratio = 1
 	}
 	price := *basePrice * ratio
@@ -245,6 +276,149 @@ func BuildPublicChannelProbeModel(probe model.ChannelProbe, name string, now tim
 		view.EstimatedPricePer100MTokens = &price
 	}
 	return view, nil
+}
+
+const ChannelProbePriceTokenLimit = 10_000_000
+
+type ChannelProbePriceInput struct {
+	InputTokens     int
+	OutputTokens    int
+	CacheReadTokens int
+	ServiceTier     string
+}
+
+type ChannelProbePriceEstimate struct {
+	USD         float64 `json:"usd"`
+	BillingUnit string  `json:"billing_unit"`
+}
+
+func ChannelProbeSupportsPriceEstimate(modelName, userGroup string, settings *setting.GroupSettingsSnapshot) bool {
+	if settings == nil {
+		return false
+	}
+	if _, special := settings.ResolveSpecialPricing(userGroup, modelName); special {
+		return false
+	}
+	billingModelName := ResolveBillingModelName(modelName)
+	if strings.HasSuffix(billingModelName, "search-preview") {
+		return false
+	}
+	if billing_setting.GetBillingMode(billingModelName) != billing_setting.BillingModeTieredExpr {
+		if price, ok := ratio_setting.GetModelPrice(billingModelName, false); ok {
+			return price >= 0 && !math.IsNaN(price) && !math.IsInf(price, 0)
+		}
+		_, ok, _ := ratio_setting.GetModelRatio(billingModelName)
+		return ok
+	}
+	expression, ok := billing_setting.GetBillingExpr(billingModelName)
+	if !ok {
+		return false
+	}
+	if _, err := billingexpr.CompileFromCache(expression); err != nil {
+		return false
+	}
+	_, body := billingexpr.ParseExprVersion(expression)
+	tree, err := parser.Parse(body)
+	if err != nil {
+		return false
+	}
+	unsupported := ast.Find(tree.Node, func(node ast.Node) bool {
+		identifier, ok := node.(*ast.IdentifierNode)
+		return ok && slices.Contains([]string{"param", "header", "u", "image_count"}, identifier.Value)
+	})
+	return unsupported == nil
+}
+
+func EstimateChannelProbePrice(c *gin.Context, info *relaycommon.RelayInfo, input ChannelProbePriceInput) (ChannelProbePriceEstimate, error) {
+	unavailable := errors.New("price estimate unavailable for this scenario")
+	if c == nil || info == nil || input.InputTokens < 0 || input.OutputTokens < 0 || input.CacheReadTokens < 0 ||
+		input.InputTokens > ChannelProbePriceTokenLimit || input.OutputTokens > ChannelProbePriceTokenLimit ||
+		input.CacheReadTokens > input.InputTokens {
+		return ChannelProbePriceEstimate{}, unavailable
+	}
+	if input.ServiceTier == "" {
+		input.ServiceTier = "default"
+	}
+	if !slices.Contains([]string{"default", "flex", "priority", "ultrafast", "fast"}, input.ServiceTier) {
+		return ChannelProbePriceEstimate{}, unavailable
+	}
+	price := info.PriceData
+	for _, ratio := range []float64{price.GroupRatioInfo.GroupRatio, price.ModelRatio,
+		price.CompletionRatio, price.CacheRatio, price.ImageRatio, price.CacheCreationRatio,
+		price.CacheCreation5mRatio, price.CacheCreation1hRatio, price.CacheCreation12hRatio} {
+		if math.IsNaN(ratio) || math.IsInf(ratio, 0) || ratio < 0 {
+			return ChannelProbePriceEstimate{}, unavailable
+		}
+	}
+	if price.UsePrice && (price.ModelPrice < 0 || math.IsNaN(price.ModelPrice) || math.IsInf(price.ModelPrice, 0)) {
+		return ChannelProbePriceEstimate{}, unavailable
+	}
+	usage := &dto.Usage{
+		PromptTokens:     input.InputTokens,
+		CompletionTokens: input.OutputTokens,
+		TotalTokens:      input.InputTokens + input.OutputTokens,
+		UsageSemantic:    "openai",
+	}
+	usage.PromptTokensDetails.CachedTokens = input.CacheReadTokens
+	estimate := ChannelProbePriceEstimate{BillingUnit: "token"}
+	var quota int
+	if snap := info.TieredBillingSnapshot; snap != nil {
+		request := billingexpr.RequestInput{}
+		if info.BillingRequestInput != nil {
+			request = *info.BillingRequestInput
+		}
+		request.ServiceTier = info.ServiceTier
+		params := BuildTieredTokenParams(usage, false, billingexpr.UsedVarsByHash(snap.ExprString, snap.ExprHash))
+		result, err := billingexpr.ComputeTieredQuotaWithRequest(snap, params, request)
+		if err != nil || result.Clamp != nil {
+			return ChannelProbePriceEstimate{}, unavailable
+		}
+		quota = result.ActualQuotaAfterGroup
+		estimate.BillingUnit = string(result.BillingUnit)
+		if _, image := info.Request.(*dto.ImageRequest); image {
+			estimate.BillingUnit = "image"
+		}
+	} else {
+		summary := calculateTextQuotaSummary(c, info, usage)
+		if info.QuotaClamp != nil || !summary.ToolCallSurchargeQuota.IsZero() {
+			return ChannelProbePriceEstimate{}, unavailable
+		}
+		quota = summary.Quota
+		if price.UsePrice {
+			estimate.BillingUnit = "request"
+		}
+	}
+	if quota < 0 || common.QuotaPerUnit <= 0 || math.IsNaN(common.QuotaPerUnit) || math.IsInf(common.QuotaPerUnit, 0) {
+		return ChannelProbePriceEstimate{}, unavailable
+	}
+	estimate.USD = float64(quota) / common.QuotaPerUnit
+	return estimate, nil
+}
+
+func ResolveBillingModelName(origin string) string {
+	var candidates []string
+	if !reasoning.ParseModelModifiers(origin).HasModifiers() {
+		candidates = append(candidates, origin)
+	}
+	candidates = append(candidates, hostreasoning.CanonicalBillingModelNames(origin)...)
+	base := hostreasoning.BaseModelName(origin)
+	if deepSeekBase, _, _, ok := reasoning.ParseDeepSeekV4ThinkingSuffix(base); ok && !model_setting.ShouldPreserveThinkingSuffix(base) {
+		candidates = append(candidates, deepSeekBase)
+	}
+	candidates = append(candidates, base)
+	seen := make(map[string]bool, len(candidates))
+	for _, name := range candidates {
+		if name == "" || seen[name] {
+			continue
+		}
+		seen[name] = true
+		formatted := ratio_setting.FormatMatchingModelName(name)
+		_, priced := ratio_setting.GetModelPrice(formatted, false)
+		if priced || ratio_setting.HasConfiguredModelRatio(formatted) || billing_setting.GetBillingMode(formatted) == billing_setting.BillingModeTieredExpr {
+			return name
+		}
+	}
+	return base
 }
 
 // History is ordered newest first by completion time, then ID. Missing TTFT

@@ -45,7 +45,7 @@ func MergeUsageNonZero(current *Usage, incoming *Usage) *Usage {
 	mergeInputTokenDetails(&current.PromptTokensDetails, incoming.PromptTokensDetails)
 	if incoming.InputTokensDetails != nil {
 		details := *incoming.InputTokensDetails
-		if details.CachedTokens > 0 ||
+		if details.HasCachedTokens() ||
 			details.CachedCreationTokens > 0 ||
 			details.CacheWriteTokens > 0 ||
 			details.CacheCreationInputTokens > 0 ||
@@ -54,9 +54,11 @@ func MergeUsageNonZero(current *Usage, incoming *Usage) *Usage {
 			details.ImageTokens > 0 || details.CachedTokensDetails != nil ||
 			details.CacheWriteTokensDetails != nil {
 			if current.InputTokensDetails == nil {
-				current.InputTokensDetails = &InputTokenDetails{}
+				cloned := details.Clone()
+				current.InputTokensDetails = &cloned
+			} else {
+				mergeInputTokenDetails(current.InputTokensDetails, details)
 			}
-			mergeInputTokenDetails(current.InputTokensDetails, details)
 		}
 	}
 
@@ -314,6 +316,9 @@ func mergeInputTokenDetails(current *InputTokenDetails, incoming InputTokenDetai
 	}
 	if incoming.CachedTokens > 0 {
 		current.CachedTokens = incoming.CachedTokens
+		current.cachedTokensPresence = cachedTokensUntracked
+	} else if current.CachedTokens == 0 && incoming.cachedTokensPresence == cachedTokensReported {
+		current.cachedTokensPresence = cachedTokensReported
 	}
 	if incoming.CachedCreationTokens > 0 {
 		current.CachedCreationTokens = incoming.CachedCreationTokens

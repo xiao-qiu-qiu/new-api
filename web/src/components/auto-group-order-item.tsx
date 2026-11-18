@@ -35,6 +35,7 @@ type AutoGroupOrderItemProps = {
   value?: string
   index: number
   count: number
+  disabled?: boolean
   leading?: ReactNode
   children?: ReactNode
   onMove: (index: number, direction: 'up' | 'down') => void
@@ -72,6 +73,7 @@ export function AutoGroupOrderItem(props: AutoGroupOrderItemProps) {
         type='button'
         variant='ghost'
         size='icon-sm'
+        disabled={props.disabled}
         className='text-muted-foreground cursor-grab touch-none font-mono active:cursor-grabbing'
         aria-label={t('Drag {{group}} to reorder', { group: props.group })}
         title={t('Drag {{group}} to reorder', { group: props.group })}
@@ -95,7 +97,7 @@ export function AutoGroupOrderItem(props: AutoGroupOrderItemProps) {
           type='button'
           variant='ghost'
           size='icon-sm'
-          disabled={props.index === 0}
+          disabled={props.disabled || props.index === 0}
           aria-label={t('Move {{group}} up', { group: props.group })}
           onClick={() => props.onMove(props.index, 'up')}
         >
@@ -109,7 +111,7 @@ export function AutoGroupOrderItem(props: AutoGroupOrderItemProps) {
           type='button'
           variant='ghost'
           size='icon-sm'
-          disabled={props.index === props.count - 1}
+          disabled={props.disabled || props.index === props.count - 1}
           aria-label={t('Move {{group}} down', { group: props.group })}
           onClick={() => props.onMove(props.index, 'down')}
         >
@@ -123,6 +125,7 @@ export function AutoGroupOrderItem(props: AutoGroupOrderItemProps) {
           type='button'
           variant='ghost'
           size='icon-sm'
+          disabled={props.disabled}
           aria-label={t('Remove {{group}}', { group: props.group })}
           onClick={() => props.onRemove(props.value ?? props.group)}
         >

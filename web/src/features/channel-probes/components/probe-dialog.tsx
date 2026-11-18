@@ -19,7 +19,7 @@ For commercial licensing, please contact support@quantumnous.com
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { Info } from 'lucide-react'
-import { useForm } from 'react-hook-form'
+import { useForm, useWatch } from 'react-hook-form'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
@@ -75,6 +75,7 @@ export function ProbeDialog(props: {
           sort_order: props.nextSortOrder ?? 0,
         },
   })
+  const published = useWatch({ control: form.control, name: 'public' })
   const mutation = useMutation({
     mutationFn: (values: ProbeConfig) =>
       saveChannelProbe(values, props.probe?.id),
@@ -136,6 +137,13 @@ export function ProbeDialog(props: {
       label: t('Passive observations'),
       hint: t(
         'Collect measurements from real requests without sending additional traffic.'
+      ),
+    },
+    {
+      name: 'guest_visible',
+      label: t('Visible without signing in'),
+      hint: t(
+        'Show this published probe to visitors when the status page is accessible without signing in.'
       ),
     },
   ] as const
@@ -256,6 +264,7 @@ export function ProbeDialog(props: {
                         <Switch
                           checked={field.value}
                           onCheckedChange={field.onChange}
+                          disabled={item.name === 'guest_visible' && !published}
                         />
                       </FormControl>
                       <FormMessage />

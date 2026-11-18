@@ -93,6 +93,7 @@ func TestPublicChannelProbeViewerPrice(t *testing.T) {
 	require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{"deepseek":"DeepSeek"}`))
 	probe := channelProbeFixture()
 	probe.Scope, probe.GroupName, probe.ChannelID = "group", "deepseek", 0
+	probe.GuestVisible = true
 	require.NoError(t, model.SaveChannelProbe(&probe, true))
 	for i := range 10 {
 		quota, ratio := 100, 0.1
@@ -122,6 +123,9 @@ func TestPublicChannelProbeViewerPrice(t *testing.T) {
 			c.Request = httptest.NewRequest(http.MethodGet, "/api/channel/probes/status?group=old", nil)
 			// Group comes only from the existing authentication middleware.
 			c.Set("group", tc.group)
+			if tc.group != "" {
+				c.Set("id", 42)
+			}
 			GetPublicChannelProbeStatus(c)
 			require.Equal(t, http.StatusOK, recorder.Code)
 			assert.Equal(t, "no-store", recorder.Header().Get("Cache-Control"))
@@ -164,6 +168,166 @@ func TestPublicChannelProbeViewerPrice(t *testing.T) {
 		assert.Nil(t, view.EstimatedPricePer100MTokens)
 		assert.Equal(t, probe.PublicName, view.PublicName)
 	})
+}
+
+func TestPublicChannelProbeVisibilityAndSections(t *testing.T) {
+	db := channelProbeTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}, &model.Ability{}))
+	channels := []model.Channel{{Id: 101, Status: common.ChannelStatusManuallyDisabled}, {Id: 102, Status: common.ChannelStatusEnabled}, {Id: 103, Status: common.ChannelStatusEnabled}}
+	require.NoError(t, db.Create(&channels).Error)
+	abilities := []model.Ability{
+		{ChannelId: 101, Group: "shared", Model: "served", Enabled: false},
+		{ChannelId: 101, Group: "private", Model: "foreign-model", Enabled: false},
+		{ChannelId: 101, Group: "shared", Model: "disabled-service", Enabled: false},
+		{ChannelId: 102, Group: "private", Model: "served", Enabled: true},
+		{ChannelId: 103, Group: "shared", Model: "different-model", Enabled: true},
+	}
+	require.NoError(t, db.Create(&abilities).Error)
+	settings := &setting.GroupSettingsSnapshot{
+		UserGroups:          map[string]string{"base": "private"},
+		Ratios:              map[string]float64{"shared": 1, "private": 2},
+		UsableGroups:        map[string]string{"shared": "Shared", "orphan": "Stale", "auto": "Automatic"},
+		SpecialUsableGroups: map[string]map[string]string{"members": {"-:shared": "", "+:private": "Private"}},
+	}
+	probes := []model.ChannelProbe{
+		{Scope: "group", GroupName: "shared", Models: []string{"hidden-z", "hidden-a"}, PublicName: "Shared first", Enabled: true, Public: true},
+		{Scope: "group", GroupName: "shared", Models: []string{"gpt-z", "gpt-a"}, PublicName: "Shared alternate", Enabled: true, Public: true, GuestVisible: true},
+		{Scope: "group", GroupName: "private", Models: []string{"private-model"}, PublicName: "Shared alternate", Enabled: true, Public: true, GuestVisible: true},
+		{Scope: "group", GroupName: "orphan", Models: []string{"orphan-model"}, PublicName: "Orphan", Enabled: true, Public: true, GuestVisible: true},
+		{Scope: "group", GroupName: "shared", Models: []string{"disabled-probe"}, PublicName: "Disabled", Public: true, GuestVisible: true},
+		{Scope: "group", GroupName: "shared", Models: []string{"draft-model"}, PublicName: "Draft", Enabled: true, GuestVisible: true},
+		{Scope: "upstream", ChannelID: 101, Models: []string{"served", "foreign-model", "disabled-service"}, PublicName: "Upstream", Enabled: true, Public: true, GuestVisible: true},
+		{Scope: "upstream", ChannelID: 102, Models: []string{"served"}, PublicName: "Other upstream", Enabled: true, Public: true},
+		{Scope: "upstream", ChannelID: 103, Models: []string{"mismatch"}, PublicName: "Wrong model", Enabled: true, Public: true},
+	}
+	for index := range probes {
+		probe := &probes[index]
+		probe.SortOrder, probe.ActiveEnabled, probe.PassiveEnabled = index, true, true
+		probe.IntervalSeconds, probe.TimeoutSeconds, probe.GreenMS, probe.YellowMS = 60, 5, 1000, 3000
+		require.NoError(t, service.ValidateChannelProbe(probe))
+		require.NoError(t, model.SaveChannelProbe(probe, true))
+	}
+	for _, tc := range []struct {
+		name         string
+		userID       int
+		userGroup    string
+		models       []string
+		probeIndices []int
+		sections     []int
+	}{
+		{
+			name: "guest ignores a supplied group and query identity", userGroup: "members",
+			models:       []string{"gpt-z", "gpt-a", "private-model", "orphan-model", "served", "foreign-model", "disabled-service"},
+			probeIndices: []int{1, 1, 2, 3, 6, 6, 6}, sections: []int{1, 1, 2, 3, 6, 6, 6},
+		},
+		{
+			name: "login uses selectable groups rather than default route or guest flag", userID: 42, userGroup: "base",
+			models:       []string{"hidden-z", "hidden-a", "gpt-z", "gpt-a", "served", "disabled-service"},
+			probeIndices: []int{0, 0, 1, 1, 6, 6}, sections: []int{0, 0, 0, 0, 6, 6},
+		},
+		{
+			name: "special additions and removals apply to each channel and model", userID: 43, userGroup: "members",
+			models:       []string{"private-model", "foreign-model", "served"},
+			probeIndices: []int{2, 6, 7}, sections: []int{2, 6, 7},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(recorder)
+			c.Request = httptest.NewRequest(http.MethodGet, "/api/channel/probes/status?group=members&id=43", nil)
+			c.Set("id", tc.userID)
+			c.Set("group", tc.userGroup)
+			c.Set("role", common.RoleRootUser)
+			*setting.PinGroupSettings(c) = *settings
+			GetPublicChannelProbeStatus(c)
+			require.Equal(t, http.StatusOK, recorder.Code)
+			assert.Equal(t, "no-store", recorder.Header().Get("Cache-Control"))
+			var response struct {
+				Success bool                             `json:"success"`
+				Data    []service.PublicChannelProbeView `json:"data"`
+			}
+			require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+			require.True(t, response.Success, recorder.Body.String())
+			require.Len(t, response.Data, len(tc.models))
+			for index, view := range response.Data {
+				assert.Equal(t, tc.models[index], view.Model)
+				assert.Equal(t, probes[tc.probeIndices[index]].ID, view.ProbeID)
+				assert.Equal(t, probes[tc.sections[index]].ID, view.SectionID)
+			}
+			for _, secret := range []string{"group_name", "channel_id", "guest_visible", "private\"", "shared\""} {
+				assert.NotContains(t, recorder.Body.String(), secret)
+			}
+		})
+	}
+}
+
+func TestPublicGroupProbeVisibility(t *testing.T) {
+	settings := &setting.GroupSettingsSnapshot{Ratios: map[string]float64{"allowed": 1}, UsableGroups: map[string]string{"allowed": "Allowed", "auto": "Auto"}}
+	for _, tc := range []struct {
+		name                          string
+		userID                        int
+		scope, group, publicName      string
+		enabled, public, guest, valid bool
+	}{
+		{name: "published selectable group", userID: 1, scope: "group", group: "allowed", publicName: "Public", enabled: true, public: true, valid: true},
+		{name: "guest defaults off", scope: "group", group: "allowed", publicName: "Public", enabled: true, public: true},
+		{name: "guest explicit opt in", scope: "group", group: "allowed", publicName: "Public", enabled: true, public: true, guest: true, valid: true},
+		{name: "disabled even for guests", scope: "group", group: "allowed", publicName: "Public", public: true, guest: true},
+		{name: "unpublished even for guests", scope: "group", group: "allowed", publicName: "Public", enabled: true, guest: true},
+		{name: "missing public name", scope: "group", group: "allowed", enabled: true, public: true, guest: true},
+		{name: "upstream cannot use group estimator", userID: 1, scope: "upstream", group: "allowed", publicName: "Public", enabled: true, public: true, guest: true},
+		{name: "guest flag never grants a logged in group", userID: 1, scope: "group", group: "denied", publicName: "Public", enabled: true, public: true, guest: true},
+		{name: "automatic group is not selectable", userID: 1, scope: "group", group: "auto", publicName: "Public", enabled: true, public: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			probe := model.ChannelProbe{Scope: tc.scope, GroupName: tc.group, PublicName: tc.publicName, Enabled: tc.enabled, Public: tc.public, GuestVisible: tc.guest}
+			assert.Equal(t, tc.valid, publicGroupProbeVisible(probe, tc.userID, "base", settings))
+		})
+	}
+}
+
+func TestPublicChannelProbeModuleGate(t *testing.T) {
+	channelProbeTestDB(t)
+	probe := channelProbeFixture()
+	probe.Scope, probe.ChannelID, probe.GroupName, probe.GuestVisible = "group", 0, "shared", true
+	require.NoError(t, model.SaveChannelProbe(&probe, true))
+	common.OptionMapRWMutex.Lock()
+	if common.OptionMap == nil {
+		common.OptionMap = make(map[string]string)
+	}
+	previous, existed := common.OptionMap["HeaderNavModules"]
+	common.OptionMapRWMutex.Unlock()
+	t.Cleanup(func() {
+		common.OptionMapRWMutex.Lock()
+		defer common.OptionMapRWMutex.Unlock()
+		if existed {
+			common.OptionMap["HeaderNavModules"] = previous
+		} else {
+			delete(common.OptionMap, "HeaderNavModules")
+		}
+	})
+	for _, tc := range []struct {
+		name, config string
+		status       int
+	}{
+		{"public module", `{"channelStatus":{"enabled":true,"requireAuth":false}}`, http.StatusOK},
+		{"module login still required", `{"channelStatus":{"enabled":true,"requireAuth":true}}`, http.StatusUnauthorized},
+		{"disabled module", `{"channelStatus":{"enabled":false,"requireAuth":false}}`, http.StatusForbidden},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			common.OptionMapRWMutex.Lock()
+			common.OptionMap["HeaderNavModules"] = tc.config
+			common.OptionMapRWMutex.Unlock()
+			engine := gin.New()
+			engine.GET("/api/channel/probes/status", middleware.HeaderNavModuleAuth("channelStatus"), GetPublicChannelProbeStatus)
+			recorder := httptest.NewRecorder()
+			engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/channel/probes/status", nil))
+			assert.Equal(t, tc.status, recorder.Code)
+			if tc.status != http.StatusOK {
+				assert.NotContains(t, recorder.Body.String(), probe.PublicName)
+			}
+		})
+	}
 }
 
 func TestChannelProbeContentTiming(t *testing.T) {
@@ -650,9 +814,13 @@ func TestChannelProbeUpgradeMultiModelWindowsAndOrder(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "upstream", upgraded.Scope)
 	assert.Equal(t, []string{"old-model"}, upgraded.Models)
+	assert.False(t, upgraded.GuestVisible)
 	var nullSortOrders int64
 	require.NoError(t, db.Model(&model.ChannelProbe{}).Where("sort_order IS NULL").Count(&nullSortOrders).Error)
 	assert.Zero(t, nullSortOrders, "legacy default ordering must be identical across databases")
+	var nullGuestVisibility int64
+	require.NoError(t, db.Model(&model.ChannelProbe{}).Where("guest_visible IS NULL").Count(&nullGuestVisibility).Error)
+	assert.Zero(t, nullGuestVisibility, "legacy probes require explicit opt in for guests")
 	oldView, err := service.BuildPublicChannelProbeModel(upgraded, upgraded.Model, now, 24, "")
 	require.NoError(t, err)
 	assert.EqualValues(t, 1, oldView.SampleCount, "second migration must not import samples again")
@@ -830,14 +998,65 @@ func TestChannelProbeGroupRoutingAndModelTargets(t *testing.T) {
 }
 
 func TestChannelProbeModelEditsPreserveRetainedHistory(t *testing.T) {
-	channelProbeTestDB(t)
+	db := channelProbeTestDB(t)
+	require.NoError(t, db.AutoMigrate(&model.Channel{}))
+	require.NoError(t, db.Create(&model.Channel{Id: 123}).Error)
 	probe := channelProbeFixture()
+	probe.Models = []string{"probe-model", "second-model"}
 	require.NoError(t, model.SaveChannelProbe(&probe, true))
+	stored, err := model.GetChannelProbe(probe.ID)
+	require.NoError(t, err)
+	assert.False(t, stored.GuestVisible, "new probes require explicit opt in for guests")
 	now := time.Now()
 	ms := int64(1200)
 	require.NoError(t, model.StoreChannelProbeResult(probe, model.ChannelProbeResult{Source: "passive", CheckedAt: now.Add(-2 * time.Hour).Unix(), Success: true, TTFTMS: &ms}))
+	require.NoError(t, model.StoreChannelProbeResult(probe, model.ChannelProbeResult{Model: "second-model", Source: "passive", CheckedAt: now.Unix(), Success: true, TTFTMS: &ms}))
+	beforeHistory, err := model.GetChannelProbeHistory(probe.ID)
+	require.NoError(t, err)
+	beforeMinutes, err := model.GetChannelProbeMinutes(probe.ID, "probe-model", now.Add(-24*time.Hour).Unix(), now.Add(time.Minute).Unix())
+	require.NoError(t, err)
+	require.NoError(t, db.Migrator().DropColumn(&model.ChannelProbe{}, "guest_visible"))
+	require.NoError(t, model.MigrateChannelProbes(db))
+	require.NoError(t, model.MigrateChannelProbes(db))
+	stored, err = model.GetChannelProbe(probe.ID)
+	require.NoError(t, err)
+	assert.False(t, stored.GuestVisible, "existing multi-model probes remain private to logged in viewers after upgrade")
+	probe.Models, probe.GuestVisible = []string{"second-model", "probe-model"}, true
+	payload, err := common.Marshal(probe)
+	require.NoError(t, err)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPut, fmt.Sprintf("/api/channel/probes/%d", probe.ID), strings.NewReader(string(payload)))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Params = gin.Params{{Key: "id", Value: fmt.Sprint(probe.ID)}}
+	UpdateChannelProbe(c)
+	var response struct {
+		Success bool `json:"success"`
+	}
+	require.NoError(t, common.Unmarshal(recorder.Body.Bytes(), &response))
+	require.True(t, response.Success, recorder.Body.String())
+	probe, err = model.GetChannelProbe(probe.ID)
+	require.NoError(t, err)
+	require.NoError(t, model.MigrateChannelProbes(db))
+	require.NoError(t, model.MigrateChannelProbes(db))
+	stored, err = model.GetChannelProbe(probe.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"second-model", "probe-model"}, stored.Models)
+	assert.Equal(t, "second-model", stored.Model)
+	assert.True(t, stored.GuestVisible, "restart preserves the guest setting")
+	afterHistory, err := model.GetChannelProbeHistory(probe.ID)
+	require.NoError(t, err)
+	assert.Equal(t, beforeHistory, afterHistory, "reordering models and changing visibility preserve every observation")
+	afterMinutes, err := model.GetChannelProbeMinutes(probe.ID, "probe-model", now.Add(-24*time.Hour).Unix(), now.Add(time.Minute).Unix())
+	require.NoError(t, err)
+	assert.Equal(t, beforeMinutes, afterMinutes, "reordering models must preserve minute aggregates")
+	probe.GuestVisible = false
+	require.NoError(t, model.SaveChannelProbe(&probe, false))
+	stored, err = model.GetChannelProbe(probe.ID)
+	require.NoError(t, err)
+	assert.False(t, stored.GuestVisible, "guest visibility can be disabled again")
 	oldRevision := probe
-	probe.Models = []string{probe.Model, "new-model"}
+	probe.Models = []string{"probe-model", "second-model", "new-model"}
 	require.NoError(t, model.SaveChannelProbe(&probe, false))
 	require.NoError(t, model.StoreChannelProbeResult(oldRevision, model.ChannelProbeResult{Source: "passive", CheckedAt: now.Unix(), Success: false}))
 	existing, err := service.BuildPublicChannelProbeModel(probe, "probe-model", now, 24, "")

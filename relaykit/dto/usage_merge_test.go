@@ -8,6 +8,20 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestMergeChatUsageKeepsReportedCacheMiss(t *testing.T) {
+	t.Parallel()
+
+	var missing, reported Usage
+	require.NoError(t, kitutil.Unmarshal([]byte(`{"prompt_tokens":100,"prompt_tokens_details":{"text_tokens":100}}`), &missing))
+	require.NoError(t, kitutil.Unmarshal([]byte(`{"prompt_tokens":100,"prompt_tokens_details":{"cached_tokens":0}}`), &reported))
+	merged := MergeUsageNonZero(nil, &missing)
+	assert.False(t, merged.PromptTokensDetails.HasReportedCachedTokens())
+	MergeUsageNonZero(merged, &reported)
+	MergeUsageNonZero(merged, &missing)
+	assert.True(t, merged.PromptTokensDetails.HasReportedCachedTokens())
+	assert.Zero(t, merged.PromptTokensDetails.CachedTokens)
+}
+
 func TestMergeClaudeUsageCacheCreationReplacesWholeObject(t *testing.T) {
 	t.Parallel()
 

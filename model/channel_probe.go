@@ -31,6 +31,7 @@ type ChannelProbe struct {
 	PublicName      string   `json:"public_name" gorm:"type:varchar(128)"`
 	Enabled         bool     `json:"enabled"`
 	Public          bool     `json:"public"`
+	GuestVisible    bool     `json:"guest_visible"`
 	ActiveEnabled   bool     `json:"active_enabled"`
 	PassiveEnabled  bool     `json:"passive_enabled"`
 	IntervalSeconds int      `json:"interval_seconds"`
@@ -89,7 +90,9 @@ func SaveChannelProbe(probe *ChannelProbe, create bool) error {
 		probe.LeaseUntil = previous.LeaseUntil
 		probe.LeaseToken = previous.LeaseToken
 		probe.HistoryVersion = previous.HistoryVersion
-		modelsChanged := !slices.Equal(previous.Models, probe.Models)
+		modelsRemoved := slices.ContainsFunc(previous.Models, func(name string) bool {
+			return !slices.Contains(probe.Models, name)
+		})
 		targetChanged := previous.Scope != probe.Scope || previous.ChannelID != probe.ChannelID || previous.GroupName != probe.GroupName
 		if err := tx.Model(&previous).Select("*").Updates(probe).Error; err != nil {
 			return err
@@ -102,7 +105,7 @@ func SaveChannelProbe(probe *ChannelProbe, create bool) error {
 		}
 		// Adding a model preserves all retained models' observations. Removing
 		// one deletes only its raw and aggregate rows, so re-adding starts fresh.
-		if modelsChanged {
+		if modelsRemoved {
 			if err := tx.Where("probe_id = ? AND model NOT IN ?", probe.ID, probe.Models).Delete(&ChannelProbeMinute{}).Error; err != nil {
 				return err
 			}
@@ -288,6 +291,9 @@ func MigrateChannelProbes(db *gorm.DB) error {
 	// Newly added integer columns are NULL for old rows. Normalize the
 	// default so PostgreSQL and SQLite/MySQL agree on ordering after upgrade.
 	if err := db.Model(&ChannelProbe{}).Where("sort_order IS NULL").Update("sort_order", 0).Error; err != nil {
+		return err
+	}
+	if err := db.Model(&ChannelProbe{}).Where("guest_visible IS NULL").Update("guest_visible", false).Error; err != nil {
 		return err
 	}
 	var pending []ChannelProbe

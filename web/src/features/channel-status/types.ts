@@ -40,6 +40,8 @@ export type ProbeResult = {
 }
 
 export type PublicChannelStatus = {
+  probe_id?: number
+  section_id?: number
   scope: ProbeScope
   public_name: string
   model: string
@@ -58,5 +60,21 @@ export type PublicChannelStatus = {
   average_cache_hit_rate?: number | null
   estimated_price_per_100m_tokens?: number | null
   cache_sample_count?: number
+  cache_eligible_count?: number
   price_sample_count?: number
+  configured_price?: number | null
+  configured_price_unit?: 'request' | 'image'
+  can_estimate_price?: boolean
+}
+
+export type PriceEstimateInput = {
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  service_tier: 'default' | 'flex' | 'priority' | 'ultrafast'
+}
+
+export type PriceEstimate = {
+  usd: number
+  billing_unit: 'token' | 'request' | 'image'
 }

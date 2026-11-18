@@ -1,14 +1,20 @@
 package service
 
 import (
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/pkg/billingexpr"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
+	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/QuantumNous/new-api/tokenkit"
+	hosttypes "github.com/QuantumNous/new-api/types"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -377,6 +383,31 @@ func TestResponsesUsageAccumulatorBillingCompleteness(t *testing.T) {
 			wantPrompt: 20, wantCompletion: 5, wantPath: usageBillingPathOpenAI,
 		},
 		{
+			name:       "empty input details leave cache unknown",
+			upstream:   []string{`{"input_tokens":20,"output_tokens":5,"input_tokens_details":{}}`},
+			wantPrompt: 20, wantCompletion: 5, wantPath: usageBillingPathOpenAI,
+		},
+		{
+			name:       "partial text details leave cache unknown",
+			upstream:   []string{`{"output_tokens":5}`, `{"input_tokens":20,"input_tokens_details":{"text_tokens":20}}`},
+			wantPrompt: 20, wantCompletion: 5, wantPath: usageBillingPathOpenAI,
+		},
+		{
+			name:       "null cache leaves cache unknown",
+			upstream:   []string{`{"input_tokens":20,"output_tokens":5,"input_tokens_details":{"cached_tokens":null}}`},
+			wantPrompt: 20, wantCompletion: 5, wantPath: usageBillingPathOpenAI,
+		},
+		{
+			name:       "known zero arrives after empty details",
+			upstream:   []string{`{"input_tokens":20,"output_tokens":5,"input_tokens_details":{}}`, `{"input_tokens":20,"input_tokens_details":{"cached_tokens":0}}`},
+			wantPrompt: 20, wantCompletion: 5, wantCacheKnown: true, wantPath: usageBillingPathOpenAI,
+		},
+		{
+			name:       "DeepSeek compatible cache hits",
+			upstream:   []string{`{"input_tokens":20,"output_tokens":5,"prompt_cache_hit_tokens":4}`},
+			wantPrompt: 20, wantCompletion: 5, wantCache: 4, wantCacheKnown: true, wantPath: usageBillingPathOpenAI,
+		},
+		{
 			name:       "estimated output keeps known zero cache",
 			upstream:   []string{`{"input_tokens":20,"input_tokens_details":{"cached_tokens":0}}`},
 			wantPrompt: 20, wantCompletion: 1, wantCacheKnown: true, wantEstimated: true, wantPath: usageBillingPathOpenAIEstimated,
@@ -405,6 +436,9 @@ func TestResponsesUsageAccumulatorBillingCompleteness(t *testing.T) {
 			for _, raw := range tc.upstream {
 				var upstream dto.Usage
 				require.NoError(t, common.UnmarshalJsonStr(raw, &upstream))
+				encoded, err := common.Marshal(upstream)
+				require.NoError(t, err)
+				require.NoError(t, common.Unmarshal(encoded, &upstream))
 				accumulator.Observe(&dto.ResponsesStreamResponse{Type: "response.completed", Response: &dto.OpenAIResponsesResponse{Usage: &upstream}}, nil)
 			}
 			usage := accumulator.Finish()
@@ -458,4 +492,131 @@ func TestResponsesUsageAccumulatorDisconnectLogKeepsFinalUsage(t *testing.T) {
 	assert.Equal(t, "done", status["drain_end_reason"])
 	assert.Equal(t, "completed", status["response_status"])
 	assert.Equal(t, "drain", status["disconnect_mode"])
+}
+
+func TestPostTextConsumeQuotaUsageMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		format     types.RelayFormat
+		billing    *dto.BillingUsage
+		raw        string
+		chatSource bool
+		fallback   bool
+		normalName bool
+		wantInput  float64
+		wantCache  float64
+		wantWrites float64
+		cacheKnown *bool
+	}{
+		{
+			name: "DeepSeek chat cache hit count", format: types.RelayFormatOpenAI,
+			billing:   dto.NewOpenAIChatBillingUsage(&dto.Usage{PromptTokens: 100, CompletionTokens: 10, PromptCacheHitTokens: 80}),
+			wantInput: 100, wantCache: 80, normalName: true, cacheKnown: common.GetPointer(true),
+		},
+		{
+			name: "Claude split writes define the complete input", format: types.RelayFormatClaude,
+			billing: dto.NewClaudeMessagesBillingUsage(&dto.ClaudeUsage{InputTokens: 10, OutputTokens: 10, CacheReadInputTokens: 60, CacheCreationInputTokens: 20,
+				CacheCreation: &dto.ClaudeCacheCreationUsage{Ephemeral5mInputTokens: 10, Ephemeral1hInputTokens: 20}}),
+			wantInput: 100, wantCache: 60, wantWrites: 30,
+		},
+		{
+			name: "Claude usage converted to OpenAI keeps separate cache", format: types.RelayFormatOpenAI,
+			billing:   dto.NewClaudeMessagesBillingUsage(&dto.ClaudeUsage{InputTokens: 10, OutputTokens: 10, CacheReadInputTokens: 60, CacheCreationInputTokens: 30}),
+			wantInput: 100, wantCache: 60, wantWrites: 30,
+		},
+		{
+			name: "OpenAI usage over Claude retains inclusive input", format: types.RelayFormatClaude,
+			billing:   dto.NewOpenAIChatBillingUsage(&dto.Usage{PromptTokens: 100, CompletionTokens: 10, PromptTokensDetails: dto.InputTokenDetails{CachedTokens: 80, CacheWriteTokens: 70}}),
+			wantInput: 100, wantCache: 80, wantWrites: 70, cacheKnown: common.GetPointer(true),
+		},
+		{
+			name: "failed expression marks retained reservation", format: types.RelayFormatOpenAI,
+			billing:  dto.NewOpenAIChatBillingUsage(&dto.Usage{PromptTokens: 100, CompletionTokens: 10}),
+			fallback: true, wantInput: 100, cacheKnown: common.GetPointer(false),
+		},
+		{
+			name: "Chat without sidecar leaves absent cache unknown", format: types.RelayFormatOpenAI,
+			raw:       `{"prompt_tokens":100,"completion_tokens":10,"input_tokens":100,"usage_source":"upstream"}`,
+			wantInput: 100, cacheKnown: common.GetPointer(false),
+		},
+		{
+			name: "Chat without sidecar keeps measured hits", format: types.RelayFormatOpenAI,
+			raw:       `{"prompt_tokens":100,"completion_tokens":10,"input_tokens":100,"usage_source":"upstream","prompt_tokens_details":{"cached_tokens":80}}`,
+			wantInput: 100, wantCache: 80, cacheKnown: common.GetPointer(true),
+		},
+		{
+			name: "Chat without sidecar keeps a measured miss", format: types.RelayFormatOpenAI,
+			raw:       `{"prompt_tokens":100,"completion_tokens":10,"input_tokens":100,"usage_source":"upstream","prompt_tokens_details":{"cached_tokens":0}}`,
+			wantInput: 100, cacheKnown: common.GetPointer(true),
+		},
+		{
+			name: "Chat sidecar keeps a measured miss", format: types.RelayFormatOpenAI,
+			raw:       `{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":0}}`,
+			wantInput: 100, chatSource: true, cacheKnown: common.GetPointer(true),
+		},
+		{
+			name: "Chat sidecar does not treat other prompt details as a miss", format: types.RelayFormatOpenAI,
+			raw:       `{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"text_tokens":100}}`,
+			wantInput: 100, chatSource: true, cacheKnown: common.GetPointer(false),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			truncate(t)
+			const userID, channelID = 73, 73
+			seedUser(t, userID, 1_000_000)
+			seedChannel(t, channelID)
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest("POST", "/v1/chat/completions", nil)
+			info := &relaycommon.RelayInfo{
+				UserId: userID, OriginModelName: "requested-model", BillingModelName: "shared-price", UsingGroup: "default", StartTime: time.Now(), RelayFormat: tc.format,
+				ChannelMeta: &relaycommon.ChannelMeta{ChannelId: channelID},
+				PriceData: hosttypes.PriceData{ModelRatio: 1, CompletionRatio: 1, CacheRatio: 0.1, CacheCreationRatio: 1.25,
+					CacheCreation5mRatio: 1.25, CacheCreation1hRatio: 2, GroupRatioInfo: hosttypes.GroupRatioInfo{GroupRatio: 1}},
+			}
+			if tc.fallback {
+				info.TieredBillingSnapshot = makeSnapshot(`tier("base", p * param("missing"))`, 1, 100, 0)
+				info.TieredBillingSnapshot.EstimatedBillingUnit = billingexpr.BillingUnitToken
+				info.TieredBillingSnapshot.EstimatedQuotaAfterGroup = 123
+			}
+			if tc.normalName {
+				info.BillingModelName = info.OriginModelName
+			}
+			usage := &dto.Usage{BillingUsage: tc.billing}
+			if tc.raw != "" {
+				require.NoError(t, common.UnmarshalJsonStr(tc.raw, usage))
+			}
+			if tc.chatSource {
+				usage.BillingUsage = dto.NewOpenAIChatBillingUsage(usage)
+			}
+			PostTextConsumeQuota(ctx, info, usage, nil)
+			log := getLastLog(t)
+			require.NotNil(t, log)
+			assert.Equal(t, info.BillingModelName, log.ModelName)
+			var other map[string]any
+			require.NoError(t, common.UnmarshalJsonStr(log.Other, &other))
+			assert.NotContains(t, other, "original_model_name")
+			assert.Equal(t, tc.wantInput, other["input_tokens_total"])
+			assert.Equal(t, tc.wantCache, other["cache_tokens"])
+			assert.Equal(t, false, other["usage_estimated"])
+			if tc.cacheKnown != nil {
+				assert.Equal(t, *tc.cacheKnown, other["cache_usage_known"])
+			}
+			if tc.wantWrites > 0 {
+				assert.Equal(t, tc.wantWrites, other["cache_write_tokens"])
+			}
+			admin, ok := other["admin_info"].(map[string]any)
+			require.True(t, ok)
+			if tc.normalName {
+				assert.NotContains(t, admin, "original_model_name")
+			} else {
+				assert.Equal(t, "requested-model", admin["original_model_name"])
+			}
+			if tc.fallback {
+				assert.Equal(t, true, admin["billing_settlement_fallback"])
+				assert.Equal(t, 123, log.Quota)
+			} else {
+				assert.NotContains(t, admin, "billing_settlement_fallback")
+			}
+		})
+	}
 }

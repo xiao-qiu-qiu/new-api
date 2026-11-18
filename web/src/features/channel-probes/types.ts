@@ -31,6 +31,7 @@ export type ProbeConfig = {
   model: string
   enabled: boolean
   public: boolean
+  guest_visible: boolean
   active_enabled: boolean
   passive_enabled: boolean
   interval_seconds: number

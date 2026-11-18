@@ -3,7 +3,6 @@ package model
 import (
 	"fmt"
 	"math"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -13,13 +12,9 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relaykit/dto"
-	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"gorm.io/driver/mysql"
-	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
-	"gorm.io/gorm/schema"
 )
 
 // channelsRevision is the id of the newest channels sync task, 0 without one.
@@ -64,13 +59,13 @@ func TestChannelProbeUsageEstimates(t *testing.T) {
 		{name: "anthropic unknown cache read", other: `{"model_ratio":1,"model_price":-1,"group_ratio":1,"usage_semantic":"anthropic","cache_creation_tokens":0}`, prompt: 100, quota: 100},
 		{name: "anthropic unknown cache write", other: `{"model_ratio":1,"model_price":-1,"group_ratio":1,"usage_semantic":"anthropic","cache_tokens":50}`, prompt: 100, quota: 100},
 		{name: "anthropic explicit total", other: `{"model_ratio":1,"model_price":-1,"group_ratio":1,"usage_semantic":"anthropic","input_tokens_total":100}`, prompt: 10, quota: 100, price: common.GetPointer(100.0), priceCount: 10},
-		{name: "negative quota", other: normal, prompt: 100, quota: -1},
+		{name: "negative quota keeps cache", other: normal, prompt: 100, quota: -1, rate: common.GetPointer(50.0), cacheCount: 10},
 		{name: "negative input", other: normal, prompt: -1, quota: 100},
 		{name: "invalid cache count", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":101}`, prompt: 100, quota: 100},
 		{name: "fractional token count", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":0.5}`, prompt: 100, quota: 100},
 		{name: "invalid metadata", other: "{", prompt: 100, quota: 100},
-		{name: "fixed request", other: `{"model_ratio":1,"model_price":0,"group_ratio":1,"cache_tokens":50}`, prompt: 100, quota: 100},
-		{name: "tiered request", other: `{"billing_mode":"tiered_expr","billing_unit":"request","group_ratio":1,"cache_tokens":50}`, prompt: 100, quota: 100},
+		{name: "fixed request keeps cache", other: `{"model_ratio":1,"model_price":0,"group_ratio":1,"cache_tokens":50}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), cacheCount: 10},
+		{name: "tiered request keeps cache", other: `{"billing_mode":"tiered_expr","billing_unit":"request","fixed_price":0.01,"group_ratio":1,"cache_tokens":50}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), cacheCount: 10},
 		{name: "media tokens", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"billing_tokens":{"img":1}}`, prompt: 100, quota: 100},
 		{name: "task", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"is_task":true}`, prompt: 100, quota: 100},
 		{name: "audio", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"audio_input":1}`, prompt: 100, quota: 100},
@@ -79,8 +74,19 @@ func TestChannelProbeUsageEstimates(t *testing.T) {
 		{name: "client gone overrides completed status", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"stream_status":{"status":"ok","response_status":"completed","end_reason":"client_gone"}}`, prompt: 100, quota: 100},
 		{name: "normal completed stream", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"stream_status":{"status":"ok","response_status":"completed","end_reason":"done"}}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), price: common.GetPointer(100.0), cacheCount: 10, priceCount: 10},
 		{name: "rejected", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"admin_info":{"reject_reason":"rejected"}}`, prompt: 100, quota: 100},
-		{name: "saturated", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"admin_info":{"quota_saturation":{"kind":"overflow"}}}`, prompt: 100, quota: 100},
+		{name: "saturated charge keeps cache", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"admin_info":{"quota_saturation":{"kind":"overflow"}}}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), cacheCount: 10},
 		{name: "estimated usage", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"admin_info":{"usage_billing_path":"billing-usage-openai-estimated"}}`, prompt: 100, quota: 100},
+		{name: "unknown zero cache retains price", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":0,"cache_usage_known":false}`, prompt: 100, quota: 100, price: common.GetPointer(100.0), priceCount: 10},
+		{name: "unknown nonzero cache retains price", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"cache_usage_known":false}`, prompt: 100, quota: 100, price: common.GetPointer(100.0), priceCount: 10},
+		{name: "measured zero cache with estimated output", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":0,"cache_usage_known":true,"usage_estimated":true,"admin_info":{"usage_billing_path":"billing-usage-openai-estimated"}}`, prompt: 100, quota: 100, rate: common.GetPointer(0.0), cacheCount: 10},
+		{name: "measured cache with estimated output", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"cache_usage_known":true,"usage_estimated":true}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), cacheCount: 10},
+		{name: "estimated input cannot use cache", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"cache_usage_known":false,"usage_estimated":true}`, prompt: 100, quota: 100},
+		{name: "public estimated flag without known input", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"usage_estimated":true}`, prompt: 100, quota: 100},
+		{name: "settlement fallback keeps cache", other: `{"billing_mode":"tiered_expr","billing_unit":"token","group_ratio":1,"cache_tokens":50,"admin_info":{"billing_settlement_fallback":true}}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), cacheCount: 10},
+		{name: "anthropic explicit total agrees with split writes", other: `{"model_ratio":1,"group_ratio":1,"usage_semantic":"anthropic","input_tokens_total":100,"cache_tokens":60,"cache_creation_tokens":20,"cache_creation_tokens_5m":10,"cache_creation_tokens_1h":20}`, prompt: 10, quota: 100, rate: common.GetPointer(60.0), price: common.GetPointer(100.0), cacheCount: 10, priceCount: 10},
+		{name: "anthropic total cannot overlap ordinary input and cache", other: `{"model_ratio":1,"group_ratio":1,"usage_semantic":"anthropic","input_tokens_total":100,"cache_tokens":60,"cache_creation_tokens":30}`, prompt: 50, quota: 100},
+		{name: "anthropic complete categories must match total", other: `{"model_ratio":1,"group_ratio":1,"usage_semantic":"anthropic","input_tokens_total":110,"cache_tokens":60,"cache_creation_tokens":30}`, prompt: 10, quota: 100},
+		{name: "openai read and write overlap is valid", other: `{"model_ratio":1,"group_ratio":1,"usage_semantic":"openai","cache_tokens":80,"cache_write_tokens":70}`, prompt: 100, quota: 100, rate: common.GetPointer(80.0), price: common.GetPointer(100.0), cacheCount: 10, priceCount: 10},
 		{name: "tool charge keeps cache only", other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"tool_surcharges":[{"count":1,"price":1}]}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), cacheCount: 10},
 		{name: "discount removed", other: `{"model_ratio":1,"group_ratio":0.5,"cache_tokens":50}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), price: common.GetPointer(200.0), cacheCount: 10, priceCount: 10},
 		{name: "markup removed", other: `{"model_ratio":1,"group_ratio":2,"cache_tokens":50}`, prompt: 100, quota: 100, rate: common.GetPointer(50.0), price: common.GetPointer(50.0), cacheCount: 10, priceCount: 10},
@@ -131,6 +137,27 @@ func TestChannelProbeUsageEstimates(t *testing.T) {
 	})
 }
 
+func TestChannelProbeUsageCacheCoverage(t *testing.T) {
+	var logs []Log
+	for _, other := range []string{
+		`{"model_ratio":1,"group_ratio":1,"cache_tokens":50}`,
+		`{"model_ratio":1,"group_ratio":1,"cache_tokens":0,"cache_usage_known":false}`,
+		`{"model_ratio":1,"group_ratio":1,"cache_tokens":0,"cache_usage_known":true,"usage_estimated":true}`,
+		`{"model_price":0.01,"group_ratio":1,"cache_tokens":25}`,
+		`{"model_ratio":1,"group_ratio":1,"cache_tokens":50,"cache_usage_known":false,"usage_estimated":true}`,
+	} {
+		for range 10 {
+			logs = append(logs, Log{PromptTokens: 100, CompletionTokens: 100, Quota: 100, Other: other})
+		}
+	}
+	stats := aggregateChannelProbeUsage(logs, 500000)
+	assert.EqualValues(t, 50, stats.CacheEligibleCount)
+	assert.EqualValues(t, 30, stats.CacheSampleCount)
+	assert.EqualValues(t, 20, stats.PriceSampleCount)
+	require.NotNil(t, stats.AverageCacheHitRate)
+	assert.Equal(t, 25.0, *stats.AverageCacheHitRate)
+}
+
 func TestChannelProbeUsageGroupRatioNormalization(t *testing.T) {
 	logs := make([]Log, 10)
 	for i := range logs {
@@ -152,49 +179,12 @@ func TestChannelProbeUsageGroupRatioNormalization(t *testing.T) {
 }
 
 func TestChannelProbeUsageDatabaseMatrix(t *testing.T) {
-	for _, dialect := range []string{"sqlite", "mysql", "postgres"} {
+	for _, dialect := range []string{"sqlite", "mysql", "postgres", "clickhouse"} {
 		t.Run(dialect, func(t *testing.T) {
-			var driver gorm.Dialector
-			switch dialect {
-			case "sqlite":
-				driver = sqlite.Open(":memory:")
-			case "mysql":
-				dsn := os.Getenv("TEST_MYSQL_DSN")
-				if dsn == "" {
-					t.Skip("TEST_MYSQL_DSN is not configured")
-				}
-				driver = mysql.Open(dsn)
-			case "postgres":
-				dsn := os.Getenv("TEST_POSTGRES_DSN")
-				if dsn == "" {
-					t.Skip("TEST_POSTGRES_DSN is not configured")
-				}
-				driver = postgres.Open(dsn)
-			}
-			db, err := gorm.Open(driver, &gorm.Config{NamingStrategy: schema.NamingStrategy{TablePrefix: "probe_usage_test_"}})
-			require.NoError(t, err)
-			sqlDB, err := db.DB()
-			require.NoError(t, err)
-			sqlDB.SetMaxOpenConns(1)
-			previousDB, previousType, previousEnabled := LOG_DB, common.LogDatabaseType(), common.LogConsumeEnabled
-			LOG_DB = db
-			common.SetLogDatabaseType(common.DatabaseType(dialect))
+			db := openLogFilterTestDatabase(t, dialect)
+			previousEnabled := common.LogConsumeEnabled
 			common.LogConsumeEnabled = true
-			t.Cleanup(func() {
-				LOG_DB = previousDB
-				common.SetLogDatabaseType(previousType)
-				common.LogConsumeEnabled = previousEnabled
-				require.NoError(t, db.Migrator().DropTable(&Log{}))
-				require.NoError(t, sqlDB.Close())
-			})
-			require.NoError(t, db.AutoMigrate(&Log{}))
-			var version string
-			query := "SELECT version()"
-			if dialect == "sqlite" {
-				query = "SELECT sqlite_version()"
-			}
-			require.NoError(t, db.Raw(query).Scan(&version).Error)
-			t.Logf("%s version: %s", dialect, version)
+			t.Cleanup(func() { common.LogConsumeEnabled = previousEnabled })
 			end := time.Now().Unix()
 			var logs []Log
 			for _, age := range []int64{60, 2 * 3600, 8 * 3600, 16 * 3600} {
@@ -212,25 +202,79 @@ func TestChannelProbeUsageDatabaseMatrix(t *testing.T) {
 				wrong.PromptTokens, wrong.CompletionTokens, wrong.Quota, wrong.Other = 100, 100, 9999, `{"model_ratio":1,"group_ratio":1,"cache_tokens":100}`
 				logs = append(logs, wrong)
 			}
-			require.NoError(t, db.Create(&logs).Error)
-			for i, hours := range []int{1, 6, 12, 24} {
+			for _, fixture := range []struct {
+				model string
+				other string
+				quota int
+			}{
+				{"shared%_billing", `{"admin_info":{"original_model_name":"client%_model"},"model_ratio":1,"group_ratio":1,"cache_tokens":40}`, 200},
+				{"client%_model", `{"model_ratio":1,"group_ratio":1,"cache_tokens":60}`, 100},
+				{"shared%_billing", `{"admin_info":{"original_model_name":"sibling"},"model_ratio":1,"group_ratio":1,"cache_tokens":100}`, 9999},
+				{"shared%_billing", `{"model_ratio":1,"group_ratio":1,"cache_tokens":100}`, 9999},
+				{"client%_model", `{"admin_info":{"original_model_name":"sibling"},"model_ratio":1,"group_ratio":1,"cache_tokens":100}`, 9999},
+				{"client%_model", `{"admin_info":{"original_model_name":""},"model_ratio":1,"group_ratio":1,"cache_tokens":100}`, 9999},
+			} {
+				for range 10 {
+					logs = append(logs, Log{CreatedAt: end - 30, Type: LogTypeConsume, ModelName: fixture.model, ChannelId: 7, Group: "alias-group", PromptTokens: 100, CompletionTokens: 100, Quota: fixture.quota, Other: fixture.other})
+				}
+			}
+			for index := range 1001 {
+				log := Log{CreatedAt: end - 10, Type: LogTypeConsume, ModelName: "shared%_billing", ChannelId: 7, Group: "alias-group", PromptTokens: 100, CompletionTokens: 100, Quota: 9999,
+					Other: `{"admin_info":{"original_model_name":"sibling"},"model_ratio":1,"group_ratio":1,"cache_tokens":100}`}
+				if index%2 == 0 {
+					log.Other = `{"model_ratio":1,"group_ratio":1,"cache_tokens":100}`
+				} else if index%3 == 0 {
+					log.Other = `{"admin_info":{"original_model_name":"CLIENT%_model"},"model_ratio":1,"group_ratio":1,"cache_tokens":100}`
+				}
+				logs = append(logs, log)
+			}
+			for index := range 1001 {
+				log := Log{CreatedAt: end - 30, Type: LogTypeConsume, ModelName: "bounded", ChannelId: 7, PromptTokens: 100, CompletionTokens: 100, Quota: 100, Other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50}`}
+				if index == 0 {
+					log.Quota = 999999
+				}
+				logs = append(logs, log)
+			}
+			for index := range logs {
+				logs[index].Id = index + 1
+				logs[index].RequestId = fmt.Sprintf("request-%06d", index+1)
+			}
+			if dialect == "clickhouse" {
+				require.NoError(t, db.Create(&logs).Error)
+			} else {
+				require.NoError(t, db.CreateInBatches(&logs, 100).Error)
+			}
+			for index, hours := range []int{1, 6, 12, 24} {
 				for _, probe := range []ChannelProbe{{Scope: "group", GroupName: "group'\"test"}, {Scope: "upstream", ChannelID: 7}} {
 					stats, err := GetChannelProbeUsageStats(probe, "model%_test", end-int64(hours)*3600, end)
 					require.NoError(t, err)
-					assert.EqualValues(t, (i+1)*10, stats.CacheSampleCount)
-					assert.EqualValues(t, (i+1)*10, stats.PriceSampleCount)
+					assert.EqualValues(t, (index+1)*10, stats.CacheSampleCount)
+					assert.EqualValues(t, (index+1)*10, stats.PriceSampleCount)
 					require.NotNil(t, stats.AverageCacheHitRate)
 					require.NotNil(t, stats.EstimatedPricePer100MTokens)
 					assert.Equal(t, 50.0, *stats.AverageCacheHitRate)
 					assert.Equal(t, 5e7/common.QuotaPerUnit, *stats.EstimatedPricePer100MTokens)
 				}
 			}
-			latest := make([]Log, 1001)
-			for i := range latest {
-				latest[i] = Log{CreatedAt: end - 30, Type: LogTypeConsume, ModelName: "bounded", ChannelId: 7, PromptTokens: 100, CompletionTokens: 100, Quota: 100, Other: `{"model_ratio":1,"group_ratio":1,"cache_tokens":50}`}
+			for _, probe := range []ChannelProbe{{Scope: "group", GroupName: "alias-group"}, {Scope: "upstream", ChannelID: 7}} {
+				withoutFallback, err := GetChannelProbeUsageStats(probe, "client%_model", end-3600, end)
+				require.NoError(t, err)
+				assert.EqualValues(t, 10, withoutFallback.PriceSampleCount)
+				require.NotNil(t, withoutFallback.AverageCacheHitRate)
+				assert.Equal(t, 60.0, *withoutFallback.AverageCacheHitRate)
+				withFallback, err := GetChannelProbeUsageStats(probe, "client%_model", end-3600, end, "shared%_billing", "shared%_billing", "")
+				require.NoError(t, err)
+				assert.EqualValues(t, 20, withFallback.CacheEligibleCount)
+				assert.EqualValues(t, 20, withFallback.CacheSampleCount)
+				assert.EqualValues(t, 20, withFallback.PriceSampleCount)
+				require.NotNil(t, withFallback.AverageCacheHitRate)
+				require.NotNil(t, withFallback.EstimatedPricePer100MTokens)
+				assert.Equal(t, 50.0, *withFallback.AverageCacheHitRate)
+				assert.InDelta(t, 7.5e7/common.QuotaPerUnit, *withFallback.EstimatedPricePer100MTokens, 1e-9)
+				cachedOriginal, err := GetChannelProbeUsageStats(probe, "client%_model", end-3600, end)
+				require.NoError(t, err)
+				assert.Equal(t, withoutFallback, cachedOriginal)
 			}
-			latest[0].Quota = 999999
-			require.NoError(t, db.CreateInBatches(&latest, 100).Error)
 			probe := ChannelProbe{Scope: "upstream", ChannelID: 7}
 			stats, err := GetChannelProbeUsageStats(probe, "bounded", end-3600, end)
 			require.NoError(t, err)

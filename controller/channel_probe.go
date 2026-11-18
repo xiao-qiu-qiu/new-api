@@ -14,7 +14,9 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm/clause"
 )
 
 // Integration contract (the router owns access control):
@@ -57,21 +59,95 @@ func GetPublicChannelProbeStatus(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"success": false, "message": "status temporarily unavailable"})
 		return
 	}
-	views := make([]service.PublicChannelProbeView, 0)
-	for _, probe := range probes {
-		if !probe.Enabled || !probe.Public || probe.PublicName == "" {
-			continue
+	userID, userGroup := c.GetInt("id"), c.GetString("group")
+	settings := setting.PinGroupSettings(c)
+	abilities := make(map[int]map[string][]string)
+	if userID > 0 {
+		channelIDs := make([]int, 0)
+		modelNames := make([]string, 0)
+		for _, probe := range probes {
+			if probe.Scope == "upstream" && probe.Enabled && probe.Public && probe.PublicName != "" {
+				channelIDs = append(channelIDs, probe.ChannelID)
+				modelNames = append(modelNames, probe.Models...)
+			}
 		}
+		if len(channelIDs) > 0 {
+			slices.Sort(channelIDs)
+			channelIDs = slices.Compact(channelIDs)
+			slices.Sort(modelNames)
+			modelNames = slices.Compact(modelNames)
+			var rows []model.Ability
+			if err := model.DB.Model(&model.Ability{}).Clauses(clause.Select{Columns: []clause.Column{
+				{Table: "abilities", Name: "group"}, {Table: "abilities", Name: "model"}, {Table: "abilities", Name: "channel_id"},
+			}}).
+				Joins("JOIN channels ON channels.id = abilities.channel_id").
+				Where("abilities.channel_id IN ? AND abilities.model IN ?", channelIDs, modelNames).
+				Find(&rows).Error; err != nil {
+				c.JSON(http.StatusOK, gin.H{"success": false, "message": "status temporarily unavailable"})
+				return
+			}
+			for _, ability := range rows {
+				if abilities[ability.ChannelId] == nil {
+					abilities[ability.ChannelId] = make(map[string][]string)
+				}
+				abilities[ability.ChannelId][ability.Model] = append(abilities[ability.ChannelId][ability.Model], ability.Group)
+			}
+		}
+	}
+	views := make([]service.PublicChannelProbeView, 0)
+	sections := make(map[string]int)
+	for _, probe := range probes {
 		for _, name := range probe.Models {
-			view, err := service.BuildPublicChannelProbeModel(probe, name, now, hours, c.GetString("group"))
+			if !publicChannelProbeVisible(probe, userID, userGroup, settings, name, abilities) {
+				continue
+			}
+			view, err := service.BuildPublicChannelProbeModelWithSettings(probe, name, now, hours, userGroup, settings)
 			if err != nil {
 				c.JSON(http.StatusOK, gin.H{"success": false, "message": "status temporarily unavailable"})
 				return
+			}
+			view.ProbeID, view.SectionID = probe.ID, probe.ID
+			if probe.Scope == "group" {
+				if sections[probe.GroupName] == 0 {
+					sections[probe.GroupName] = probe.ID
+				}
+				view.SectionID = sections[probe.GroupName]
 			}
 			views = append(views, view)
 		}
 	}
 	c.JSON(http.StatusOK, gin.H{"success": true, "message": "", "data": views})
+}
+
+func publicGroupProbeVisible(probe model.ChannelProbe, userID int, userGroup string, settings *setting.GroupSettingsSnapshot) bool {
+	if probe.Scope != "group" || !probe.Enabled || !probe.Public || probe.PublicName == "" {
+		return false
+	}
+	if userID <= 0 {
+		return probe.GuestVisible
+	}
+	return settings != nil && settings.Selectable(userGroup, probe.GroupName)
+}
+
+func publicChannelProbeVisible(probe model.ChannelProbe, userID int, userGroup string, settings *setting.GroupSettingsSnapshot, modelName string, abilities map[int]map[string][]string) bool {
+	if probe.Scope == "group" {
+		return publicGroupProbeVisible(probe, userID, userGroup, settings)
+	}
+	if probe.Scope != "upstream" || !probe.Enabled || !probe.Public || probe.PublicName == "" {
+		return false
+	}
+	if userID <= 0 {
+		return probe.GuestVisible
+	}
+	if settings == nil {
+		return false
+	}
+	for _, group := range abilities[probe.ChannelID][modelName] {
+		if settings.Selectable(userGroup, group) {
+			return true
+		}
+	}
+	return false
 }
 
 func CreateChannelProbe(c *gin.Context) {

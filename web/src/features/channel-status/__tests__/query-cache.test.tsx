@@ -23,7 +23,8 @@ import {
   createRouter,
   RouterProvider,
 } from '@tanstack/react-router'
-import { act, cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, render, screen, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { api } from '@/lib/api'
@@ -146,5 +147,79 @@ describe('channel status price cache', () => {
     await renderStatus()
 
     expect(await screen.findByText('≈$24')).toBeVisible()
+  })
+
+  it('groups probes by section and keeps the saved order even when display names match', async () => {
+    const [fixture] = statusResponse(12).data.data
+    response = Promise.resolve({
+      data: {
+        success: true,
+        data: [
+          { ...fixture, section_id: 7, probe_id: 7, model: 'gpt-z' },
+          { ...fixture, section_id: 7, probe_id: 7, model: 'gpt-a' },
+          { ...fixture, section_id: 9, probe_id: 9, model: 'other-model' },
+          { ...fixture, section_id: 7, probe_id: 11, model: 'gpt-b' },
+        ],
+      },
+    })
+
+    await renderStatus()
+
+    const sections = await screen.findAllByRole('region', {
+      name: 'Public group',
+    })
+    expect(sections).toHaveLength(2)
+    expect(
+      within(sections[0])
+        .getAllByRole('heading', { level: 3 })
+        .map((heading) => heading.textContent)
+    ).toEqual(['gpt-z', 'gpt-a', 'gpt-b'])
+    expect(
+      within(sections[1]).getByRole('heading', { name: 'other-model' })
+    ).toBeVisible()
+  })
+
+  it('estimates a long text request independently of its historical average', async () => {
+    const [fixture] = statusResponse(12).data.data
+    response = Promise.resolve({
+      data: {
+        success: true,
+        data: [{ ...fixture, probe_id: 7, can_estimate_price: true }],
+      },
+    })
+    vi.mocked(api.get).mockImplementation((url) => {
+      if (url === '/api/channel/probes/status') return response
+      if (url === '/api/channel/probes/estimate') {
+        return Promise.resolve({
+          data: { success: true, data: { usd: 6, billing_unit: 'token' } },
+        })
+      }
+      throw new Error(`Unexpected GET ${url}`)
+    })
+    const user = userEvent.setup()
+    await renderStatus()
+    await user.click(
+      await screen.findByRole('button', { name: 'Estimate request cost' })
+    )
+    const dialog = within(screen.getByRole('dialog'))
+    const input = dialog.getByRole('spinbutton', {
+      name: 'Input tokens (including cache)',
+    })
+    await user.clear(input)
+    await user.type(input, '300000')
+    await user.click(
+      dialog.getByRole('button', { name: 'Estimate request cost' })
+    )
+
+    expect(await dialog.findByText('≈$6')).toBeVisible()
+    expect(api.get).toHaveBeenCalledWith('/api/channel/probes/estimate', {
+      params: expect.objectContaining({
+        probe_id: 7,
+        model: 'gpt-test',
+        input_tokens: 300000,
+        service_tier: 'default',
+      }),
+    })
+    expect(screen.getByText('≈$12')).toBeVisible()
   })
 })

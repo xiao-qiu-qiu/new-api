@@ -15,7 +15,11 @@ func applyUsagePostProcessing(info *relaycommon.RelayInfo, usage *dto.Usage, res
 	switch info.ChannelType {
 	case constant.ChannelTypeDeepSeek:
 		if usage.PromptTokensDetails.CachedTokens == 0 && usage.PromptCacheHitTokens != 0 {
-			usage.PromptTokensDetails.CachedTokens = usage.PromptCacheHitTokens
+			usage.PromptTokensDetails.SetReportedCachedTokens(usage.PromptCacheHitTokens)
+		} else if !usage.PromptTokensDetails.HasReportedCachedTokens() {
+			if cachedTokens, ok := extractCachedTokensFromBody(responseBody); ok && cachedTokens == 0 {
+				usage.PromptTokensDetails.SetReportedCachedTokens(0)
+			}
 		}
 	case constant.ChannelTypeZhipu_v4:
 		// 智普的cached_tokens在标准位置: usage.prompt_tokens_details.cached_tokens
@@ -23,7 +27,7 @@ func applyUsagePostProcessing(info *relaycommon.RelayInfo, usage *dto.Usage, res
 			if usage.InputTokensDetails != nil && usage.InputTokensDetails.CachedTokens > 0 {
 				usage.PromptTokensDetails.CachedTokens = usage.InputTokensDetails.CachedTokens
 			} else if cachedTokens, ok := extractCachedTokensFromBody(responseBody); ok {
-				usage.PromptTokensDetails.CachedTokens = cachedTokens
+				usage.PromptTokensDetails.SetReportedCachedTokens(cachedTokens)
 			} else if usage.PromptCacheHitTokens > 0 {
 				usage.PromptTokensDetails.CachedTokens = usage.PromptCacheHitTokens
 			}
@@ -34,9 +38,9 @@ func applyUsagePostProcessing(info *relaycommon.RelayInfo, usage *dto.Usage, res
 			if usage.InputTokensDetails != nil && usage.InputTokensDetails.CachedTokens > 0 {
 				usage.PromptTokensDetails.CachedTokens = usage.InputTokensDetails.CachedTokens
 			} else if cachedTokens, ok := extractMoonshotCachedTokensFromBody(responseBody); ok {
-				usage.PromptTokensDetails.CachedTokens = cachedTokens
+				usage.PromptTokensDetails.SetReportedCachedTokens(cachedTokens)
 			} else if cachedTokens, ok := extractCachedTokensFromBody(responseBody); ok {
-				usage.PromptTokensDetails.CachedTokens = cachedTokens
+				usage.PromptTokensDetails.SetReportedCachedTokens(cachedTokens)
 			} else if usage.PromptCacheHitTokens > 0 {
 				usage.PromptTokensDetails.CachedTokens = usage.PromptCacheHitTokens
 			}
@@ -44,7 +48,7 @@ func applyUsagePostProcessing(info *relaycommon.RelayInfo, usage *dto.Usage, res
 	case constant.ChannelTypeOpenAI:
 		if usage.PromptTokensDetails.CachedTokens == 0 {
 			if cachedTokens, ok := extractLlamaCachedTokensFromBody(responseBody); ok {
-				usage.PromptTokensDetails.CachedTokens = cachedTokens
+				usage.PromptTokensDetails.SetReportedCachedTokens(cachedTokens)
 			}
 		}
 	}

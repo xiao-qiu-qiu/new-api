@@ -32,8 +32,8 @@ import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
 
 import { getChannelStatus } from './api'
-import { StatusCard } from './components/status-card'
 import { StatusOverview } from './components/status-overview'
+import { StatusSections } from './components/status-sections'
 import { statusColors } from './lib/status'
 import type { ProbeScope, StatusHours } from './types'
 
@@ -52,7 +52,6 @@ export function ChannelStatus() {
   const probes = (query.data ?? []).filter(
     (probe) => scope === 'all' || probe.scope === scope
   )
-  const occurrences = new Map<string, number>()
   const legend = [
     { status: 'green' as const, label: t('Responsive') },
     { status: 'yellow' as const, label: t('Elevated latency') },
@@ -98,7 +97,7 @@ export function ChannelStatus() {
               <span className='hidden sm:inline'>{t('Refresh')}</span>
             </Button>
           </header>
-          {query.data && (
+          {query.data && !query.isError && (
             <StatusOverview
               probes={probes}
               hours={hours}
@@ -196,20 +195,7 @@ export function ChannelStatus() {
             />
           )}
           {!query.isPending && !query.isError && probes.length > 0 && (
-            <div className='space-y-2.5'>
-              {probes.map((probe) => {
-                const identity = JSON.stringify([
-                  probe.scope,
-                  probe.public_name,
-                  probe.model,
-                ])
-                const occurrence = occurrences.get(identity) ?? 0
-                occurrences.set(identity, occurrence + 1)
-                return (
-                  <StatusCard key={`${identity}-${occurrence}`} probe={probe} />
-                )
-              })}
-            </div>
+            <StatusSections probes={probes} />
           )}
           <div className='text-muted-foreground flex items-center justify-center gap-2 pt-2 text-[11px]'>
             <span className='size-1.5 rounded-full bg-teal-500' />

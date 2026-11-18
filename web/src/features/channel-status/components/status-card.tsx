@@ -16,7 +16,6 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
-import { Layers3, Radio } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import {
@@ -25,11 +24,8 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 import { toIntlLocale } from '@/i18n/languages'
-import { getCacheHitRateColor } from '@/lib/cache-hit-rate'
-import { formatBillingCurrencyFromUSD } from '@/lib/currency'
 import { formatNumber } from '@/lib/format'
 import { cn } from '@/lib/utils'
-import { useSystemConfigStore } from '@/stores/system-config-store'
 
 import {
   getProbeStatus,
@@ -39,11 +35,14 @@ import {
 import type { ProbeStatus, PublicChannelStatus } from '../types'
 import { ProbeHistory } from './probe-history'
 import { ProbeStatusBadge } from './probe-status-badge'
+import { StatusUsageMetrics } from './status-usage-metrics'
 
-export function StatusCard(props: { probe: PublicChannelStatus }) {
+export function StatusCard(props: {
+  probe: PublicChannelStatus
+  sectionName?: string
+}) {
   const { t, i18n } = useTranslation()
   const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
-  useSystemConfigStore((state) => state.config.currency)
   const probe = props.probe
   const status = getProbeStatus(probe)
   const availability = getWindowAvailability(probe)
@@ -54,18 +53,6 @@ export function StatusCard(props: { probe: PublicChannelStatus }) {
     else if (firstResponseMs < probe.yellow_ms) averageStatus = 'yellow'
     else averageStatus = 'red'
   }
-  const cacheRate = probe.average_cache_hit_rate
-  const estimatedPrice = probe.estimated_price_per_100m_tokens
-  const showCacheRate =
-    cacheRate != null &&
-    Number.isFinite(cacheRate) &&
-    cacheRate >= 0 &&
-    cacheRate <= 100
-  const showEstimatedPrice =
-    estimatedPrice != null &&
-    Number.isFinite(estimatedPrice) &&
-    estimatedPrice >= 0
-  const ScopeIcon = probe.scope === 'group' ? Layers3 : Radio
   const time = new Intl.DateTimeFormat(locale, {
     hour: '2-digit',
     minute: '2-digit',
@@ -75,27 +62,23 @@ export function StatusCard(props: { probe: PublicChannelStatus }) {
 
   return (
     <article
-      className='model-status-row group bg-card/80 relative min-w-0 overflow-hidden rounded-2xl border px-4 py-3 shadow-xs backdrop-blur-sm transition-shadow hover:shadow-md sm:px-6'
+      className='model-status-row relative min-w-0 px-4 py-3 sm:px-6'
       data-status={status}
     >
       <div className='relative grid min-w-0 items-center gap-x-6 gap-y-3 lg:grid-cols-[minmax(170px,1fr)_210px_minmax(280px,1.8fr)] xl:grid-cols-[minmax(200px,1fr)_220px_minmax(340px,2fr)]'>
         <div className='min-w-0'>
           <div className='min-w-0 space-y-1.5'>
-            <h2 className='text-[15px] font-semibold tracking-tight break-words'>
+            <h3 className='text-[15px] font-semibold tracking-tight break-words'>
               {probe.model}
-            </h2>
-            <div className='text-muted-foreground flex min-w-0 items-center gap-1.5 text-xs'>
-              <ScopeIcon className='size-3.5 shrink-0' />
-              <span className='truncate' title={probe.public_name}>
+            </h3>
+            {props.sectionName !== probe.public_name && (
+              <p
+                className='text-muted-foreground truncate text-xs'
+                title={probe.public_name}
+              >
                 {probe.public_name}
-              </span>
-              <span className='shrink-0 text-[10px] opacity-70'>
-                /{' '}
-                {probe.scope === 'group'
-                  ? t('Group probe')
-                  : t('Upstream probe')}
-              </span>
-            </div>
+              </p>
+            )}
             <p className='text-muted-foreground text-[11px]'>
               {probe.latest
                 ? time.format(new Date(probe.latest.checked_at * 1000))
@@ -200,73 +183,7 @@ export function StatusCard(props: { probe: PublicChannelStatus }) {
             start={probe.window_start}
             end={probe.window_end}
           />
-          {(showCacheRate || showEstimatedPrice) && (
-            <dl className='mt-2 flex flex-wrap items-center gap-x-5 gap-y-1.5 text-xs'>
-              {showCacheRate && (
-                <Tooltip>
-                  <TooltipTrigger
-                    render={
-                      <div
-                        tabIndex={0}
-                        className='focus-visible:ring-ring flex flex-wrap items-baseline gap-x-1.5 rounded-sm outline-none focus-visible:ring-2'
-                      />
-                    }
-                  >
-                    <dt className='text-muted-foreground'>
-                      {t('Average cache hit rate')}
-                    </dt>
-                    <dd
-                      className={cn(
-                        'font-semibold tabular-nums',
-                        getCacheHitRateColor(cacheRate)
-                      )}
-                    >
-                      {formatNumber(cacheRate, locale)}%
-                    </dd>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    {t(
-                      'Token-weighted cache hit rate from {{count}} valid requests in this window.',
-                      {
-                        count: formatNumber(probe.cache_sample_count, locale),
-                      }
-                    )}
-                  </TooltipContent>
-                </Tooltip>
-              )}
-              {showEstimatedPrice && (
-                <Tooltip>
-                  <TooltipTrigger
-                    render={
-                      <div
-                        tabIndex={0}
-                        className='focus-visible:ring-ring flex flex-wrap items-baseline gap-x-1.5 rounded-sm outline-none focus-visible:ring-2'
-                      />
-                    }
-                  >
-                    <dt className='text-muted-foreground'>
-                      {t('Estimated price / 100M tokens')}
-                    </dt>
-                    <dd className='font-semibold tabular-nums'>
-                      ≈
-                      {formatBillingCurrencyFromUSD(estimatedPrice, {
-                        locale,
-                        abbreviate: false,
-                      })}
-                    </dd>
-                  </TooltipTrigger>
-                  <TooltipContent>
-                    {t(
-                      'Estimated from {{count}} recent requests in this window, adjusted to your applicable group rate. Includes input, output and cache tokens; actual costs vary with usage.',
-                      {
-                        count: formatNumber(probe.price_sample_count, locale),
-                      }
-                    )}
-                  </TooltipContent>
-                </Tooltip>
-              )}
-            </dl>
-          )}
+          <StatusUsageMetrics probe={probe} />
         </div>
       </div>
     </article>

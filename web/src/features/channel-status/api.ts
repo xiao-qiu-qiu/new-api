@@ -19,7 +19,12 @@ For commercial licensing, please contact support@quantumnous.com
 import { api } from '@/lib/api'
 import { requireServerSuccess } from '@/lib/server-error-message'
 
-import type { PublicChannelStatus, StatusHours } from './types'
+import type {
+  PriceEstimate,
+  PriceEstimateInput,
+  PublicChannelStatus,
+  StatusHours,
+} from './types'
 
 export async function getChannelStatus(
   hours: StatusHours = 1,
@@ -31,4 +36,19 @@ export async function getChannelStatus(
     data: PublicChannelStatus[]
   }>('/api/channel/probes/status', { signal, params: { hours } })
   return requireServerSuccess(response.data).data ?? []
+}
+
+export async function estimateChannelPrice(
+  probeId: number,
+  model: string,
+  usage: PriceEstimateInput
+): Promise<PriceEstimate> {
+  const response = await api.get<{
+    success: boolean
+    message: string
+    data: PriceEstimate
+  }>('/api/channel/probes/estimate', {
+    params: { probe_id: probeId, model, ...usage },
+  })
+  return requireServerSuccess(response.data).data
 }
