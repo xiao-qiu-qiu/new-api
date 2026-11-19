@@ -44,6 +44,13 @@ it.each([
 
 it("keeps the new controls complete and preserves interpolation in all seven languages", () => {
   const keys = Object.keys(siteEn).sort();
+  expect(keys).toEqual(
+    expect.arrayContaining([
+      "Enter fullscreen",
+      "Exit fullscreen",
+      "Could not switch fullscreen mode",
+    ]),
+  );
   for (const [language, bundle] of Object.entries({
     en: siteEn,
     zh: siteZh,

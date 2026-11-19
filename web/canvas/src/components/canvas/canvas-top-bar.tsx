@@ -3,6 +3,7 @@ import { ArrowLeft, BookOpen, Bot, Download, Home, Images, Menu, PanelLeftClose,
 import { Button, Dropdown, Modal, Tooltip } from "antd";
 import { useTranslation } from "react-i18next";
 
+import { CanvasFullscreenButton } from "@/components/layout/canvas-fullscreen-button";
 import { UserStatusActions } from "@/components/layout/user-status-actions";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useCanvasSidePanelStore } from "@/stores/use-canvas-side-panel-store";
@@ -149,6 +150,7 @@ export function CanvasTopBar({
                 <div className="pointer-events-auto flex shrink-0 items-center gap-1.5">
                     <div className="site-canvas-quick-actions"><UserStatusActions variant="canvas" onOpenShortcuts={() => setShortcutsOpen(true)} onOpenPlugins={onOpenPlugins} /></div>
                     <span className="site-canvas-quick-actions h-6 w-px" style={{ background: theme.toolbar.border }} />
+                    <CanvasFullscreenButton />
                     <Button
                         type="text"
                         className="!h-10 !rounded-xl !px-3 !font-medium"
