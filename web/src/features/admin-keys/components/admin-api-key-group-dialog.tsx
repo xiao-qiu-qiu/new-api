@@ -37,13 +37,12 @@ import {
   FormLabel,
   FormMessage,
 } from '@/components/ui/form'
-import { NativeSelect, NativeSelectOption } from '@/components/ui/native-select'
 import { Switch } from '@/components/ui/switch'
 import { AutoGroupOrderEditor } from '@/features/keys/components/auto-group-order-editor'
 import { handleServerError } from '@/lib/handle-server-error'
 
 import { getAdminApiKeyGroups, updateAdminApiKeyGroups } from '../api'
-import type { AdminApiKey, AdminApiKeyGroupUpdate } from '../types'
+import type { AdminApiKey } from '../types'
 
 interface Props {
   keys: AdminApiKey[]
@@ -51,8 +50,13 @@ interface Props {
   onSaved: () => void
 }
 
-type GroupForm = Omit<AdminApiKeyGroupUpdate, 'ids'>
+type GroupForm = { groups: string[]; crossGroupRetry: boolean }
 const EMPTY_GROUPS: string[] = []
+
+function getSelectedGroups(key?: AdminApiKey) {
+  if (key?.group === 'auto') return key.auto_groups ?? []
+  return key?.group ? [key.group] : []
+}
 
 export function AdminApiKeyGroupDialog(props: Props) {
   const { t } = useTranslation()
@@ -69,65 +73,36 @@ export function AdminApiKeyGroupDialog(props: Props) {
   const maxCount = groupsQuery.data?.max_count ?? 20
   const schema = useMemo(
     () =>
-      z
-        .object({
-          group: z
-            .string()
-            .min(1, t('Select at least one group for this token')),
-          auto_groups: z.array(z.string()),
-          cross_group_retry: z.boolean(),
-        })
-        .superRefine((values, ctx) => {
-          if (values.group !== 'auto') {
-            if (!groups.includes(values.group)) {
-              ctx.addIssue({
-                code: 'custom',
-                path: ['group'],
-                message: t('Select a group'),
-              })
-            }
-            return
-          }
-          if (!values.auto_groups.length) {
-            ctx.addIssue({
-              code: 'custom',
-              path: ['auto_groups'],
-              message: t('Select at least one group for this token'),
-            })
-          } else if (values.auto_groups.length > maxCount) {
-            ctx.addIssue({
-              code: 'custom',
-              path: ['auto_groups'],
-              message: t('Maximum {{max}} groups selected', { max: maxCount }),
-            })
-          } else if (
-            values.auto_groups.some((group) => !groups.includes(group))
-          ) {
-            ctx.addIssue({
-              code: 'custom',
-              path: ['auto_groups'],
-              message: t('Remove unavailable groups before saving.'),
-            })
-          }
-        }),
+      z.object({
+        groups: z
+          .array(z.string())
+          .min(1, t('Select at least one group for this token'))
+          .max(maxCount, t('Select at most {{max}} groups', { max: maxCount }))
+          .refine(
+            (selected) => selected.every((group) => groups.includes(group)),
+            t('Remove unavailable groups before saving.')
+          ),
+        crossGroupRetry: z.boolean(),
+      }),
     [t, groups, maxCount]
   )
   const form = useForm<GroupForm>({
     resolver: zodResolver(schema),
     defaultValues: {
-      group: current?.group ?? '',
-      auto_groups: current?.auto_groups ?? [],
-      cross_group_retry: current?.cross_group_retry ?? false,
+      groups: getSelectedGroups(current),
+      crossGroupRetry: current?.group === 'auto' && current.cross_group_retry,
     },
   })
   const mutation = useMutation({
-    mutationFn: (values: GroupForm) =>
-      updateAdminApiKeyGroups({
+    mutationFn: (values: GroupForm) => {
+      const isMultiGroup = values.groups.length > 1
+      return updateAdminApiKeyGroups({
         ids,
-        group: values.group,
-        auto_groups: values.group === 'auto' ? values.auto_groups : [],
-        cross_group_retry: values.group === 'auto' && values.cross_group_retry,
-      }),
+        group: isMultiGroup ? 'auto' : values.groups[0],
+        auto_groups: isMultiGroup ? values.groups : [],
+        cross_group_retry: isMultiGroup && values.crossGroupRetry,
+      })
+    },
     onSuccess: (data) => {
       toast.success(
         t('Updated groups for {{count}} API keys', {
@@ -146,7 +121,7 @@ export function AdminApiKeyGroupDialog(props: Props) {
       handleServerError(error)
     },
   })
-  const selectedGroup = form.watch('group')
+  const isMultiGroup = form.watch('groups').length > 1
   const canSave =
     groupsQuery.isSuccess &&
     !groupsQuery.isFetching &&
@@ -191,9 +166,7 @@ export function AdminApiKeyGroupDialog(props: Props) {
               <span className='text-muted-foreground'>
                 {' '}
                 · {key.username} #{key.user_id} ·{' '}
-                {key.group === 'auto'
-                  ? key.auto_groups?.join(' → ')
-                  : key.group}
+                {getSelectedGroups(key).join(' → ')}
               </span>
             </p>
           ))}
@@ -220,76 +193,38 @@ export function AdminApiKeyGroupDialog(props: Props) {
             >
               <FormField
                 control={form.control}
-                name='group'
+                name='groups'
                 render={({ field }) => (
                   <FormItem>
-                    <FormLabel>{t('Group')}</FormLabel>
+                    <FormLabel>{t('Selected groups')}</FormLabel>
                     <FormControl>
-                      <NativeSelect
-                        {...field}
-                        className='w-full'
-                        aria-label={t('Group')}
-                      >
-                        <NativeSelectOption value=''>
-                          {t('Select a group')}
-                        </NativeSelectOption>
-                        {current?.group &&
-                          current.group !== 'auto' &&
-                          !groups.includes(current.group) && (
-                            <NativeSelectOption value={current.group} disabled>
-                              {current.group} ({t('Unavailable')})
-                            </NativeSelectOption>
-                          )}
-                        <NativeSelectOption value='auto'>
-                          {t('Multiple groups')}
-                        </NativeSelectOption>
-                        {groups.map((group) => (
-                          <NativeSelectOption key={group} value={group}>
-                            {group}
-                          </NativeSelectOption>
-                        ))}
-                      </NativeSelect>
+                      <AutoGroupOrderEditor
+                        value={field.value}
+                        options={options}
+                        maxCount={maxCount}
+                        onChange={field.onChange}
+                      />
                     </FormControl>
                     <FormMessage />
                   </FormItem>
                 )}
               />
-              {selectedGroup === 'auto' && (
-                <>
-                  <FormField
-                    control={form.control}
-                    name='auto_groups'
-                    render={({ field }) => (
-                      <FormItem>
-                        <FormLabel>{t('Selected groups')}</FormLabel>
-                        <FormControl>
-                          <AutoGroupOrderEditor
-                            value={field.value}
-                            options={options}
-                            maxCount={maxCount}
-                            onChange={field.onChange}
-                          />
-                        </FormControl>
-                        <FormMessage />
-                      </FormItem>
-                    )}
-                  />
-                  <FormField
-                    control={form.control}
-                    name='cross_group_retry'
-                    render={({ field }) => (
-                      <FormItem className='flex items-center justify-between'>
-                        <FormLabel>{t('Cross-group retry')}</FormLabel>
-                        <FormControl>
-                          <Switch
-                            checked={field.value}
-                            onCheckedChange={field.onChange}
-                          />
-                        </FormControl>
-                      </FormItem>
-                    )}
-                  />
-                </>
+              {isMultiGroup && (
+                <FormField
+                  control={form.control}
+                  name='crossGroupRetry'
+                  render={({ field }) => (
+                    <FormItem className='flex items-center justify-between'>
+                      <FormLabel>{t('Cross-group retry')}</FormLabel>
+                      <FormControl>
+                        <Switch
+                          checked={field.value}
+                          onCheckedChange={field.onChange}
+                        />
+                      </FormControl>
+                    </FormItem>
+                  )}
+                />
               )}
             </form>
           </Form>
@@ -303,10 +238,7 @@ export function AdminApiKeyGroupDialog(props: Props) {
         title={t('Change API key groups')}
         desc={t('Apply these groups to {{count}} API keys: {{groups}}?', {
           count: ids.length,
-          groups:
-            pending?.group === 'auto'
-              ? pending.auto_groups.join(' → ')
-              : pending?.group,
+          groups: pending?.groups.join(' → '),
         })}
         confirmText={t('Save changes')}
         isLoading={mutation.isPending}

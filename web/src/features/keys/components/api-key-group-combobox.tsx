@@ -70,6 +70,8 @@ export function ApiKeyGroupCombobox({
   const [searchValue, setSearchValue] = useState('')
   const shouldReduceMotion = useMediaQuery('(prefers-reduced-motion: reduce)')
   const selectedOption = options.find((option) => option.value === value)
+  const triggerLabel =
+    selectedOption?.label || placeholder || t('Select a group')
   const isAutoSelected = selectedOption?.value === 'auto'
 
   const filteredOptions = useMemo(() => {
@@ -101,6 +103,7 @@ export function ApiKeyGroupCombobox({
             type='button'
             variant='outline'
             role='combobox'
+            aria-label={triggerLabel}
             aria-expanded={open}
             data-auto-group-effect={isAutoSelected ? 'trigger' : undefined}
             disabled={disabled}
@@ -120,9 +123,7 @@ export function ApiKeyGroupCombobox({
         )}
         <span className='flex min-w-0 flex-1 items-center justify-between gap-2 sm:gap-3'>
           <span className='min-w-0'>
-            <span className='block truncate font-medium'>
-              {selectedOption?.label || placeholder || t('Select a group')}
-            </span>
+            <span className='block truncate font-medium'>{triggerLabel}</span>
             {selectedOption?.desc && (
               <span className='text-muted-foreground block truncate text-[11px] sm:text-xs'>
                 {selectedOption.desc}

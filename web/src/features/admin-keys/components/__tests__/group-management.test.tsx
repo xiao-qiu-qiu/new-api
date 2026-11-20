@@ -143,6 +143,15 @@ function renderDialog(keys = [key], groups = ['default', 'premium']) {
   return { onClose, onSaved }
 }
 
+async function addGroup(
+  user: ReturnType<typeof userEvent.setup>,
+  group: string
+) {
+  const editor = await screen.findByRole('group', { name: 'Selected groups' })
+  await user.click(within(editor).getByRole('combobox', { name: 'Add group' }))
+  await user.click(await screen.findByRole('option', { name: group }))
+}
+
 it('restores owner and legacy group filters from the URL and searches all users on the server', async () => {
   const { get } = await renderTable({
     entry: '/admin/keys/?filter=alice&user_id=7&group=legacy',
@@ -300,10 +309,7 @@ it('confirms and sends only the selected key IDs and group settings for a batch 
     key,
     { ...key, id: 22, user_id: 8, username: 'bob' },
   ])
-  await user.selectOptions(
-    await screen.findByRole('combobox', { name: 'Group' }),
-    'premium'
-  )
+  await addGroup(user, 'premium')
   await user.click(screen.getByRole('button', { name: 'Save changes' }))
   const confirmation = await screen.findByRole('alertdialog')
   expect(put).not.toHaveBeenCalled()
@@ -321,7 +327,38 @@ it('confirms and sends only the selected key IDs and group settings for a batch 
   expect(toast.success).toHaveBeenCalledWith('Updated groups for 2 API keys')
 })
 
-it('preserves Auto group order and retry settings when saving through the existing group editor', async () => {
+it('keeps the current group first when adding another group to a single-group key', async () => {
+  const user = userEvent.setup()
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true, data: { count: 1 } } })
+  renderDialog([{ ...key, group: 'default' }])
+  expect(
+    await screen.findByRole('button', { name: 'Remove default' })
+  ).toBeVisible()
+  expect(
+    screen.queryByRole('switch', { name: 'Cross-group retry' })
+  ).not.toBeInTheDocument()
+  await addGroup(user, 'premium')
+  expect(
+    screen.getByRole('switch', { name: 'Cross-group retry' })
+  ).not.toBeChecked()
+  await user.click(screen.getByRole('button', { name: 'Save changes' }))
+  const confirmation = await screen.findByRole('alertdialog')
+  await user.click(
+    within(confirmation).getByRole('button', { name: 'Save changes' })
+  )
+  await waitFor(() =>
+    expect(put).toHaveBeenCalledWith('/api/token/admin/group', {
+      ids: [21],
+      group: 'auto',
+      auto_groups: ['default', 'premium'],
+      cross_group_retry: false,
+    })
+  )
+})
+
+it('saves the edited order and preserves retry for an existing multi-group key', async () => {
   const user = userEvent.setup()
   const put = vi
     .spyOn(api, 'put')
@@ -349,6 +386,58 @@ it('preserves Auto group order and retry settings when saving through the existi
       cross_group_retry: true,
     })
   )
+})
+
+it('saves a single group and clears cross-group retry after removing a group', async () => {
+  const user = userEvent.setup()
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true, data: { count: 1 } } })
+  renderDialog([
+    {
+      ...key,
+      group: 'auto',
+      auto_groups: ['premium', 'default'],
+      cross_group_retry: true,
+    },
+  ])
+  expect(
+    await screen.findByRole('switch', { name: 'Cross-group retry' })
+  ).toBeChecked()
+  await user.click(screen.getByRole('button', { name: 'Remove default' }))
+  expect(
+    screen.queryByRole('switch', { name: 'Cross-group retry' })
+  ).not.toBeInTheDocument()
+  await user.click(screen.getByRole('button', { name: 'Save changes' }))
+  const confirmation = await screen.findByRole('alertdialog')
+  await user.click(
+    within(confirmation).getByRole('button', { name: 'Save changes' })
+  )
+  await waitFor(() =>
+    expect(put).toHaveBeenCalledWith('/api/token/admin/group', {
+      ids: [21],
+      group: 'premium',
+      auto_groups: [],
+      cross_group_retry: false,
+    })
+  )
+})
+
+it('blocks saving after the only selected group is removed', async () => {
+  const user = userEvent.setup()
+  const put = vi
+    .spyOn(api, 'put')
+    .mockResolvedValue({ data: { success: true, data: { count: 1 } } })
+  renderDialog([{ ...key, group: 'default' }])
+  await user.click(
+    await screen.findByRole('button', { name: 'Remove default' })
+  )
+  await user.click(screen.getByRole('button', { name: 'Save changes' }))
+  expect(
+    await screen.findByText('Select at least one group for this token')
+  ).toBeVisible()
+  expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
+  expect(put).not.toHaveBeenCalled()
 })
 
 it('blocks saving when no shared group is available for the selected owners', async () => {
@@ -402,7 +491,10 @@ it('disables saving while owner groups are unavailable and allows retry after th
     data: { success: true, data: { groups: ['premium'], max_count: 3 } },
   })
   await user.click(screen.getByRole('button', { name: 'Retry' }))
-  expect(await screen.findByRole('combobox', { name: 'Group' })).toBeEnabled()
+  const editor = await screen.findByRole('group', { name: 'Selected groups' })
+  expect(
+    within(editor).getByRole('combobox', { name: 'Add group' })
+  ).toBeEnabled()
 })
 
 it('keeps the editor open and reports the server error when an update is rejected', async () => {
@@ -411,10 +503,8 @@ it('keeps the editor open and reports the server error when an update is rejecte
     data: { success: false, message: 'Group is no longer available' },
   })
   const { onClose, onSaved } = renderDialog()
-  await user.selectOptions(
-    await screen.findByRole('combobox', { name: 'Group' }),
-    'premium'
-  )
+  await user.click(await screen.findByRole('button', { name: 'Remove legacy' }))
+  await addGroup(user, 'premium')
   await user.click(screen.getByRole('button', { name: 'Save changes' }))
   const confirmation = await screen.findByRole('alertdialog')
   await user.click(
@@ -425,5 +515,5 @@ it('keeps the editor open and reports the server error when an update is rejecte
   )
   expect(onClose).not.toHaveBeenCalled()
   expect(onSaved).not.toHaveBeenCalled()
-  expect(screen.getByRole('combobox', { name: 'Group' })).toHaveValue('premium')
+  expect(screen.getByRole('button', { name: 'Remove premium' })).toBeVisible()
 })
