@@ -36,13 +36,11 @@ func OaiResponsesToChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 		service.ObserveCyberPolicyError(c, apiErr)
 		return nil, apiErr
 	}
-
 	if err := common.Unmarshal(body, &responsesResp); err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
-
-	if oaiError := responsesResp.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
-		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
+	if apiErr := openaiEmbeddedError(c, responsesResp.GetOpenAIError(), resp.StatusCode); apiErr != nil {
+		return nil, apiErr
 	}
 
 	info.ObserveResponseModel(responsesResp.Model)
@@ -117,8 +115,8 @@ func OaiResponsesToChatBufferedStreamHandler(c *gin.Context, info *relaycommon.R
 			}
 		case "response.failed", "response.error":
 			if streamResp.Response != nil {
-				if oaiErr := streamResp.Response.GetOpenAIError(); oaiErr != nil && oaiErr.Type != "" {
-					streamErr = types.WithOpenAIError(*oaiErr, http.StatusInternalServerError)
+				if apiErr := openaiEmbeddedError(c, streamResp.Response.GetOpenAIError(), http.StatusInternalServerError); apiErr != nil {
+					streamErr = apiErr
 					break
 				}
 			}
@@ -304,8 +302,8 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			upstreamFailed = true
 			if streamResp.Response != nil {
 				failedUsage = streamResp.Response.Usage
-				if oaiErr := streamResp.Response.GetOpenAIError(); oaiErr != nil && oaiErr.Type != "" {
-					streamErr = types.WithOpenAIError(*oaiErr, http.StatusInternalServerError)
+				if apiErr := openaiEmbeddedError(c, streamResp.Response.GetOpenAIError(), http.StatusInternalServerError); apiErr != nil {
+					streamErr = apiErr
 					stopStream(sr, streamErr)
 					return
 				}
@@ -360,6 +358,15 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			}
 		}
 		logger.LogError(c, common.LogText("responses stream failed after output was delivered, billing the delivered output: %s", streamErr.Error()))
+		if publicFailure := service.PublicUpstreamBalanceError(c, streamErr); publicFailure != nil {
+			if info.RelayFormat == types.RelayFormatClaude {
+				_ = helper.ClaudeData(c, dto.ClaudeResponse{Type: "error", Error: publicFailure.ToClaudeError()})
+			} else {
+				_ = helper.ObjectData(c, gin.H{"error": publicFailure.ToOpenAIError()})
+				helper.Done(c)
+			}
+			return usage, nil
+		}
 		streamErr.SetMessage(common.MessageWithRequestId(streamErr.Error(), c.GetString(common.RequestIdKey)))
 		if info.RelayFormat == types.RelayFormatClaude {
 			c.JSON(streamErr.StatusCode, gin.H{"type": "error", "error": streamErr.ToClaudeError(common.UpstreamAddresses(c)...)})

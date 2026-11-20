@@ -507,9 +507,13 @@ func DoWssRequest(a Adaptor, c *gin.Context, info *common.RelayInfo, requestBody
 			if resp.Body != nil {
 				body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 				_ = resp.Body.Close()
-				if service.ObserveCyberPolicyPayload(c, body) {
+				policyRejected := service.ObserveCyberPolicyPayload(c, body)
+				if len(body) > 0 {
 					resp.Body = io.NopCloser(bytes.NewReader(body))
-					return nil, service.RelayErrorHandler(c.Request.Context(), resp, false)
+					upstreamErr := service.RelayErrorHandler(c.Request.Context(), resp, false)
+					if policyRejected || service.IsUpstreamBalanceError(upstreamErr) {
+						return nil, upstreamErr
+					}
 				}
 			}
 		}

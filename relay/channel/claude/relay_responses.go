@@ -97,11 +97,16 @@ func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *rel
 			return
 		}
 		if claudeError := claudeResponse.GetClaudeError(); claudeError != nil && claudeError.Type != "" {
-			if failResponsesStream(fmt.Errorf("%s", claudeError.Message)) {
+			upstreamErr := types.WithClaudeError(*claudeError, http.StatusInternalServerError)
+			displayErr := upstreamErr
+			if masked := service.PublicUpstreamBalanceError(c, upstreamErr); masked != nil {
+				displayErr = masked
+			}
+			if failResponsesStream(displayErr) {
 				sr.Stop(streamErr)
 				return
 			}
-			streamErr = types.WithClaudeError(*claudeError, http.StatusInternalServerError)
+			streamErr = upstreamErr
 			sr.Stop(streamErr)
 			return
 		}

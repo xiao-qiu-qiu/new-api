@@ -84,10 +84,11 @@ type responsesWSControl struct {
 // Only the request worker reads or changes billing state. Socket readers pass
 // bounded messages to it; cancellation never performs an independent refund.
 type responsesWSCallState struct {
-	inbox    chan responsesWSMessage
-	controls chan responsesWSControl
-	done     chan struct{}
-	terminal *responsesWSMessage
+	inbox       chan responsesWSMessage
+	controls    chan responsesWSControl
+	done        chan struct{}
+	terminal    *responsesWSMessage
+	publicError *types.NewAPIError
 	// A nonzero closeCode ends the connection after this request.
 	closeCode   int
 	closeReason string
@@ -204,8 +205,11 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 		// before that release, so a concurrent upstream close cannot report it
 		// as a normal closure; shutdown itself takes neither lock.
 		outgoing := state.terminal
-		if apiErr != nil {
-			if body, err := buildResponsesWSErrorPayload(envelope.EventID, streamID, apiErr, upstreamURLs...); err == nil {
+		if clientErr := cmp.Or(state.publicError, apiErr); clientErr != nil {
+			if clientErr.StatusCode == http.StatusUnauthorized || clientErr.StatusCode == http.StatusForbidden {
+				state.closeCode = websocket.ClosePolicyViolation
+			}
+			if body, err := buildResponsesWSErrorPayload(envelope.EventID, streamID, clientErr, upstreamURLs...); err == nil {
 				outgoing = &responsesWSMessage{kind: websocket.TextMessage, body: body}
 			}
 		}
@@ -240,11 +244,11 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 		c.Request.ContentLength = int64(len(create.Body))
 		callErr := s.runCall(c, state, create)
 		upstreamURLs = common.UpstreamAddresses(c)
+		if callErr != nil {
+			state.publicError = service.PublicUpstreamBalanceError(c, callErr)
+		}
 		return callErr
 	})
-	if apiErr != nil && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden) {
-		state.closeCode = websocket.ClosePolicyViolation
-	}
 }
 
 func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState, create responsesWSCreateRequest) (apiErr *types.NewAPIError) {
@@ -497,7 +501,7 @@ routeAttempt:
 	// reply check reads the rest of the text first, and a response it
 	// stopped ends with the error instead.
 	var responseID string
-	terminalOf := func(incoming responsesWSMessage) *responsesWSMessage {
+	terminalOf := func(incoming responsesWSMessage, upstreamError *types.NewAPIError) *responsesWSMessage {
 		if socket != nil && stopErr == nil && incoming.kind == websocket.TextMessage {
 			if body := socket.Terminal(incoming.body); body != nil {
 				incoming.body = body
@@ -505,6 +509,10 @@ routeAttempt:
 			stopErr = socket.Stopped()
 		}
 		if stopErr == nil {
+			if publicError := service.PublicUpstreamBalanceError(c, upstreamError); publicError != nil {
+				state.publicError = publicError
+				return nil
+			}
 			return &incoming
 		}
 		openAIErr := stopErr.ToOpenAIError(common.UpstreamAddresses(c)...)
@@ -596,6 +604,19 @@ routeAttempt:
 					}
 					probeObserver.ObserveEvent(incoming.body)
 					groupProbeObserver.ObserveEvent(incoming.body)
+					upstreamError := rejection.Error
+					if upstreamError == nil || upstreamError.Message == "" {
+						if raw := ojson.GetBytes(incoming.body, "error"); raw.Type == ojson.String && service.IsUpstreamBalanceMessage(raw.Str) {
+							upstreamError = &types.OpenAIError{Code: event.Code, Message: raw.Str}
+						}
+					}
+					if upstreamError == nil {
+						upstreamError = &types.OpenAIError{Type: "invalid_request_error", Message: event.Message, Code: event.Code}
+					}
+					rejected := types.WithOpenAIError(*upstreamError, rejection.Status, types.ErrOptionWithSkipRetry())
+					if rejected.StatusCode < 400 || rejected.StatusCode > 599 {
+						rejected.StatusCode = http.StatusBadRequest
+					}
 					if accepted {
 						if rejection.Error != nil {
 							code := ""
@@ -607,21 +628,12 @@ routeAttempt:
 						accumulator.Observe(&event.ResponsesStreamResponse, incoming.body)
 						info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
 						s.lastResponseID = responseID
-						state.terminal = terminalOf(incoming)
+						state.terminal = terminalOf(incoming, rejected)
 						if ambiguous {
 							state.closeCode = websocket.CloseInternalServerErr
 						}
 						ConsumeResponsesQuota(c, info, accumulator.Finish())
 						return nil
-					}
-					if rejection.Error == nil {
-						// An error frame without an error object still describes the
-						// rejected request; keep the client-facing type stable.
-						rejection.Error = &types.OpenAIError{Type: "invalid_request_error", Message: event.Message, Code: event.Code}
-					}
-					rejected := types.WithOpenAIError(*rejection.Error, rejection.Status, types.ErrOptionWithSkipRetry())
-					if rejected.StatusCode < 400 || rejected.StatusCode > 599 {
-						rejected.StatusCode = http.StatusBadRequest
 					}
 					if !service.HasChannelFailover(c) {
 						return rejected
@@ -661,11 +673,25 @@ routeAttempt:
 			}
 			switch event.Type {
 			case "response.completed", "response.done", "response.incomplete", "response.failed", "response.cancelled", "response.canceled":
+				var upstreamError *types.OpenAIError
 				if event.Response != nil {
 					s.lastResponseID = event.Response.ID
+					upstreamError = event.Response.GetOpenAIError()
+				}
+				if upstreamError == nil && event.Type == "response.failed" {
+					var failure responsesWSErrorEvent
+					_ = common.Unmarshal(incoming.body, &failure)
+					upstreamError = failure.Error
+					if upstreamError == nil && (event.Code != "" || event.Message != "") {
+						upstreamError = &types.OpenAIError{Code: event.Code, Message: event.Message}
+					}
+				}
+				var terminalError *types.NewAPIError
+				if upstreamError != nil {
+					terminalError = types.WithOpenAIError(*upstreamError, http.StatusBadGateway)
 				}
 				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
-				state.terminal = terminalOf(incoming)
+				state.terminal = terminalOf(incoming, terminalError)
 				ConsumeResponsesQuota(c, info, accumulator.Finish())
 				return nil
 			}

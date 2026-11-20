@@ -121,14 +121,14 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	var lastStreamData string
 	var secondLastStreamData string // 保留倒数第二个stream data；部分兼容网关把完整usage放在倒数第二个事件
 	var streamError *types.NewAPIError
-	var accepted, lastFrameError bool
+	var accepted, lastFrameError, balanceFailure bool
 	var observedUsage *dto.Usage
 	var observedUsageFrame string
 	seenStreamToolCalls := make(map[string]struct{})
 	var streamFunctionCallNames []string
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
-		if lastStreamData != "" && (!lastFrameError || info.RelayFormat == types.RelayFormatOpenAI) {
+		if !balanceFailure && lastStreamData != "" && (!lastFrameError || info.RelayFormat == types.RelayFormatOpenAI) {
 			written := c.Writer.Size()
 			var err error
 			if lastFrameError {
@@ -166,6 +166,11 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 			noRetry := accepted || c.Writer.Written() || info.StreamLifecycle.ClientError() != nil
 			common.SetContextKey(c, constant.ContextKeyResponseStreamNoRetry, noRetry)
 			if apiErr != nil {
+				if !balanceFailure && service.IsUpstreamBalanceError(apiErr) {
+					balanceFailure = true
+					streamError = apiErr
+					common.SetContextKey(c, constant.ContextKeyResponseStreamErrorForwarded, false)
+				}
 				if streamError == nil {
 					streamError = apiErr
 				}
@@ -221,6 +226,9 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 	}
 
 	if streamError != nil {
+		if balanceFailure {
+			info.StreamStatus.MarkFailed(string(streamError.GetErrorCode()), streamError.ToOpenAIError().Type, streamError.StatusCode)
+		}
 		noRetry := accepted || c.Writer.Written() || info.StreamLifecycle.ClientError() != nil
 		common.SetContextKey(c, constant.ContextKeyResponseStreamNoRetry, noRetry)
 		if noRetry {
@@ -231,7 +239,7 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 		}
 	}
 
-	if info.RelayFormat == types.RelayFormatOpenAI {
+	if !balanceFailure && info.RelayFormat == types.RelayFormatOpenAI {
 		if shouldSendLastResp {
 			written := c.Writer.Size()
 			if lastFrameError {
@@ -362,9 +370,8 @@ func OpenaiHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Respo
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
-
-	if oaiError := simpleResponse.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
-		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
+	if apiErr := openaiEmbeddedError(c, simpleResponse.GetOpenAIError(), resp.StatusCode); apiErr != nil {
+		return nil, apiErr
 	}
 
 	info.ObserveResponseModel(simpleResponse.Model)

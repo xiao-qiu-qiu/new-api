@@ -651,10 +651,17 @@ func TestResponsesWSRequestMetadataAndConcurrencyPerCreate(t *testing.T) {
 	const modelName = "ws-concurrency-model"
 	require.NoError(t, ratio_setting.UpdateModelPriceByJSONString(`{"ws-concurrency-model":0}`))
 	var handshakes atomic.Int32
+	var refusedHandshake atomic.Bool
 	peers := make(chan *websocket.Conn, 1)
 	upstreamErrors := make(chan error, 1)
 	upgrader := websocket.Upgrader{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if refusedHandshake.CompareAndSwap(false, true) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":{"code":"insufficient_user_quota","message":"private upstream balance"}}`))
+			return
+		}
 		peer, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			upstreamErrors <- err
@@ -704,15 +711,34 @@ func TestResponsesWSRequestMetadataAndConcurrencyPerCreate(t *testing.T) {
 	probe, _ := gin.CreateTestContext(httptest.NewRecorder())
 	probe.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 	t.Cleanup(func() { service.ReleaseChannelConcurrency(probe) })
+	require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","event_id":"handshake","stream_id":"dial","model":"ws-concurrency-model","input":"hi"}`)))
+	require.NoError(t, client.SetReadDeadline(time.Now().Add(5*time.Second)))
+	_, refusal, readErr := client.ReadMessage()
+	require.NoError(t, readErr)
+	assert.JSONEq(t, fmt.Sprintf(`{"type":"error","status":503,"event_id":"handshake","stream_id":"dial","error":{"type":"server_error","code":"server_error","param":"","message":%q}}`, i18n.T(c, i18n.MsgRelayChannelUnavailable)), string(refusal))
 	var peer *websocket.Conn
-	for index, status := range []string{"completed", "failed", "cancelled"} {
+	const balanceError = `{"code":"insufficient_quota","type":"insufficient_quota","message":"private upstream balance detail","param":"private","metadata":{"account":"private"}}`
+	for index, testCase := range []struct {
+		status, balanceFrame string
+		rejected             bool
+	}{
+		{status: "failed", balanceFrame: `{"type":"error","stream_id":%q,"status":403,"code":"insufficient_quota","message":"private upstream balance detail","param":"private"}`, rejected: true},
+		{status: "completed"},
+		{status: "failed"},
+		{status: "cancelled"},
+		{status: "failed", balanceFrame: `{"type":"error","stream_id":%q,"response_id":%q,"status":429,"error":` + balanceError + `,"headers":{"retry-after":"77"}}`},
+		{status: "failed", balanceFrame: `{"type":"error","stream_id":%q,"response_id":%q,"status":403,"error":"Insufficient account balance: private upstream balance"}`},
+		{status: "failed", balanceFrame: `{"type":"response.failed","stream_id":%q,"response":{"id":%q,"status":"failed","error":` + balanceError + `,"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1},"metadata":{"account":"private"}}}`},
+		{status: "failed", balanceFrame: `{"type":"response.done","stream_id":%q,"response":{"id":%q,"status":"failed","error":` + balanceError + `}}`},
+	} {
 		streamID := fmt.Sprintf("stream-%d", index)
 		responseID := fmt.Sprintf("resp-%d", index)
+		eventID := "create-" + streamID
 		input := `[{"type":"compaction_trigger"}]`
-		if index == 2 {
+		if index >= 3 {
 			input = `[{"type":"compaction","encrypted_content":"history"}]`
 		}
-		create := fmt.Sprintf(`{"type":"response.create","stream_id":%q,"model":%q,"input":%s}`, streamID, modelName, input)
+		create := fmt.Sprintf(`{"type":"response.create","event_id":%q,"stream_id":%q,"model":%q,"input":%s}`, eventID, streamID, modelName, input)
 		require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(create)))
 		if peer == nil {
 			select {
@@ -739,25 +765,36 @@ func TestResponsesWSRequestMetadataAndConcurrencyPerCreate(t *testing.T) {
 		active, err := active_requests.Query(t.Context(), active_requests.Filter{UserID: user.Id})
 		require.NoError(t, err)
 		require.Len(t, active.Items, 1)
-		assert.Equal(t, index < 2, active.Items[0].NativeCompactionV2, "implicit streaming is classified on fresh and reused sockets without leaking into the next ordinary create")
-		created := fmt.Sprintf(`{"type":"response.created","stream_id":%q,"response":{"id":%q,"model":%q}}`, streamID, responseID, modelName)
-		require.NoError(t, peer.WriteMessage(websocket.TextMessage, []byte(created)))
+		assert.Equal(t, index < 3, active.Items[0].NativeCompactionV2, "implicit streaming is classified on fresh and reused sockets without leaking into the next ordinary create")
 		require.NoError(t, client.SetReadDeadline(time.Now().Add(5*time.Second)))
-		_, body, err = client.ReadMessage()
-		require.NoError(t, err)
-		assert.JSONEq(t, created, string(body))
+		if !testCase.rejected {
+			created := fmt.Sprintf(`{"type":"response.created","stream_id":%q,"response":{"id":%q,"model":%q}}`, streamID, responseID, modelName)
+			require.NoError(t, peer.WriteMessage(websocket.TextMessage, []byte(created)))
+			_, body, err = client.ReadMessage()
+			require.NoError(t, err)
+			assert.JSONEq(t, created, string(body))
+		}
 		acquired, err := service.TryAcquireChannelConcurrency(probe, channel)
 		require.NoError(t, err)
 		require.False(t, acquired, "every active create must occupy capacity")
 
-		terminal := fmt.Sprintf(`{"type":%q,"stream_id":%q,"response":{"id":%q,"model":%q,"status":%q,"output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}`, "response."+status, streamID, responseID, modelName, status)
+		terminal := fmt.Sprintf(`{"type":%q,"stream_id":%q,"response":{"id":%q,"model":%q,"status":%q,"output":[],"usage":{"input_tokens":1,"output_tokens":0,"total_tokens":1}}}`, "response."+testCase.status, streamID, responseID, modelName, testCase.status)
+		want := terminal
+		if testCase.balanceFrame != "" {
+			if testCase.rejected {
+				terminal = fmt.Sprintf(testCase.balanceFrame, streamID)
+			} else {
+				terminal = fmt.Sprintf(testCase.balanceFrame, streamID, responseID)
+			}
+			want = fmt.Sprintf(`{"type":"error","status":503,"event_id":%q,"stream_id":%q,"error":{"type":"server_error","code":"server_error","param":"","message":%q}}`, eventID, streamID, i18n.T(c, i18n.MsgRelayChannelUnavailable))
+		}
 		require.NoError(t, peer.WriteMessage(websocket.TextMessage, []byte(terminal)))
 		_, body, err = client.ReadMessage()
 		require.NoError(t, err)
-		assert.JSONEq(t, terminal, string(body))
+		assert.JSONEq(t, want, string(body))
 		acquired, err = service.TryAcquireChannelConcurrency(probe, channel)
 		require.NoError(t, err)
-		require.True(t, acquired, "%s must release capacity before publishing its terminal frame", status)
+		require.True(t, acquired, "%s must release capacity before publishing its terminal frame", testCase.status)
 
 		// An idle established upstream socket cannot bypass another request's slot.
 		require.NoError(t, client.WriteMessage(websocket.TextMessage, []byte(`{"type":"response.create","event_id":"busy-create","stream_id":"busy","model":"ws-concurrency-model","input":"hi"}`)))

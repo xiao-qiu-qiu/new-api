@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relay/helper"
@@ -35,8 +36,8 @@ func OaiChatToResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	if err := common.Unmarshal(body, &chatResp); err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
-	if oaiError := chatResp.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
-		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
+	if apiErr := openaiEmbeddedError(c, chatResp.GetOpenAIError(), resp.StatusCode); apiErr != nil {
+		return nil, apiErr
 	}
 
 	info.ObserveResponseModel(chatResp.Model)
@@ -145,15 +146,30 @@ func OaiChatToResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			return
 		}
 		if err := common.UnmarshalJsonStr(data, &errorResp); err == nil {
-			if oaiError := errorResp.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
-				if failResponsesStream(fmt.Errorf("%s", oaiError.Message)) {
+			if apiErr := openaiEmbeddedError(c, errorResp.GetOpenAIError(), resp.StatusCode); apiErr != nil {
+				if !c.Writer.Written() && service.IsUpstreamBalanceError(apiErr) {
+					streamErr = apiErr
+					stopStream(sr, streamErr)
+					return
+				}
+				outboundErr := apiErr
+				if publicErr := service.PublicUpstreamBalanceError(c, apiErr); publicErr != nil {
+					outboundErr = publicErr
+				}
+				written := c.Writer.Size()
+				if failResponsesStream(outboundErr) {
 					// The client got response.failed, so the request is never
 					// retried; the recorded error keeps the stream failed.
-					upstreamFailure = types.WithOpenAIError(*oaiError, http.StatusInternalServerError, types.ErrOptionWithSkipRetry())
+					apiErr.StatusCode = http.StatusInternalServerError
+					types.ErrOptionWithSkipRetry()(apiErr)
+					upstreamFailure = apiErr
+					if outboundErr != apiErr && streamErr == nil && c.Writer.Size() > written && info.StreamLifecycle.ClientError() == nil {
+						common.SetContextKey(c, constant.ContextKeyResponseStreamErrorForwarded, true)
+					}
 					sr.Stop(upstreamFailure)
 					return
 				}
-				streamErr = types.WithOpenAIError(*oaiError, resp.StatusCode)
+				streamErr = apiErr
 				stopStream(sr, streamErr)
 				return
 			}

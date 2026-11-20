@@ -11,6 +11,8 @@ import (
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/i18n"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	relayconstant "github.com/QuantumNous/new-api/relay/constant"
+	"github.com/QuantumNous/new-api/relay/helper"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/relayconvert"
 	"github.com/QuantumNous/new-api/relaykit/types"
@@ -42,6 +44,143 @@ func newResponsesChatTestContext(t *testing.T, body string, isStream bool) (*gin
 		DisablePing:        true,
 	}
 	return c, recorder, resp, info
+}
+
+func TestOpenAIEmbeddedBalanceErrorLeavesHTTPResponseUncommitted(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		handler func(*gin.Context, *relaycommon.RelayInfo, *http.Response) (*dto.Usage, *types.NewAPIError)
+	}{
+		{"chat", OpenaiHandler},
+		{"responses", OaiResponsesHandler},
+		{"compact", func(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Response) (*dto.Usage, *types.NewAPIError) {
+			return OaiResponsesCompactionHandler(c, resp, info)
+		}},
+		{"chat to responses", OaiChatToResponsesHandler},
+		{"responses to chat", OaiResponsesToChatHandler},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			const payload = `{"error":{"code":"insufficient_quota","message":"private upstream balance","metadata":{"account":"private-account"}}}`
+			c, recorder, resp, info := newResponsesChatTestContext(t, payload, false)
+			resp.Header.Set("Content-Type", "application/json")
+			usage, apiErr := test.handler(c, info, resp)
+			require.NotNil(t, apiErr)
+			assert.Nil(t, usage)
+			assert.Equal(t, http.StatusOK, apiErr.StatusCode)
+			assert.EqualValues(t, "insufficient_quota", apiErr.GetErrorCode())
+			assert.Equal(t, "private upstream balance", apiErr.Error())
+			assert.False(t, types.IsSkipRetryError(apiErr))
+			assert.False(t, c.Writer.Written())
+			assert.Empty(t, recorder.Body.String())
+		})
+	}
+}
+
+func TestOpenAIStreamBalanceErrorKeepsUsageWithoutForwardingRawFailure(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	const chatPrefix = `{"id":"chat-test","choices":[{"index":0,"delta":{"content":"visible prefix"}}]}`
+	const chatUsage = `{"choices":[],"usage":{"prompt_tokens":11,"completion_tokens":3,"total_tokens":14}}`
+	const chatError = `{"error":{"code":"insufficient_quota","message":"private upstream balance","metadata":{"account":"private-account"}}}`
+	const responsesPrefix = `{"type":"response.output_text.delta","delta":"visible prefix"}`
+	const responsesInitialError = `{"type":"error","code":"insufficient_quota","message":"private upstream balance"}`
+	const responsesError = `{"type":"response.failed","response":{"status":"failed","error":{"code":"insufficient_quota","message":"private upstream balance"},"metadata":{"account":"private-account"},"usage":{"input_tokens":11,"output_tokens":3,"total_tokens":14}}}`
+	for _, test := range []struct {
+		name, frames, localTerminal string
+		started, heartbeat          bool
+		handler                     func(*gin.Context, *relaycommon.RelayInfo, *http.Response) (*dto.Usage, *types.NewAPIError)
+	}{
+		{"chat initial error", chatError, "", false, false, OaiStreamHandler},
+		{"chat final error", chatPrefix + "\n" + chatUsage + "\n" + chatError, "", true, false, OaiStreamHandler},
+		{"chat error before tail usage", chatPrefix + "\n" + chatError + "\n" + chatUsage, "", true, false, OaiStreamHandler},
+		{"responses initial error", responsesInitialError, "", false, false, OaiResponsesStreamHandler},
+		{"responses heartbeat", responsesInitialError, "", false, true, OaiResponsesStreamHandler},
+		{"responses final error", responsesPrefix + "\n" + responsesError, "", true, false, OaiResponsesStreamHandler},
+		{"converted responses initial error", chatError, "", false, false, OaiChatToResponsesStreamHandler},
+		{"converted response failure", chatPrefix + "\n" + chatUsage + "\n" + chatError, "event: response.failed", true, false, OaiChatToResponsesStreamHandler},
+		{"converted chat failure", responsesPrefix + "\n" + responsesError, "data: [DONE]", true, false, OaiResponsesToChatStreamHandler},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := "data: " + strings.ReplaceAll(test.frames, "\n", "\n\ndata: ") + "\n\ndata: [DONE]\n\n"
+			c, recorder, resp, info := newResponsesChatTestContext(t, body, true)
+			info.RelayMode = relayconstant.RelayModeChatCompletions
+			if test.heartbeat {
+				helper.SetEventStreamHeaders(c)
+				require.NoError(t, helper.PingData(c))
+			}
+			usage, apiErr := test.handler(c, info, resp)
+			stream := recorder.Body.String()
+			assert.NotContains(t, stream, "private upstream balance")
+			assert.NotContains(t, stream, "private-account")
+			assert.NotContains(t, stream, "insufficient_quota")
+			assert.True(t, info.StreamStatus.ResponseFailed())
+			if test.started {
+				require.NotNil(t, usage)
+				assert.Equal(t, 11, usage.PromptTokens)
+				assert.Equal(t, 3, usage.CompletionTokens)
+				assert.Equal(t, 14, usage.TotalTokens)
+				assert.Contains(t, stream, "visible prefix")
+			}
+			assert.Equal(t, test.started || test.heartbeat, c.Writer.Written())
+			if test.localTerminal != "" {
+				require.Nil(t, apiErr)
+				assert.Contains(t, stream, test.localTerminal)
+				assert.Contains(t, stream, "server_error")
+			} else {
+				require.NotNil(t, apiErr)
+				assert.EqualValues(t, "insufficient_quota", apiErr.GetErrorCode())
+				assert.Contains(t, apiErr.Error(), "private upstream balance")
+				assert.Equal(t, test.started || test.heartbeat, types.IsSkipRetryError(apiErr))
+				assert.False(t, common.GetContextKeyBool(c, constant.ContextKeyResponseStreamErrorForwarded))
+				assert.NotContains(t, stream, "data: [DONE]")
+			}
+		})
+	}
+}
+
+func TestOpenAIStreamDoesNotRerouteSuccessfulJSON(t *testing.T) {
+	for _, test := range []struct {
+		name, payload, wantBody string
+		handler                 func(*gin.Context, *relaycommon.RelayInfo, *http.Response) (*dto.Usage, *types.NewAPIError)
+	}{
+		{"chat", `{"choices":[{"message":{"content":"non-stream JSON"}}]}`, "data: [DONE]\n\n", OaiStreamHandler},
+		{"responses", `{"id":"resp-test","status":"completed"}`, "", OaiResponsesStreamHandler},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			c, recorder, resp, info := newResponsesChatTestContext(t, test.payload, true)
+			resp.Header.Set("Content-Type", "application/json; charset=utf-8")
+			info.ShouldIncludeUsage = false
+			_, apiErr := test.handler(c, info, resp)
+			require.Nil(t, apiErr)
+			assert.Equal(t, test.wantBody, recorder.Body.String())
+		})
+	}
+}
+
+func TestOpenAIStreamMasksBalanceErrorStringsOnly(t *testing.T) {
+	const prefix = `{"choices":[{"index":0,"delta":{"content":"visible prefix"}}]}`
+	for _, test := range []struct {
+		name, frame, wantMessage string
+		wantCode                 types.ErrorCode
+		forwarded                bool
+	}{
+		{"without code", `{"error":"Insufficient balance"}`, "Insufficient balance", types.ErrorCodeBadResponse, false},
+		{"with generic code", `{"code":"upstream_error","error":"Insufficient account balance: private account"}`, "Insufficient account balance: private account", "upstream_error", false},
+		{"ordinary string", `{"error":"Temporarily unavailable"}`, "upstream stream error: ", types.ErrorCodeBadResponse, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := "data: " + prefix + "\n\ndata: " + test.frame + "\n\ndata: [DONE]\n\n"
+			c, recorder, resp, info := newResponsesChatTestContext(t, body, true)
+			info.RelayMode = relayconstant.RelayModeChatCompletions
+			_, apiErr := OaiStreamHandler(c, info, resp)
+			require.NotNil(t, apiErr)
+			assert.Equal(t, test.wantCode, apiErr.GetErrorCode())
+			assert.Equal(t, test.wantMessage, apiErr.Error())
+			assert.True(t, types.IsSkipRetryError(apiErr))
+			assert.Equal(t, test.forwarded, common.GetContextKeyBool(c, constant.ContextKeyResponseStreamErrorForwarded))
+			assert.Contains(t, recorder.Body.String(), prefix)
+			assert.Equal(t, test.forwarded, strings.Contains(recorder.Body.String(), test.frame))
+		})
+	}
 }
 
 func TestCyberPolicyBlocksChatResponsesConversions(t *testing.T) {

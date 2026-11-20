@@ -76,7 +76,6 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		finish := service.BeginActiveRequest(c, common.GetContextKeyString(c, constant.ContextKeyOriginalModel))
 		defer finish()
 	}
-	requestId := c.GetString(common.RequestIdKey)
 	//group := common.GetContextKeyString(c, constant.ContextKeyUsingGroup)
 	//originalModel := common.GetContextKeyString(c, constant.ContextKeyOriginalModel)
 
@@ -108,29 +107,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		if newAPIError != nil {
 			service.RecordRequestPolicyTermination(c, newAPIError)
 			logger.LogError(c, common.LogText("relay error: %s", common.LocalLogPreview(newAPIError.Error())))
-			newAPIError.SetMessage(common.MessageWithRequestId(newAPIError.Error(), requestId))
-			upstreamURLs := common.UpstreamAddresses(c)
-			if relayFormat != types.RelayFormatOpenAIRealtime && c.Writer.Written() &&
-				strings.HasPrefix(c.Writer.Header().Get("Content-Type"), "text/event-stream") {
-				writeRelayStreamError(c, relayFormat, newAPIError)
-				return
-			}
-			if relayFormat != types.RelayFormatOpenAIRealtime {
-				c.Header("Content-Type", "application/json; charset=utf-8")
-			}
-			switch relayFormat {
-			case types.RelayFormatOpenAIRealtime:
-				helper.WssError(c, ws, newAPIError.ToOpenAIError(upstreamURLs...))
-			case types.RelayFormatClaude:
-				c.JSON(newAPIError.StatusCode, gin.H{
-					"type":  "error",
-					"error": newAPIError.ToClaudeError(upstreamURLs...),
-				})
-			default:
-				c.JSON(newAPIError.StatusCode, gin.H{
-					"error": newAPIError.ToOpenAIError(upstreamURLs...),
-				})
-			}
+			writeRelayError(c, relayFormat, ws, newAPIError)
 		}
 	}()
 
@@ -301,7 +278,27 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 	}
 }
 
-func writeRelayStreamError(c *gin.Context, format types.RelayFormat, apiError *types.NewAPIError) {
+func writeRelayError(c *gin.Context, format types.RelayFormat, ws *websocket.Conn, apiError *types.NewAPIError) {
+	publicErr := service.PublicUpstreamBalanceError(c, apiError)
+	masked := publicErr != nil
+	if !masked {
+		apiError.SetMessage(common.MessageWithRequestId(apiError.Error(), c.GetString(common.RequestIdKey)))
+		publicErr = apiError
+	}
+	upstreamURLs := common.UpstreamAddresses(c)
+	if format == types.RelayFormatOpenAIRealtime {
+		helper.WssError(c, ws, publicErr.ToOpenAIError(upstreamURLs...))
+		return
+	}
+	if !c.Writer.Written() || !strings.HasPrefix(c.Writer.Header().Get("Content-Type"), "text/event-stream") {
+		c.Header("Content-Type", "application/json; charset=utf-8")
+		if format == types.RelayFormatClaude {
+			c.JSON(publicErr.StatusCode, gin.H{"type": "error", "error": publicErr.ToClaudeError(upstreamURLs...)})
+		} else {
+			c.JSON(publicErr.StatusCode, gin.H{"error": publicErr.ToOpenAIError(upstreamURLs...)})
+		}
+		return
+	}
 	if common.GetContextKeyBool(c, constant.ContextKeyResponseStreamErrorForwarded) {
 		return
 	}
@@ -312,12 +309,19 @@ func writeRelayStreamError(c *gin.Context, format types.RelayFormat, apiError *t
 		common.SetContextKey(c, constant.ContextKeyResponseStreamStatus, status)
 	}
 	status.MarkFailed(string(apiError.GetErrorCode()), string(apiError.GetErrorType()), apiError.StatusCode)
-	upstreamURLs := common.UpstreamAddresses(c)
 	if format == types.RelayFormatClaude {
-		_ = helper.ClaudeData(c, dto.ClaudeResponse{Type: "error", Error: apiError.ToClaudeError(upstreamURLs...)})
+		_ = helper.ClaudeData(c, dto.ClaudeResponse{Type: "error", Error: publicErr.ToClaudeError(upstreamURLs...)})
 		return
 	}
-	_ = helper.ObjectData(c, gin.H{"error": apiError.ToOpenAIError(upstreamURLs...)})
+	if masked && format == types.RelayFormatOpenAIResponses {
+		const failed = "response.failed"
+		data, err := common.Marshal(gin.H{"type": failed, "response": gin.H{"status": "failed", "error": publicErr.ToOpenAIError()}})
+		if err == nil {
+			_ = helper.ResponseChunkData(c, dto.ResponsesStreamResponse{Type: failed}, string(data))
+		}
+		return
+	}
+	_ = helper.ObjectData(c, gin.H{"error": publicErr.ToOpenAIError(upstreamURLs...)})
 	helper.Done(c)
 }
 

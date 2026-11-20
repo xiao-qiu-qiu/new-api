@@ -617,7 +617,7 @@ func TestRelayAuthRecoveryPreservesFailoverBeforeOutput(t *testing.T) {
 	const created = "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_started\",\"status\":\"in_progress\"}}\n\n"
 
 	for _, channelType := range []int{constant.ChannelTypeSub2API, constant.ChannelTypeOpenAI} {
-		for _, scenario := range []string{"late HTTP rejection", "recovered request", "comment-only rejection", "accepted stream failure"} {
+		for _, scenario := range []string{"late HTTP rejection", "recovered request", "comment-only rejection", "accepted stream failure", "empty primary and unfunded backup"} {
 			t.Run(fmt.Sprintf("type_%d/%s", channelType, scenario), func(t *testing.T) {
 				primaryURL, backupURL := "https://recovery-primary.example", "https://recovery-backup.example"
 				primary := &model.Channel{Name: "auth-primary", Type: channelType, Key: "primary-test-key", Status: common.ChannelStatusEnabled, Group: "default", Models: "auth-recovery", BaseURL: &primaryURL}
@@ -677,11 +677,21 @@ func TestRelayAuthRecoveryPreservesFailoverBeforeOutput(t *testing.T) {
 						}
 						if request.URL.Host == "recovery-backup.example" {
 							backupCalls++
+							if scenario == "empty primary and unfunded backup" {
+								response.StatusCode = http.StatusForbidden
+								response.Header.Set("Content-Type", "application/json")
+								response.Body = io.NopCloser(strings.NewReader(`{"error":{"code":"insufficient_user_quota","type":"new_api_error","message":"Insufficient user quota, remaining quota: $0.01","metadata":{"upstream":"private"}}}`))
+								return response, nil
+							}
 							response.Body = io.NopCloser(strings.NewReader(completed))
 							return response, nil
 						}
 						primaryCalls++
 						switch scenario {
+						case "empty primary and unfunded backup":
+							response.StatusCode = http.StatusServiceUnavailable
+							response.Header.Set("Content-Type", "application/json")
+							response.Body = io.NopCloser(strings.NewReader(`{"error":{"code":"no_available_accounts","message":"Pool is empty"}}`))
 						case "late HTTP rejection":
 							time.Sleep(60 * time.Second)
 							response.StatusCode = http.StatusServiceUnavailable
@@ -725,9 +735,16 @@ func TestRelayAuthRecoveryPreservesFailoverBeforeOutput(t *testing.T) {
 					})
 					request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"auth-recovery","stream":true,"max_output_tokens":16,"input":"hello"}`))
 					request.Header.Set("Content-Type", "application/json")
+					request.Header.Set("Accept-Language", "zh-CN")
 					recorder := httptest.NewRecorder()
 					engine.ServeHTTP(recorder, request)
 					require.Equal(t, 1, primaryCalls)
+					if scenario == "empty primary and unfunded backup" {
+						require.Equal(t, 1, backupCalls)
+						require.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+						assert.JSONEq(t, `{"error":{"type":"server_error","code":"server_error","message":"渠道不可用，请联系站长维护","param":""}}`, recorder.Body.String())
+						return
+					}
 					require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 					body := recorder.Body.String()
 					if scenario == "accepted stream failure" {
@@ -762,7 +779,7 @@ func TestRelayStreamErrorAfterKeepAlive(t *testing.T) {
 			common.SetContextKey(c, constant.ContextKeyChannelBaseUrl, "https://provider.example")
 			common.SetContextKey(c, constant.ContextKeyUpstreamRequestOrigin, "https://provider.example")
 			apiError := types.NewErrorWithStatusCode(errors.New("upstream rejected input at https://provider.example/v1/messages"), types.ErrorCodeBadResponseStatusCode, http.StatusBadRequest)
-			writeRelayStreamError(c, format, apiError)
+			writeRelayError(c, format, nil, apiError)
 			require.Equal(t, http.StatusOK, recorder.Code)
 			require.Equal(t, "text/event-stream", recorder.Header().Get("Content-Type"))
 			require.Contains(t, recorder.Body.String(), "upstream rejected input")
@@ -776,6 +793,52 @@ func TestRelayStreamErrorAfterKeepAlive(t *testing.T) {
 			} else {
 				require.Contains(t, recorder.Body.String(), "data: [DONE]")
 			}
+		})
+	}
+}
+
+func TestRelayBalanceErrorPresentation(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	const message = "渠道不可用，请联系站长维护"
+	for _, tc := range []struct {
+		name, body string
+		status     int
+		wantMasked bool
+	}{
+		{"upstream message with no structured error", `{"message":"Insufficient account balance. Please top up."}`, 403, true},
+		{"upstream error with no code", `{"error":{"message":"Insufficient balance"}}`, 402, true},
+		{"upstream flat billing code", `{"code":"INSUFFICIENT_BALANCE","message":"private detail"}`, 403, true},
+		{"upstream without a code", `{"error":{"type":"invalid_request_error","message":"Your credit balance is too low to access this model"}}`, 400, true},
+		{"ordinary rate limit", `{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"Too many requests"}}`, 429, false},
+		{"workspace deactivated", `{"error":{"code":"deactivated_workspace","message":"Payment Required"}}`, 402, false},
+		{"local quota", "", 403, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			ctx.Request.Header.Set("Accept-Language", "zh-CN")
+			apiErr := types.NewErrorWithStatusCode(errors.New("用户额度不足"), types.ErrorCodeInsufficientUserQuota, tc.status)
+			if tc.body != "" {
+				apiErr = service.RelayErrorHandler(ctx.Request.Context(), &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(tc.body))}, false)
+			}
+			if tc.wantMasked {
+				helper.SetEventStreamHeaders(ctx)
+				require.NoError(t, helper.PingData(ctx))
+			}
+			writeRelayError(ctx, types.RelayFormatOpenAIResponses, nil, apiErr)
+			if !tc.wantMasked {
+				assert.Equal(t, tc.status, recorder.Code)
+				assert.Contains(t, recorder.Body.String(), string(apiErr.GetErrorCode()))
+				assert.NotContains(t, recorder.Body.String(), message)
+				return
+			}
+			assert.Equal(t, http.StatusOK, recorder.Code, "heartbeat already committed")
+			assert.Contains(t, recorder.Body.String(), "event: response.failed\n")
+			_, data, found := strings.Cut(recorder.Body.String(), "data: ")
+			require.True(t, found)
+			assert.JSONEq(t, `{"type":"response.failed","response":{"status":"failed","error":{"message":"渠道不可用，请联系站长维护","code":"server_error","type":"server_error","param":""}}}`, data)
+			assert.Equal(t, tc.status, apiErr.StatusCode, "keep upstream diagnostics")
 		})
 	}
 }

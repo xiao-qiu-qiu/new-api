@@ -11,11 +11,14 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/MoeForge/moego/ojson"
 	"github.com/QuantumNous/new-api/common"
 	taskdto "github.com/QuantumNous/new-api/dto"
+	"github.com/QuantumNous/new-api/i18n"
 	"github.com/QuantumNous/new-api/logger"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/gin-gonic/gin"
 )
 
 func MidjourneyErrorWrapper(code int, desc string) *taskdto.MidjourneyResponse {
@@ -113,6 +116,10 @@ func RelayErrorHandler(ctx context.Context, resp *http.Response, showBodyWhenFai
 
 	err = common.Unmarshal(responseBody, &errResponse)
 	if err != nil {
+		if IsUpstreamBalanceMessage(responseBodyText) {
+			newApiErr = types.NewOpenAIError(errors.New(strings.TrimSpace(responseBodyText)), types.ErrorCodeBadResponseStatusCode, resp.StatusCode)
+			return
+		}
 		if showBodyWhenFail {
 			newApiErr.Err = buildErrWithBody("")
 		} else {
@@ -134,6 +141,15 @@ func RelayErrorHandler(ctx context.Context, resp *http.Response, showBodyWhenFai
 		}
 	}
 	message := errResponse.ToMessage()
+	for _, path := range []string{"error.code", "response.error.code", "code"} {
+		if code := ojson.GetBytes(responseBody, path).Str; upstreamBalanceCode(code) {
+			newApiErr = types.WithOpenAIError(types.OpenAIError{Code: code, Message: message}, resp.StatusCode)
+			if showBodyWhenFail {
+				newApiErr.Err = buildErrWithBody(message)
+			}
+			return
+		}
+	}
 	if message == "" {
 		// The body parsed as JSON but carried no usable error message; log the
 		// raw body so the upstream failure remains diagnosable.
@@ -144,6 +160,51 @@ func RelayErrorHandler(ctx context.Context, resp *http.Response, showBodyWhenFai
 		newApiErr.Err = buildErrWithBody(newApiErr.Error())
 	}
 	return
+}
+
+func upstreamBalanceCode(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "insufficient_user_quota", "insufficient_quota", "insufficient_balance", "insufficient_funds",
+		"insufficient_credits", "credit_balance_too_low", "billing_hard_limit_reached":
+		return true
+	}
+	return false
+}
+
+func IsUpstreamBalanceMessage(message string) bool {
+	message = strings.ToLower(strings.TrimSpace(message))
+	for _, prefix := range []string{
+		"余额不足", "账户余额不足", "账号余额不足", "用户余额不足", "用户额度不足", "令牌额度不足", "预扣费额度失败, 用户剩余额度",
+		"餘額不足", "帳戶餘額不足", "使用者額度不足", "insufficient balance", "insufficient account balance", "insufficient user balance",
+		"insufficient user quota", "not enough quota to pre-consume", "token quota is not enough", "your credit balance is too low",
+	} {
+		if strings.HasPrefix(message, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func IsUpstreamBalanceError(apiErr *types.NewAPIError) bool {
+	if apiErr == nil || IsCyberPolicyError(apiErr) || IsViolationFeeCode(apiErr.GetErrorCode()) {
+		return false
+	}
+	switch apiErr.GetErrorType() {
+	case types.ErrorTypeOpenAIError, types.ErrorTypeClaudeError:
+		upstream := apiErr.ToOpenAIError()
+		return upstreamBalanceCode(string(apiErr.GetErrorCode())) || upstreamBalanceCode(upstream.Type) || IsUpstreamBalanceMessage(upstream.Message)
+	default:
+		return false
+	}
+}
+
+func PublicUpstreamBalanceError(c *gin.Context, apiErr *types.NewAPIError) *types.NewAPIError {
+	if !IsUpstreamBalanceError(apiErr) {
+		return nil
+	}
+	return types.WithOpenAIError(types.OpenAIError{
+		Type: "server_error", Code: "server_error", Message: i18n.T(c, i18n.MsgRelayChannelUnavailable),
+	}, http.StatusServiceUnavailable)
 }
 
 func ResetStatusCode(newApiErr *types.NewAPIError, statusCodeMappingStr string) {

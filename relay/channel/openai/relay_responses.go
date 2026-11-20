@@ -37,8 +37,8 @@ func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	if err != nil {
 		return nil, types.NewOpenAIError(err, types.ErrorCodeBadResponseBody, http.StatusInternalServerError)
 	}
-	if oaiError := responsesResponse.GetOpenAIError(); oaiError != nil && oaiError.Type != "" {
-		return nil, types.WithOpenAIError(*oaiError, resp.StatusCode)
+	if apiErr := openaiEmbeddedError(c, responsesResponse.GetOpenAIError(), resp.StatusCode); apiErr != nil {
+		return nil, apiErr
 	}
 
 	info.ObserveResponseModel(responsesResponse.Model)
@@ -83,7 +83,7 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 
 	accumulator := service.NewResponsesUsageAccumulator(info)
 	var streamError *types.NewAPIError
-	accepted := false
+	var accepted, balanceFailure bool
 
 	helper.StreamScannerHandler(c, resp, info, func(data string, sr *helper.StreamResult) {
 
@@ -106,6 +106,11 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 		noRetry := accepted || c.Writer.Written() || info.StreamLifecycle.ClientError() != nil
 		common.SetContextKey(c, constant.ContextKeyResponseStreamNoRetry, noRetry)
 		if apiErr != nil {
+			if !balanceFailure && service.IsUpstreamBalanceError(apiErr) {
+				balanceFailure = true
+				streamError = apiErr
+				common.SetContextKey(c, constant.ContextKeyResponseStreamErrorForwarded, false)
+			}
 			if streamError == nil {
 				streamError = apiErr
 			}
@@ -117,13 +122,15 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 				return
 			}
 		}
-		written := c.Writer.Size()
-		if err := helper.ResponseChunkData(c, streamResponse, data); err != nil {
-			sr.Stop(err)
-			return
-		}
-		if apiErr != nil && c.Writer.Size() > written && info.StreamLifecycle.ClientError() == nil {
-			common.SetContextKey(c, constant.ContextKeyResponseStreamErrorForwarded, true)
+		if !balanceFailure {
+			written := c.Writer.Size()
+			if err := helper.ResponseChunkData(c, streamResponse, data); err != nil {
+				sr.Stop(err)
+				return
+			}
+			if apiErr != nil && c.Writer.Size() > written && info.StreamLifecycle.ClientError() == nil {
+				common.SetContextKey(c, constant.ContextKeyResponseStreamErrorForwarded, true)
+			}
 		}
 		// Responses ends at its protocol terminal; providers may keep the HTTP
 		// connection open indefinitely after sending the final usage.
@@ -135,6 +142,9 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 
 	common.SetContextKey(c, constant.ContextKeyResponseStreamStatus, info.StreamStatus)
 	info.StreamStatus.RequireTerminal()
+	if balanceFailure {
+		info.StreamStatus.MarkFailed(string(streamError.GetErrorCode()), streamError.ToOpenAIError().Type, streamError.StatusCode)
+	}
 	if streamError != nil && common.GetContextKeyBool(c, constant.ContextKeyResponseStreamNoRetry) {
 		// A prefix, heartbeat or error frame already committed this attempt.
 		// Preserve its accounting facts, but never replay the request.
@@ -143,9 +153,26 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	return accumulator.Finish(), streamError
 }
 
+func openaiEmbeddedError(c *gin.Context, upstreamError *types.OpenAIError, status int) *types.NewAPIError {
+	if upstreamError == nil {
+		return nil
+	}
+	apiErr := types.WithOpenAIError(*upstreamError, status)
+	balanceFailure := service.IsUpstreamBalanceError(apiErr)
+	if upstreamError.Type == "" && !balanceFailure {
+		return nil
+	}
+	if balanceFailure && c.Writer.Written() {
+		common.SetContextKey(c, constant.ContextKeyResponseStreamNoRetry, true)
+		types.ErrOptionWithSkipRetry()(apiErr)
+	}
+	return apiErr
+}
+
 func openaiStreamError(data string) *types.NewAPIError {
 	eventType := strings.ToLower(strings.TrimSpace(ojson.Get(data, "type").Str))
-	errorPayload := strings.TrimSpace(ojson.Get(data, "error").Raw)
+	rawError := ojson.Get(data, "error")
+	errorPayload := strings.TrimSpace(rawError.Raw)
 	hasError := errorPayload != "" && errorPayload != "null" && errorPayload != "{}" && errorPayload != `""`
 	if eventType != "error" && eventType != "upstream_error" && eventType != "response.error" &&
 		eventType != "response.failed" && ojson.Get(data, "response.status").Str != "failed" && !hasError {
@@ -157,9 +184,15 @@ func openaiStreamError(data string) *types.NewAPIError {
 	var event dto.ResponsesStreamResponse
 	_ = common.UnmarshalJsonStr(data, &event)
 	upstreamError := types.OpenAIError{Code: event.Code, Message: event.Message, Param: event.Param}
-	if raw := ojson.Get(data, "error"); raw.Raw != "" {
+	if rawError.Type == ojson.String {
+		candidate := upstreamError
+		candidate.Message = rawError.Str
+		if service.IsUpstreamBalanceError(types.WithOpenAIError(candidate, http.StatusBadGateway)) {
+			upstreamError = candidate
+		}
+	} else if rawError.Raw != "" {
 		// Older Responses-compatible providers nest their error object.
-		_ = common.UnmarshalJsonStr(raw.Raw, &upstreamError)
+		_ = common.UnmarshalJsonStr(rawError.Raw, &upstreamError)
 	}
 	if event.Response != nil {
 		if responseError := event.Response.GetOpenAIError(); responseError != nil {
