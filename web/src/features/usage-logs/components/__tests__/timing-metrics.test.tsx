@@ -25,7 +25,10 @@ import {
 import { render, screen } from '@testing-library/react'
 import { expect, it } from 'vitest'
 
+import { STATUS_QUERY_KEY } from '@/lib/status-query'
+
 import { usageLogSchema, type UsageLog } from '../../data/schema'
+import type { LogOtherData } from '../../types'
 import { useCommonLogsColumns } from '../columns/common-logs-columns'
 import { UsageLogsMobileList } from '../usage-logs-mobile-card'
 import { UsageLogsProvider } from '../usage-logs-provider'
@@ -54,6 +57,12 @@ function renderTiming(options: {
   mobile?: boolean
   isStream?: boolean
   frtMs?: number
+  durationMs?: number
+  completionTokens?: number
+  useTime?: number
+  requestPath?: string
+  other?: LogOtherData
+  excludeFirstResponse?: boolean
   type?: number
   nativeCompactionV2?: boolean
 }) {
@@ -63,20 +72,25 @@ function renderTiming(options: {
     created_at: 1,
     type: options.type ?? 2,
     content: '',
-    use_time: 10,
-    completion_tokens: 200,
+    use_time: options.useTime ?? 10,
+    completion_tokens: options.completionTokens ?? 200,
     is_stream: options.isStream ?? true,
     other: JSON.stringify({
+      ...options.other,
       frt: options.frtMs,
+      duration_ms: options.durationMs,
+      request_path: options.requestPath,
       native_compaction_v2: options.nativeCompactionV2,
     }),
   })
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+  client.setQueryData(STATUS_QUERY_KEY, {
+    log_tps_exclude_first_response: options.excludeFirstResponse,
+  })
   return render(
-    <QueryClientProvider
-      client={
-        new QueryClient({ defaultOptions: { queries: { retry: false } } })
-      }
-    >
+    <QueryClientProvider client={client}>
       <UsageLogsProvider>
         <TimingFixture log={log} mobile={options.mobile ?? false} />
       </UsageLogsProvider>
@@ -85,11 +99,22 @@ function renderTiming(options: {
 }
 
 it.each([false, true])(
-  'excludes first response time from displayed TPS and its status color (mobile=%s)',
+  'includes the first response wait in TPS and its color by default (mobile=%s)',
   (mobile) => {
     renderTiming({ mobile, frtMs: 6000 })
     expect(screen.getByText('First response')).toBeVisible()
-    expect(screen.getByText('50 t/s')).toBeVisible()
+    expect(screen.getByText('20.0 t/s')).toBeVisible()
+    expect(screen.getByText('Duration').nextElementSibling).toHaveClass(
+      'text-warning'
+    )
+  }
+)
+
+it.each([false, true])(
+  'excludes first response time from displayed TPS and its color when enabled (mobile=%s)',
+  (mobile) => {
+    renderTiming({ mobile, frtMs: 6000, excludeFirstResponse: true })
+    expect(screen.getByText('50.0 t/s')).toBeVisible()
     expect(screen.getByText('Duration').nextElementSibling).toHaveClass(
       'text-success'
     )
@@ -99,7 +124,7 @@ it.each([false, true])(
 it.each([10000, 11000])(
   'shows no TPS when first response time %s ms leaves no generation time',
   (frtMs) => {
-    renderTiming({ frtMs })
+    renderTiming({ frtMs, excludeFirstResponse: true })
     expect(screen.getByText('—')).toBeVisible()
     expect(screen.queryByText(/t\/s$/)).not.toBeInTheDocument()
   }
@@ -108,15 +133,73 @@ it.each([10000, 11000])(
 it.each([undefined, -1000])(
   'uses total-duration average when the first-response measurement is absent (%s)',
   (frtMs) => {
-    renderTiming({ frtMs })
-    expect(screen.getByText('20 t/s')).toBeVisible()
+    renderTiming({ frtMs, excludeFirstResponse: true })
+    expect(screen.getByText('20.0 t/s')).toBeVisible()
   }
 )
 
-it('uses total-duration average for non-streaming logs even if they contain frt', () => {
-  renderTiming({ isStream: false, frtMs: 6000 })
-  expect(screen.getByText('20 t/s')).toBeVisible()
-  expect(screen.queryByText('First response')).not.toBeInTheDocument()
+it.each([false, true])(
+  'uses total-duration average for non-streaming logs even if they contain frt (mobile=%s)',
+  (mobile) => {
+    renderTiming({
+      mobile,
+      isStream: false,
+      frtMs: 6000,
+      excludeFirstResponse: true,
+    })
+    expect(screen.getByText('20.0 t/s')).toBeVisible()
+    expect(screen.queryByText('First response')).not.toBeInTheDocument()
+  }
+)
+
+it.each([
+  { excludeFirstResponse: false, expected: '10.0 t/s' },
+  { excludeFirstResponse: true, expected: '20.0 t/s' },
+])(
+  'uses measured milliseconds for subsecond requests ($expected)',
+  (options) => {
+    renderTiming({
+      ...options,
+      useTime: 0,
+      durationMs: 400,
+      frtMs: 200,
+      completionTokens: 4,
+    })
+    expect(screen.getByText(options.expected)).toBeVisible()
+    expect(screen.getByText('0.4s')).toBeVisible()
+  }
+)
+
+it.each([
+  { completionTokens: 1 },
+  { durationMs: 0 },
+  { requestPath: '/v1/images/generations' },
+  { requestPath: '/v1/videos' },
+  { other: { billing_tokens: { img_o: 100 } } },
+  { other: { usage_facts: { video_tokens: 100 } } },
+  {
+    other: {
+      tool_surcharges: [{ name: 'image_generation', count: 1, price: 0.04 }],
+    },
+  },
+])(
+  'does not show text TPS for insufficient or media samples (%j)',
+  (options) => {
+    renderTiming(options)
+    expect(screen.getByText('—')).toBeVisible()
+    expect(screen.queryByText(/t\/s$/)).not.toBeInTheDocument()
+  }
+)
+
+it('keeps text TPS when the image is input rather than output', () => {
+  renderTiming({
+    other: {
+      image: true,
+      image_output: 100,
+      billing_tokens: { img: 100, img_o: 0 },
+    },
+  })
+  expect(screen.getByText('20.0 t/s')).toBeVisible()
 })
 
 it.each([

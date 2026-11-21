@@ -1,8 +1,6 @@
 package service
 
 import (
-	"time"
-
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/logger"
@@ -141,10 +139,6 @@ func RecordRelayErrorLog(c *gin.Context, channelId int, err *types.NewAPIError, 
 	appendRequestPluginRecord(relayInfo, other)
 	AppendResponseModelLogInfo(relayInfo, other)
 	AppendTaskPluginContextAuditInfo(c, other)
-	startTime := common.GetContextKeyTime(c, constant.ContextKeyRequestStartTime)
-	if startTime.IsZero() {
-		startTime = time.Now()
-	}
-	useTimeSeconds := int(time.Since(startTime).Seconds())
+	useTimeSeconds := int(appendRelayRequestDuration(c, other).Seconds())
 	model.RecordErrorLog(c, userId, channelId, modelName, tokenName, err.MaskSensitiveErrorWithStatusCode(common.UpstreamAddresses(c)...), tokenId, useTimeSeconds, common.GetContextKeyBool(c, constant.ContextKeyIsStream), userGroup, other)
 }

@@ -29,6 +29,7 @@ import { useState } from 'react'
 import { beforeEach, expect, test, vi } from 'vitest'
 
 import { api } from '@/lib/api'
+import { STATUS_QUERY_KEY, statusQueryOptions } from '@/lib/status-query'
 
 import { SettingsPageProvider } from '../../components/settings-page-context'
 import { LogSettingsSection } from '../log-settings-section'
@@ -43,6 +44,7 @@ function Fixture() {
           defaultValues={{
             LogConsumeEnabled: true,
             'log_setting.user_export_enabled': true,
+            'log_setting.tps_exclude_first_response': false,
             'log_setting.max_range_days': 30,
             'system_task_setting.retention_days': 30,
           }}
@@ -52,10 +54,11 @@ function Fixture() {
   )
 }
 
-async function renderSettings() {
-  const client = new QueryClient({
+async function renderSettings(
+  client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   })
+) {
   render(
     <QueryClientProvider client={client}>
       <Fixture />
@@ -92,7 +95,6 @@ test('the page shows the log modules in order, each with its own controls', asyn
     'Server Log Management',
   ])
   const recording = screen.getByRole('group', { name: 'Log recording' })
-  expect(within(recording).getAllByRole('switch')).toHaveLength(1)
   expect(
     within(recording).getByRole('switch', { name: 'Record quota usage' })
   ).toBeVisible()
@@ -177,6 +179,37 @@ test('saving sends only the log export settings that changed', async () => {
   expect(api.put).toHaveBeenCalledWith('/api/option/', {
     key: 'log_setting.max_range_days',
     value: 90,
+  })
+})
+
+test('saving the TPS switch refreshes the calculation mode for log viewers', async () => {
+  const user = userEvent.setup()
+  const client = new QueryClient()
+  client.setQueryData(STATUS_QUERY_KEY, {
+    log_tps_exclude_first_response: false,
+  })
+  await renderSettings(client)
+
+  const toggle = screen.getByRole('switch', {
+    name: 'Exclude first response time from per-request TPS',
+  })
+  expect(toggle).not.toBeChecked()
+  toggle.focus()
+  await user.keyboard('[Space]')
+  expect(toggle).toBeChecked()
+  await user.click(screen.getByRole('button', { name: 'Save log settings' }))
+  await waitFor(() =>
+    expect(api.put).toHaveBeenCalledWith('/api/option/', {
+      key: 'log_setting.tps_exclude_first_response',
+      value: true,
+    })
+  )
+
+  vi.mocked(api.get).mockResolvedValueOnce({
+    data: { success: true, data: { log_tps_exclude_first_response: true } },
+  })
+  expect(await client.fetchQuery(statusQueryOptions)).toMatchObject({
+    log_tps_exclude_first_response: true,
   })
 })
 

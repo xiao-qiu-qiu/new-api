@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/synctest"
@@ -261,6 +262,58 @@ func TestLogExportRules(t *testing.T) {
 		release()
 		assert.Len(t, callLogHandler(t, ExportUserLogs, 1, common.RoleCommonUser, recent), 3)
 	})
+}
+
+func TestLogTPSOptionPersistsAndAppearsInStatus(t *testing.T) {
+	const optionKey = "log_setting.tps_exclude_first_response"
+	db, _ := newAuditTestDatabase(t, "sqlite", "")
+	useLogExportDatabases(t, db, db, common.DatabaseTypeSQLite, common.DatabaseTypeSQLite)
+	require.NoError(t, db.AutoMigrate(&model.Option{}, &model.SystemTask{}, &model.User{}, &model.AuditLog{}))
+	operator := model.User{Id: 1, Username: "admin", Role: common.RoleRootUser}
+	require.NoError(t, db.Create(&operator).Error)
+	previousOptions := common.OptionMap
+	logSetting := operation_setting.GetLogSetting()
+	previousSetting := *logSetting
+	common.OptionMap = map[string]string{}
+	t.Cleanup(func() {
+		common.OptionMap = previousOptions
+		*logSetting = previousSetting
+	})
+
+	engine := gin.New()
+	engine.GET("/api/status", GetStatus)
+	engine.PUT("/api/option/", func(ctx *gin.Context) {
+		ctx.Set("id", operator.Id)
+		ctx.Set("role", operator.Role)
+	}, UpdateOption)
+	readStatus := func(t *testing.T) any {
+		t.Helper()
+		response := httptest.NewRecorder()
+		engine.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/status", nil))
+		require.Equal(t, http.StatusOK, response.Code)
+		var payload struct {
+			Success bool           `json:"success"`
+			Data    map[string]any `json:"data"`
+		}
+		require.NoError(t, common.Unmarshal(response.Body.Bytes(), &payload))
+		require.True(t, payload.Success)
+		return payload.Data["log_tps_exclude_first_response"]
+	}
+	require.Equal(t, false, readStatus(t))
+
+	for _, enabled := range []bool{true, false} {
+		body, err := common.Marshal(OptionUpdateRequest{Key: optionKey, Value: enabled})
+		require.NoError(t, err)
+		response := httptest.NewRecorder()
+		engine.ServeHTTP(response, httptest.NewRequest(http.MethodPut, "/api/option/", strings.NewReader(string(body))))
+		require.Equal(t, http.StatusOK, response.Code)
+		assert.JSONEq(t, `{"success":true,"message":""}`, response.Body.String())
+
+		var saved model.Option
+		require.NoError(t, db.Where(&model.Option{Key: optionKey}).Take(&saved).Error)
+		assert.Equal(t, strconv.FormatBool(enabled), saved.Value)
+		assert.Equal(t, enabled, readStatus(t))
+	}
 }
 
 func TestAcquireLogExportLock(t *testing.T) {

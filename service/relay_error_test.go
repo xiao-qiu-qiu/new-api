@@ -617,6 +617,70 @@ func TestRequestPolicyEventsReachLogAdminInfo(t *testing.T) {
 	assert.NotContains(t, other.Snapshot()["admin_info"], "request_policy", "requests without decisions do not carry an empty record")
 }
 
+func TestRelayLogsIncludeMeasuredRequestDuration(t *testing.T) {
+	truncate(t)
+	const userID, channelID = 67, 67
+	seedUser(t, userID, 10_000)
+	seedChannel(t, channelID)
+	previousError, previousConsume, previousExport := constant.ErrorLogEnabled, common.LogConsumeEnabled, common.DataExportEnabled
+	constant.ErrorLogEnabled, common.LogConsumeEnabled, common.DataExportEnabled = true, true, false
+	t.Cleanup(func() {
+		constant.ErrorLogEnabled, common.LogConsumeEnabled, common.DataExportEnabled = previousError, previousConsume, previousExport
+	})
+	apiErr := types.NewOpenAIError(errors.New("upstream failed"), types.ErrorCodeBadResponseStatusCode, http.StatusBadGateway)
+
+	for _, testCase := range []struct {
+		name    string
+		elapsed time.Duration
+		logType int
+	}{
+		{name: "short successful request", elapsed: 375 * time.Millisecond, logType: model.LogTypeConsume},
+		{name: "short failed request", elapsed: 375 * time.Millisecond, logType: model.LogTypeError},
+		{name: "successful request without recorded start", logType: model.LogTypeConsume},
+		{name: "failed request without recorded start", logType: model.LogTypeError},
+		{name: "future start", elapsed: -time.Minute, logType: model.LogTypeError},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			ctx.Set("id", userID)
+			ctx.Set("channel_id", channelID)
+			ctx.Set("original_model", "test-model")
+			started := time.Now().Add(-testCase.elapsed)
+			if testCase.elapsed != 0 {
+				common.SetContextKey(ctx, constant.ContextKeyRequestStartTime, started)
+			}
+			info := relaycommon.GenRelayInfoOpenAI(ctx, nil)
+			info.InitChannelMeta(ctx)
+			before := time.Since(started).Milliseconds()
+			if testCase.logType == model.LogTypeConsume {
+				PostTextConsumeQuota(ctx, info, &kitdto.Usage{PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3}, nil)
+			} else {
+				RecordRelayErrorLog(ctx, channelID, apiErr, nil)
+			}
+			after := time.Since(started).Milliseconds()
+
+			logs, _, err := model.GetUserLogs(userID, model.LogFilter{Type: testCase.logType}, 0, 1)
+			require.NoError(t, err)
+			require.Len(t, logs, 1)
+			var other struct {
+				DurationMS *int64 `json:"duration_ms"`
+			}
+			require.NoError(t, common.UnmarshalJsonStr(logs[0].Other, &other))
+			if testCase.elapsed <= 0 {
+				assert.Nil(t, other.DurationMS)
+				return
+			}
+			require.NotNil(t, other.DurationMS)
+			assert.GreaterOrEqual(t, *other.DurationMS, before)
+			assert.LessOrEqual(t, *other.DurationMS, after)
+			if testCase.logType == model.LogTypeError {
+				assert.Equal(t, int(*other.DurationMS/1000), logs[0].UseTime)
+			}
+		})
+	}
+}
+
 func TestNativeCompactionV2RequestMetadata(t *testing.T) {
 	previousDB, previousLogDB := model.DB, model.LOG_DB
 	previousMainType, previousLogType := common.MainDatabaseType(), common.LogDatabaseType()

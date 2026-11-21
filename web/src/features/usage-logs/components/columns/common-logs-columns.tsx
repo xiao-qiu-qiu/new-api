@@ -48,6 +48,7 @@ import {
 import { pluginUsageSchema } from '@/features/pricing/lib/plugin-pricing'
 import { taskUsageUnitLabel } from '@/features/pricing/lib/task-price-display'
 import type { BillingUsageSchema } from '@/features/pricing/types'
+import { useStatus } from '@/hooks/use-status'
 import {
   ADMIN_PERMISSION_ACTIONS,
   ADMIN_PERMISSION_RESOURCES,
@@ -68,7 +69,7 @@ import {
   formatModelName,
   decodeBillingExprB64,
   getTieredBillingSummary,
-  getTokensPerSecond,
+  getLogTiming,
   hasAnyCacheTokens,
   parseLogOther,
   isViolationFeeLog,
@@ -368,6 +369,8 @@ export function useCommonLogsColumns(
 ): ColumnDef<UsageLog>[] {
   const { t } = useTranslation()
   const currency = useSystemConfigStore((state) => state.config.currency)
+  const { status } = useStatus()
+  const excludeFirstResponse = status?.log_tps_exclude_first_response === true
   return useMemo(() => {
     const columns: ColumnDef<UsageLog>[] = [
       {
@@ -748,12 +751,11 @@ export function useCommonLogsColumns(
           const log = row.original
           if (!isTimingLogType(log.type)) return null
 
-          const useTime = row.getValue('use_time') as number
           const other = parseLogOther(log.other)
-          const tokensPerSecond = getTokensPerSecond(
-            useTime,
-            log.completion_tokens,
-            log.is_stream ? other?.frt : undefined
+          const { tokensPerSecond } = getLogTiming(
+            log,
+            other,
+            excludeFirstResponse
           )
 
           return (
@@ -853,13 +855,11 @@ export function useCommonLogsColumns(
           const log = row.original
           if (!isTimingLogType(log.type)) return null
 
-          const useTime = row.getValue('use_time') as number
           const other = parseLogOther(log.other)
 
           return (
             <TimingMetricsCell
-              useTimeSec={useTime}
-              completionTokens={log.completion_tokens}
+              timing={getLogTiming(log, other, excludeFirstResponse)}
               frtMs={other?.frt}
               isStream={log.is_stream}
             />
@@ -942,6 +942,7 @@ export function useCommonLogsColumns(
               </button>
               <DetailsDialog
                 log={log}
+                excludeFirstResponse={excludeFirstResponse}
                 isAdmin={isAdmin}
                 isRoot={isRoot}
                 open={dialogOpen}
@@ -970,5 +971,5 @@ export function useCommonLogsColumns(
     }))
     // Log formatters read currency settings from the store.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [t, isAdmin, isRoot, showBillingSource, currency])
+  }, [t, isAdmin, isRoot, showBillingSource, currency, excludeFirstResponse])
 }

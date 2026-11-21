@@ -46,6 +46,7 @@ func GetStatus(c *gin.Context) {
 	defer common.OptionMapRWMutex.RUnlock()
 
 	legalSetting := system_setting.GetLegalSettings()
+	logSetting := operation_setting.GetLogSetting()
 
 	data := gin.H{
 		"channel_maintenance":         service.ChannelMaintenanceCapabilities(),
@@ -125,10 +126,12 @@ func GetStatus(c *gin.Context) {
 		"user_agreement_enabled":      legalSetting.UserAgreement != "",
 		"privacy_policy_enabled":      legalSetting.PrivacyPolicy != "",
 		"checkin_enabled":             operation_setting.GetCheckinSetting().Enabled,
-		"log_export_enabled":          operation_setting.GetLogSetting().UserExportEnabled,
-		"log_max_range_days":          operation_setting.GetLogSetting().MaxRangeDays,
 		"quota_remind_enabled":        common.QuotaRemindEnabled,
 		"quota_remind_threshold":      common.QuotaRemindThreshold,
+
+		"log_export_enabled":             logSetting.UserExportEnabled,
+		"log_max_range_days":             logSetting.MaxRangeDays,
+		"log_tps_exclude_first_response": logSetting.TPSExcludeFirstResponse,
 	}
 
 	// 根据启用状态注入可选内容

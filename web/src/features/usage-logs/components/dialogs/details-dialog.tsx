@@ -79,7 +79,7 @@ import {
   hasAnyCacheTokens,
   isViolationFeeLog,
   getFirstResponseTimeColor,
-  getResponseTimeColor,
+  getLogTiming,
   getReasoningEffortVariant,
   logTokenName,
   renderAuditContent,
@@ -518,6 +518,7 @@ function TokenBreakdown(props: { log: UsageLog; other: LogOtherData }) {
 }
 
 interface DetailsDialogProps {
+  excludeFirstResponse?: boolean
   log: UsageLog
   isAdmin: boolean
   isRoot: boolean
@@ -529,6 +530,11 @@ export function DetailsDialog(props: DetailsDialogProps) {
   const { t } = useTranslation()
   const { copiedText, copyToClipboard } = useCopyToClipboard({ notify: false })
   const other = parseLogOther(props.log.other)
+  const timing = getLogTiming(
+    props.log,
+    other,
+    props.excludeFirstResponse === true
+  )
   const typeConfig = getLogTypeConfig(props.log.type)
 
   const isViolation = isViolationFeeLog(other)
@@ -771,23 +777,17 @@ export function DetailsDialog(props: DetailsDialogProps) {
             />
           )}
 
-          {showTiming && props.log.use_time > 0 && (
+          {showTiming && timing.durationSeconds > 0 && (
             <DetailRow
               label={t('Response Time')}
               value={
                 <span
                   className={cn(
                     'font-medium',
-                    timingTextColorClass(
-                      getResponseTimeColor(
-                        props.log.use_time,
-                        props.log.completion_tokens,
-                        props.log.is_stream ? other?.frt : undefined
-                      )
-                    )
+                    timingTextColorClass(timing.durationColor)
                   )}
                 >
-                  {formatUseTime(props.log.use_time)}
+                  {formatUseTime(timing.durationSeconds)}
                   {props.log.is_stream &&
                     other?.frt != null &&
                     other.frt > 0 && (

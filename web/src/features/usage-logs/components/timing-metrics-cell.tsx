@@ -31,10 +31,11 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
+import { toIntlLocale } from '@/i18n/languages'
 import { formatUseTime } from '@/lib/format'
 import { cn } from '@/lib/utils'
 
-import { getFirstResponseTimeColor, getResponseTimeColor } from '../lib/format'
+import { getFirstResponseTimeColor, type getLogTiming } from '../lib/format'
 import type { LogOtherData } from '../types'
 
 /**
@@ -52,8 +53,7 @@ const barColorMap: Record<StatusVariant, string> = {
 }
 
 interface TimingMetricsCellProps {
-  useTimeSec: number
-  completionTokens: number
+  timing: ReturnType<typeof getLogTiming>
   frtMs?: number
   isStream: boolean
   className?: string
@@ -77,14 +77,10 @@ export function TimingMetricsCell(props: TimingMetricsCellProps) {
     firstTokenSeconds == null
       ? 'neutral'
       : getFirstResponseTimeColor(firstTokenSeconds)
-  const totalTimeVariant = getResponseTimeColor(
-    props.useTimeSec,
-    props.completionTokens,
-    props.isStream ? props.frtMs : undefined
-  )
+  const totalTimeVariant = props.timing.durationColor
   const firstTokenLabel =
     firstTokenSeconds == null ? t('N/A') : formatUseTime(firstTokenSeconds)
-  const totalTimeLabel = formatUseTime(props.useTimeSec)
+  const totalTimeLabel = formatUseTime(props.timing.durationSeconds)
 
   const labels = (
     <div
@@ -172,13 +168,15 @@ interface StreamTpsCellProps {
 }
 
 export function StreamTpsCell(props: StreamTpsCellProps) {
-  const { t } = useTranslation()
+  const { t, i18n } = useTranslation()
   const showStreamError =
     props.isStream && props.streamStatus && props.streamStatus.status !== 'ok'
-  const tpsLabel =
-    props.tokensPerSecond != null
-      ? `${Math.round(props.tokensPerSecond)} t/s`
-      : '—'
+  let tpsLabel = '—'
+  if (props.tokensPerSecond != null) {
+    const locale = toIntlLocale(i18n.resolvedLanguage || i18n.language)
+    const digits = props.tokensPerSecond < 100 ? 1 : 0
+    tpsLabel = `${props.tokensPerSecond.toLocaleString(locale, { minimumFractionDigits: digits, maximumFractionDigits: digits })} t/s`
+  }
   let streamLabel = props.isStream ? t('Stream') : t('Non-stream')
   if (props.isTask) {
     streamLabel = props.isSyncTask ? t('Sync') : t('Async')
@@ -233,8 +231,7 @@ export function StreamTpsCell(props: StreamTpsCellProps) {
           />
         )}
       </div>
-      {(!props.compact ||
-        (props.isStream && props.tokensPerSecond != null)) && (
+      {(!props.compact || props.tokensPerSecond != null) && (
         <span className='text-muted-foreground/60 px-0.5 tabular-nums'>
           {tpsLabel}
         </span>

@@ -222,44 +222,49 @@ export function getThroughputColor(
   return 'danger'
 }
 
-/**
- * Exclude measured first-response latency from the token generation duration.
- * Logs without that measurement retain their total-duration average.
- */
-export function getTokensPerSecond(
-  seconds: number,
-  completionTokens: number,
-  frtMs?: number
-): number | null {
+export function getLogTiming(
+  log: Pick<UsageLog, 'use_time' | 'is_stream' | 'completion_tokens'>,
+  other: LogOtherData | null,
+  excludeFirstResponse: boolean
+) {
+  const durationMs = other?.duration_ms ?? log.use_time * 1000
+  const durationSeconds = durationMs / 1000
+  let windowMs = durationMs
   if (
-    !Number.isFinite(seconds) ||
-    seconds <= 0 ||
-    !Number.isFinite(completionTokens) ||
-    completionTokens <= 0
+    excludeFirstResponse &&
+    log.is_stream &&
+    isPositiveFiniteNumber(other?.frt)
   ) {
-    return null
+    windowMs -= other.frt
   }
-
-  let generationSeconds = seconds
-  if (frtMs != null && Number.isFinite(frtMs) && frtMs >= 0) {
-    generationSeconds -= frtMs / 1000
-  }
-  if (generationSeconds <= 0) return null
-  return completionTokens / generationSeconds
-}
-
-/**
- * Get response color using throughput only when enough output tokens exist.
- */
-export function getResponseTimeColor(
-  seconds: number,
-  completionTokens: number,
-  frtMs?: number
-): 'success' | 'warning' | 'danger' {
-  if (completionTokens < 100) return getTimeColor(seconds)
-  const tokensPerSecond = getTokensPerSecond(seconds, completionTokens, frtMs)
-  if (tokensPerSecond == null) return getTimeColor(seconds)
-  return getThroughputColor(tokensPerSecond)
+  const hasMediaOutput =
+    isPositiveFiniteNumber(other?.image_count) ||
+    isPositiveFiniteNumber(other?.billing_tokens?.img_o) ||
+    isPositiveFiniteNumber(other?.usage_facts?.video_count) ||
+    isPositiveFiniteNumber(other?.usage_facts?.video_tokens) ||
+    other?.image_generation_call === true ||
+    (Array.isArray(other?.tool_surcharges) &&
+      other.tool_surcharges.some(
+        (item) =>
+          item?.name === 'image_generation' &&
+          isPositiveFiniteNumber(item.count)
+      )) ||
+    /\/(?:images\/(?:generations|edits|variations)|videos)(?:[/?]|$)/.test(
+      other?.request_path ?? ''
+    )
+  const tokensPerSecond =
+    isPositiveFiniteNumber(windowMs) &&
+    Number.isFinite(log.completion_tokens) &&
+    log.completion_tokens >= 2 &&
+    !hasMediaOutput &&
+    !(other?.is_task && !other.task_sync)
+      ? log.completion_tokens / (windowMs / 1000)
+      : null
+  const durationColor =
+    tokensPerSecond != null && log.completion_tokens >= 100
+      ? getThroughputColor(tokensPerSecond)
+      : getTimeColor(durationSeconds)
+  return { durationSeconds, tokensPerSecond, durationColor }
 }
 
 /**

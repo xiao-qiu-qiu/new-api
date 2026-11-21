@@ -28,6 +28,7 @@ import {
   EmptyTitle,
 } from '@/components/ui/empty'
 import { Skeleton } from '@/components/ui/skeleton'
+import { useStatus } from '@/hooks/use-status'
 import { cn } from '@/lib/utils'
 
 import { LOG_TYPE_ENUM } from '../constants'
@@ -248,6 +249,7 @@ export function UsageLogsMobileList<TData>({
   const { t } = useTranslation()
 
   const resolvedEmptyTitle = emptyTitle ?? t('No Logs Found')
+  const { status } = useStatus()
   const resolvedEmptyDescription =
     emptyDescription ??
     t('No usage logs available. Logs will appear here once API calls are made.')
@@ -314,6 +316,9 @@ export function UsageLogsMobileList<TData>({
             {logCategory === 'common' && !activeRequest && (
               <CommonLogMobileCard
                 log={row.original as UsageLog}
+                excludeFirstResponse={
+                  status?.log_tps_exclude_first_response === true
+                }
                 cells={cells}
               />
             )}

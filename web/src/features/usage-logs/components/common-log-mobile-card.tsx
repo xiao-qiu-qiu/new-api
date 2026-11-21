@@ -41,7 +41,7 @@ import { useAuthStore } from '@/stores/auth-store'
 import type { UsageLog } from '../data/schema'
 import {
   formatModelName,
-  getTokensPerSecond,
+  getLogTiming,
   logTokenName,
   parseLogOther,
 } from '../lib/format'
@@ -77,6 +77,7 @@ type LogField = {
 /** Mobile summaries use tappable fields; desktop tooltip cells cannot reveal full text on touch. */
 export function CommonLogMobileCard<TData>(props: {
   log: UsageLog
+  excludeFirstResponse: boolean
   cells: Map<string, Cell<TData, unknown>>
 }) {
   const { t } = useTranslation()
@@ -90,6 +91,7 @@ export function CommonLogMobileCard<TData>(props: {
   const [selectedField, setSelectedField] = useState<FieldName | null>(null)
   const log = props.log
   const other = parseLogOther(log.other)
+  const logTiming = getLogTiming(log, other, props.excludeFirstResponse)
   const affinity = other?.admin_info?.channel_affinity
   const displayable = isDisplayableLogType(log.type)
   const timing = isTimingLogType(log.type)
@@ -228,18 +230,13 @@ export function CommonLogMobileCard<TData>(props: {
                   nativeCompactionV2={other?.native_compaction_v2 === true}
                   isTask={other?.is_task === true}
                   isSyncTask={other?.task_sync === true}
-                  tokensPerSecond={getTokensPerSecond(
-                    log.use_time,
-                    log.completion_tokens,
-                    log.is_stream ? other?.frt : undefined
-                  )}
+                  tokensPerSecond={logTiming.tokensPerSecond}
                   streamStatus={other?.stream_status}
                 />
               )}
               {props.cells.has('use_time') && (
                 <TimingMetricsCell
-                  useTimeSec={log.use_time}
-                  completionTokens={log.completion_tokens}
+                  timing={logTiming}
                   frtMs={other?.frt}
                   isStream={log.is_stream}
                   indicator='dot'

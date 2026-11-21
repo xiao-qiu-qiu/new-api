@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -65,6 +66,19 @@ func appendRequestPath(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, other
 	}
 }
 
+func appendRelayRequestDuration(ctx *gin.Context, other *model.LogOther) time.Duration {
+	started := common.GetContextKeyTime(ctx, constant.ContextKeyRequestStartTime)
+	if started.IsZero() {
+		return 0
+	}
+	elapsed := time.Since(started)
+	if elapsed < 0 {
+		return 0
+	}
+	other.SetPublic("duration_ms", elapsed.Milliseconds())
+	return elapsed
+}
+
 // AppendRelayLogAdminInfo records relay routing and conversion diagnostics in
 // the admin-only scope shared by successful and failed request logs.
 func AppendRelayLogAdminInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, other *model.LogOther) {
@@ -104,6 +118,7 @@ func GenerateTextOtherInfo(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, m
 	cacheTokens int, cacheRatio float64, modelPrice float64, userGroupRatio float64) *model.LogOther {
 	MarkRequestPolicySuccess(ctx, relayInfo.StreamStatus)
 	other := model.NewLogOther()
+	appendRelayRequestDuration(ctx, other)
 	other.SetPublic("model_ratio", modelRatio)
 	other.SetPublic("group_ratio", groupRatio)
 	other.SetPublic("completion_ratio", completionRatio)

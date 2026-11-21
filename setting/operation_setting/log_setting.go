@@ -9,19 +9,21 @@ import (
 
 const LogMaxRangeDaysOptionKey = "log_setting.max_range_days"
 
-// LogSetting limits how far regular users can reach into usage logs.
+// LogSetting controls access and display for usage logs.
 type LogSetting struct {
 	// UserExportEnabled lets regular users export their own usage logs.
 	// Administrators can always export.
 	UserExportEnabled bool `json:"user_export_enabled"`
 	// MaxRangeDays is the longest time range a user can search in their logs
 	// and dashboard, and the longest range any export can cover.
-	MaxRangeDays int `json:"max_range_days"`
+	MaxRangeDays            int  `json:"max_range_days"`
+	TPSExcludeFirstResponse bool `json:"tps_exclude_first_response"`
 }
 
 var logSetting = LogSetting{
-	UserExportEnabled: true,
-	MaxRangeDays:      365,
+	UserExportEnabled:       true,
+	MaxRangeDays:            365,
+	TPSExcludeFirstResponse: false,
 }
 
 func init() {

@@ -52,6 +52,7 @@ const logSettingsSchema = z.object({
   LogConsumeEnabled: z.boolean(),
   log_setting: z.object({
     user_export_enabled: z.boolean(),
+    tps_exclude_first_response: z.boolean(),
     max_range_days: z.number().int().min(1),
   }),
   system_task_setting: z.object({
@@ -65,6 +66,7 @@ type LogSettingsSectionProps = {
   defaultValues: {
     LogConsumeEnabled: boolean
     'log_setting.user_export_enabled': boolean
+    'log_setting.tps_exclude_first_response': boolean
     'log_setting.max_range_days': number
     'system_task_setting.retention_days': number
   }
@@ -82,6 +84,8 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
       log_setting: {
         user_export_enabled:
           props.defaultValues['log_setting.user_export_enabled'],
+        tps_exclude_first_response:
+          props.defaultValues['log_setting.tps_exclude_first_response'],
         max_range_days: props.defaultValues['log_setting.max_range_days'],
       },
       system_task_setting: {
@@ -103,6 +107,10 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
   const onSubmit = async (values: LogSettingsFormValues) => {
     const changes = [
       ['LogConsumeEnabled', values.LogConsumeEnabled],
+      [
+        'log_setting.tps_exclude_first_response',
+        values.log_setting.tps_exclude_first_response,
+      ],
       [
         'log_setting.user_export_enabled',
         values.log_setting.user_export_enabled,
@@ -156,6 +164,30 @@ export function LogSettingsSection(props: LogSettingsSectionProps) {
                     />
                   </FormControl>
                   <FormMessage />
+                </SettingsSwitchItem>
+              )}
+            />
+            <FormField
+              control={form.control}
+              name='log_setting.tps_exclude_first_response'
+              render={({ field }) => (
+                <SettingsSwitchItem>
+                  <SettingsSwitchContent>
+                    <FormLabel>
+                      {t('Exclude first response time from per-request TPS')}
+                    </FormLabel>
+                    <FormDescription>
+                      {t(
+                        'Off: divide output tokens by total request time. On: subtract the first response time for streaming requests.'
+                      )}
+                    </FormDescription>
+                  </SettingsSwitchContent>
+                  <FormControl>
+                    <Switch
+                      checked={field.value}
+                      onCheckedChange={field.onChange}
+                    />
+                  </FormControl>
                 </SettingsSwitchItem>
               )}
             />
