@@ -242,6 +242,10 @@ func applyOptionsFromDatabaseLocked(options []*Option) {
 	for _, option := range options {
 		persistedKeys[option.Key] = true
 	}
+	if !persistedKeys[operation_setting.DistillationGuardOption] {
+		encoded, _ := common.Marshal(operation_setting.DefaultDistillationGuard())
+		_ = updateOptionMap(operation_setting.DistillationGuardOption, string(encoded))
+	}
 	if !persistedKeys["SpecialPricingRules"] {
 		_ = applyGroupSettingOption("SpecialPricingRules", "[]")
 	}
@@ -287,6 +291,10 @@ func SyncOptions(frequency int) {
 }
 
 func validateOptionValue(key string, value string) error {
+	if key == operation_setting.DistillationGuardOption {
+		_, err := operation_setting.ParseDistillationGuard(value)
+		return err
+	}
 	if key == VideoModelCapabilitiesOptionKey {
 		return errors.New("Use the video model capabilities API to update one model at a time.")
 	}
@@ -339,6 +347,9 @@ func validateOptionValue(key string, value string) error {
 }
 
 func UpdateOption(key string, value string) error {
+	if key == operation_setting.DistillationGuardOption {
+		return UpdateOptionsBulk(map[string]string{key: value})
+	}
 	if IsGroupSettingsOption(key) {
 		return UpdateGroupSettingsOptions(map[string]string{key: value})
 	}
@@ -453,6 +464,13 @@ func updateOptionMap(key string, value string) (err error) {
 	}
 	common.OptionMapRWMutex.Lock()
 	defer common.OptionMapRWMutex.Unlock()
+	if key == operation_setting.DistillationGuardOption {
+		policy, err := operation_setting.ParseDistillationGuard(value)
+		if err != nil {
+			return err
+		}
+		operation_setting.SetDistillationGuard(policy)
+	}
 	common.OptionMap[key] = value
 
 	// 检查是否是模型配置 - 使用更规范的方式处理

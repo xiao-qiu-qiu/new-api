@@ -82,6 +82,15 @@ type TokenCountMeta struct {
 	estimatePromptTokens int
 }
 
+type DistillationUsage struct {
+	OutputTokens      int
+	CachedTokens      int
+	Known             bool
+	NativeZeroCache   bool
+	CompletedProtocol bool
+	NotCompletedText  bool
+}
+
 type RelayInfo struct {
 	TokenId           int
 	TokenKey          string
@@ -95,6 +104,7 @@ type RelayInfo struct {
 	isFirstResponse   bool
 	//SendLastReasoningResponse bool
 	IsStream               bool
+	ClientIsStream         bool
 	IsGeminiBatchEmbedding bool
 	IsPlayground           bool
 	UsePrice               bool
@@ -249,6 +259,7 @@ type RelayInfo struct {
 	// the request boundary, independently of billing success or failure.
 	PerformanceOutputTokens      int64
 	PerformanceBusinessRejection bool
+	DistillationUsage            DistillationUsage
 
 	// convOptions caches the converter settings snapshot (see ConvOptions).
 	convOptions *convmeta.Options
@@ -711,6 +722,7 @@ func genBaseRelayInfo(c *gin.Context, request dto.Request) *RelayInfo {
 		RequestURLPath:  c.Request.URL.String(),
 		RequestHeaders:  cloneRequestHeaders(c),
 		IsStream:        isStream,
+		ClientIsStream:  isStream,
 
 		StartTime:         startTime,
 		FirstResponseTime: startTime.Add(-time.Second),

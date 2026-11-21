@@ -1,6 +1,8 @@
 package service
 
 import (
+	"math"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -18,6 +20,146 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestDistillationUsageRequiresReportedOutputAndCache(t *testing.T) {
+	const responsesWithZero = `{"input_tokens":8000,"output_tokens":4200,"input_tokens_details":{"cached_tokens":0}}`
+	const responsesWithoutCache = `{"input_tokens":8000,"output_tokens":4200,"input_tokens_details":{"text_tokens":8000}}`
+	for _, tc := range []struct {
+		name            string
+		raw             string
+		billing         *dto.BillingUsage
+		nativeZeroCache bool
+		local           bool
+		wantOutput      int
+		wantCache       int
+	}{
+		{name: "explicit zero in Responses", raw: responsesWithZero, wantOutput: 4200},
+		{name: "cache missing from Responses details", raw: responsesWithoutCache},
+		{name: "explicit zero in Chat", raw: `{"prompt_tokens":8000,"completion_tokens":4200,"prompt_tokens_details":{"cached_tokens":0}}`, wantOutput: 4200},
+		{name: "nonzero legacy cache", raw: `{"prompt_tokens":8000,"completion_tokens":4200,"prompt_cache_hit_tokens":1024}`, wantOutput: 4200, wantCache: 1024},
+		{name: "locally estimated usage cannot hit", raw: responsesWithZero, local: true},
+		{name: "cache not an output measurement", raw: `{"input_tokens":8000,"input_tokens_details":{"cached_tokens":0}}`},
+		{name: "malformed negative cache", raw: `{"input_tokens":8000,"output_tokens":4200,"input_tokens_details":{"cached_tokens":-1}}`},
+		{name: "unmeasured output is not recovered from the total", billing: dto.NewGeminiChatBillingUsage(&dto.GeminiUsageMetadata{TotalTokenCount: 9000, PromptTokenCount: 2000}), nativeZeroCache: true},
+		{name: "Gemini candidates plus thoughts", billing: dto.NewGeminiChatBillingUsage(&dto.GeminiUsageMetadata{CandidatesTokenCount: 3200, ThoughtsTokenCount: 1000}), nativeZeroCache: true, wantOutput: 4200},
+		{name: "Gemini cache omitted", billing: dto.NewGeminiChatBillingUsage(&dto.GeminiUsageMetadata{CandidatesTokenCount: 4200})},
+		{name: "Gemini token arithmetic overflow", billing: dto.NewGeminiChatBillingUsage(&dto.GeminiUsageMetadata{CandidatesTokenCount: math.MaxInt, ThoughtsTokenCount: 100}), nativeZeroCache: true},
+		{name: "Claude explicit zero", billing: dto.NewClaudeMessagesBillingUsage(&dto.ClaudeUsage{OutputTokens: 4200}), nativeZeroCache: true, wantOutput: 4200},
+		{name: "Claude cache read excludes creation", billing: dto.NewClaudeMessagesBillingUsage(&dto.ClaudeUsage{OutputTokens: 4200, CacheCreationInputTokens: 500, CacheReadInputTokens: 20}), wantOutput: 4200, wantCache: 20},
+		{name: "Claude cache omitted", billing: dto.NewClaudeMessagesBillingUsage(&dto.ClaudeUsage{OutputTokens: 4200})},
+		{name: "provider sidecar marks usage estimated", raw: responsesWithZero, billing: dto.NewEstimatedGeminiChatBillingUsage(&dto.Usage{CompletionTokens: 4200}), nativeZeroCache: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var usage dto.Usage
+			if tc.raw != "" {
+				require.NoError(t, common.UnmarshalJsonStr(tc.raw, &usage))
+			}
+			usage.BillingUsage = tc.billing
+			output, cached, known := measuredGenerationUsage(&usage, tc.nativeZeroCache, tc.local)
+			require.Equal(t, tc.wantOutput > 0, known)
+			if known {
+				assert.Equal(t, tc.wantOutput, output)
+				assert.Equal(t, tc.wantCache, cached)
+			}
+		})
+	}
+}
+
+func TestDistillationStreamRequiresSuccessfulCompletion(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		end             relaycommon.StreamEndReason
+		terminal        bool
+		policyCompleted bool
+		failure         bool
+		want            bool
+	}{
+		{name: "delivered protocol terminal", end: relaycommon.StreamEndReasonDone, terminal: true, want: true},
+		{name: "buffered Responses terminal", end: relaycommon.StreamEndReasonNone, terminal: true, want: true},
+		{name: "converted Responses terminal tracked privately", end: relaycommon.StreamEndReasonEOF, policyCompleted: true, want: true},
+		{name: "truncated expected terminal", end: relaycommon.StreamEndReasonEOF},
+		{name: "disconnected after upstream completion", end: relaycommon.StreamEndReasonClientGone, terminal: true},
+		{name: "forwarded upstream failure", end: relaycommon.StreamEndReasonDone, failure: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status := relaycommon.NewStreamStatus()
+			status.RequireTerminal()
+			if tc.terminal {
+				status.MarkCompleted()
+			}
+			if tc.failure {
+				status.MarkFailed("upstream_error", "server_error", 502)
+			}
+			status.SetEndReason(tc.end, nil)
+			assert.Equal(t, tc.want, generationStreamCompleted(status, tc.policyCompleted))
+		})
+	}
+}
+
+func TestDistillationCompletedTextAdvancesOrClearsConsecutiveHits(t *testing.T) {
+	previous, redisEnabled := operation_setting.GetDistillationGuard(), common.RedisEnabled
+	common.RedisEnabled = false
+	settings := operation_setting.DefaultDistillationGuard()
+	settings.Enabled = true
+	settings.MinOutputTokens, settings.MaxCachedTokens, settings.ConsecutiveRequests = 3000, 0, 2
+	operation_setting.SetDistillationGuard(settings)
+	t.Cleanup(func() {
+		operation_setting.SetDistillationGuard(previous)
+		common.RedisEnabled = redisEnabled
+	})
+	reportedZero := &dto.Usage{PromptTokens: 8000, CompletionTokens: 3000}
+	reportedZero.PromptTokensDetails.SetReportedCachedTokens(0)
+	lowOutput := &dto.Usage{PromptTokens: 8000, CompletionTokens: 2999}
+	lowOutput.PromptTokensDetails.SetReportedCachedTokens(0)
+	for index, tc := range []struct {
+		name                                 string
+		path                                 string
+		status                               int
+		clientStream, upstreamStream, failed bool
+		usage                                *dto.Usage
+		preservesFirstHit                    bool
+	}{
+		{name: "client stream resets even when upstream is not streaming", clientStream: true, usage: reportedZero},
+		{name: "buffered upstream stream is still client non-stream", upstreamStream: true, usage: reportedZero, preservesFirstHit: true},
+		{name: "unknown usage resets"},
+		{name: "insufficient output resets", usage: lowOutput},
+		{name: "high cache resets", usage: &dto.Usage{PromptTokens: 8000, CompletionTokens: 3000, PromptCacheHitTokens: 200}},
+		{name: "relayed failure does not participate", status: http.StatusBadGateway, preservesFirstHit: true},
+		{name: "aborted stream does not participate", clientStream: true, upstreamStream: true, failed: true, preservesFirstHit: true},
+		{name: "compression does not participate", path: "/v1/responses/compact", preservesFirstHit: true},
+		{name: "embedding does not participate", path: "/v1/embeddings", preservesFirstHit: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			userID := 900_000 + index
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			path := tc.path
+			if path == "" {
+				path = "/v1/chat/completions"
+			}
+			c.Request = httptest.NewRequest(http.MethodPost, path, nil)
+			status := tc.status
+			if status == 0 {
+				status = http.StatusOK
+			}
+			c.String(status, "generation terminal")
+			info := &relaycommon.RelayInfo{UserId: userID, ClientIsStream: tc.clientStream, IsStream: tc.upstreamStream}
+			if tc.upstreamStream {
+				info.StreamStatus = relaycommon.NewStreamStatus()
+				if tc.failed {
+					info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonClientGone, nil)
+				} else {
+					info.StreamStatus.MarkCompleted()
+					info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
+				}
+			}
+			ObserveNonStreamGeneration(c.Request.Context(), userID, true, settings)
+			captureDistillationUsage(c, info, tc.usage)
+			ObserveCompletedTextGeneration(c, info)
+			ObserveNonStreamGeneration(c.Request.Context(), userID, true, settings)
+			assert.Equal(t, tc.preservesFirstHit, !NonStreamBlockedUntil(c.Request.Context(), userID).IsZero())
+		})
+	}
+}
 
 func TestResponsesUsageAccumulatorTerminalAccounting(t *testing.T) {
 	operation_setting.SetToolPriceForTest("responses_priced_fn", 5)

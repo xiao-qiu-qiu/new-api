@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -217,6 +218,57 @@ func Distribute() func(c *gin.Context) {
 	}
 }
 
+func EnforceNonStreamGenerationBlock(c *gin.Context) {
+	path := c.Request.URL.Path
+	if !relayconstant.IsTextGenerationRequest(c.Request.Method, path) {
+		return
+	}
+	gemini := strings.HasSuffix(path, ":generateContent") || strings.HasSuffix(path, ":streamGenerateContent")
+	if gemini && (strings.HasSuffix(path, ":streamGenerateContent") || c.Query("alt") == "sse") && (&dto.GeminiChatRequest{}).IsStream(c.Request) {
+		return
+	}
+	blockedUntil := service.NonStreamBlockedUntil(c.Request.Context(), common.GetContextKeyInt(c, constant.ContextKeyUserId))
+	if !blockedUntil.After(time.Now()) {
+		return
+	}
+	if !gemini && strings.HasPrefix(c.Request.Header.Get("Content-Type"), gin.MIMEJSON) {
+		streaming, err := hasUnambiguousStreamingFlag(c)
+		if err != nil {
+			abortWithOpenAiMessage(c, invalidRequestStatus(err), i18n.T(c, i18n.MsgDistributorInvalidRequest, map[string]any{"Error": err.Error()}))
+			return
+		}
+		if streaming {
+			return
+		}
+	}
+	remaining := time.Until(blockedUntil)
+	if remaining <= 0 {
+		return
+	}
+	c.Header("Retry-After", strconv.FormatInt(int64(1+(remaining-1)/time.Second), 10))
+	abortWithOpenAiMessage(c, http.StatusTooManyRequests, i18n.T(c, i18n.MsgDistributorStreamingRequired), "non_stream_blocked")
+}
+
+func hasUnambiguousStreamingFlag(c *gin.Context) (bool, error) {
+	storage, err := common.GetBodyStorage(c)
+	if err != nil {
+		return false, err
+	}
+	values, err := common.ReadBodyJSONFields(storage, "stream")
+	if err != nil || values[0].Type != ojson.True {
+		return false, err
+	}
+	keys := jsonObjectKeyCounter{field: "stream", foldCase: true}
+	valid, err := keys.validateAndCount(storage)
+	if err != nil {
+		return false, err
+	}
+	if !valid {
+		return false, errors.New("invalid JSON request body")
+	}
+	return keys.count == 1, nil
+}
+
 // noAvailableChannelMessage explains a 503 for a task-plugin-claimed model.
 // The response tells the caller the model is plugin-claimed without naming the
 // plugin; the candidate plugin keys go to the server log under the request id.
@@ -367,29 +419,13 @@ func getModelFromJSONBody(c *gin.Context) (*ModelRequest, error) {
 	if err != nil {
 		return nil, err
 	}
-	var keys jsonModelKeyCounter
-	if storage.IsDisk() {
-		reader, err := storage.NewReader()
-		if err != nil {
-			return nil, err
-		}
-		defer reader.Close()
-		valid, err := ojson.ValidReader(io.TeeReader(reader, &keys))
-		if err != nil {
-			return nil, err
-		}
-		if !valid {
-			return nil, errors.New("invalid JSON request body")
-		}
-	} else {
-		requestBody, err := storage.Bytes()
-		if err != nil {
-			return nil, err
-		}
-		if !ojson.ValidBytes(requestBody) {
-			return nil, errors.New("invalid JSON request body")
-		}
-		_, _ = keys.Write(requestBody)
+	keys := jsonObjectKeyCounter{field: "model"}
+	valid, err := keys.validateAndCount(storage)
+	if err != nil {
+		return nil, err
+	}
+	if !valid {
+		return nil, errors.New("invalid JSON request body")
 	}
 	if keys.count > 1 {
 		return nil, errors.New("model must be provided once")
@@ -418,21 +454,43 @@ func getModelFromJSONBody(c *gin.Context) (*ModelRequest, error) {
 	}, nil
 }
 
-// jsonModelKeyCounter counts top-level model keys while JSON validation reads
-// the body. An escaped spelling of "model" occupies at most 32 bytes with quotes.
-type jsonModelKeyCounter struct {
+// jsonObjectKeyCounter counts top-level field names during JSON validation.
+// A fully escaped spelling of "stream" occupies 38 bytes with quotes.
+type jsonObjectKeyCounter struct {
+	field        string
+	foldCase     bool
 	depth        int
 	rootObject   bool
 	inString     bool
 	escaped      bool
 	expectingKey bool
 	isKey        bool
-	key          [32]byte
+	key          [38]byte
 	keyLen       int
 	count        int
 }
 
-func (c *jsonModelKeyCounter) Write(data []byte) (int, error) {
+func (c *jsonObjectKeyCounter) validateAndCount(storage common.BodyStorage) (bool, error) {
+	if storage.IsDisk() {
+		reader, err := storage.NewReader()
+		if err != nil {
+			return false, err
+		}
+		defer reader.Close()
+		return ojson.ValidReader(io.TeeReader(reader, c))
+	}
+	body, err := storage.Bytes()
+	if err != nil {
+		return false, err
+	}
+	if !ojson.ValidBytes(body) {
+		return false, nil
+	}
+	_, _ = c.Write(body)
+	return true, nil
+}
+
+func (c *jsonObjectKeyCounter) Write(data []byte) (int, error) {
 	for _, current := range data {
 		if c.inString {
 			if c.isKey {
@@ -455,7 +513,8 @@ func (c *jsonModelKeyCounter) Write(data []byte) (int, error) {
 			c.inString = false
 			if c.isKey {
 				var key string
-				if c.keyLen <= len(c.key) && common.Unmarshal(c.key[:c.keyLen], &key) == nil && key == "model" {
+				if c.keyLen <= len(c.key) && common.Unmarshal(c.key[:c.keyLen], &key) == nil &&
+					(key == c.field || c.foldCase && strings.EqualFold(key, c.field)) {
 					c.count++
 				}
 				c.expectingKey = false

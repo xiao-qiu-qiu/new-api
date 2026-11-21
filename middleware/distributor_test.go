@@ -2,12 +2,14 @@ package middleware
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -22,10 +24,126 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/model_setting"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestNonStreamGenerationBlock(t *testing.T) {
+	require.NoError(t, i18n.Init())
+	previousPolicy, previousRedis := operation_setting.GetDistillationGuard(), common.RedisEnabled
+	previousDiskCache := common.GetDiskCacheConfig()
+	t.Cleanup(func() {
+		operation_setting.SetDistillationGuard(previousPolicy)
+		common.RedisEnabled = previousRedis
+		common.SetDiskCacheConfig(previousDiskCache)
+	})
+	common.RedisEnabled = false
+	policy := operation_setting.DefaultDistillationGuard()
+	policy.ConsecutiveRequests = 1
+	operation_setting.SetDistillationGuard(policy)
+	const blockedUserID = 8310059
+	service.ObserveNonStreamGeneration(t.Context(), blockedUserID, true, policy)
+	require.False(t, service.NonStreamBlockedUntil(t.Context(), blockedUserID).IsZero())
+
+	const jsonType = "application/json; charset=utf-8"
+	const chatPath = "/v1/chat/completions"
+	const responsesPath = "/v1/responses"
+	const nonStream = `{"model":"test-model"}`
+	const stream = `{"model":"test-model","stream":true}`
+	diskPath := t.TempDir()
+	for _, testCase := range []struct {
+		name, method, path, contentType, body string
+		blocked, otherUser, disk              bool
+	}{
+		{name: "chat explicit non-stream", path: chatPath, body: `{"model":"test-model","stream":false}`, blocked: true},
+		{name: "chat SSE", path: chatPath, body: stream},
+		{name: "authenticated identity only", path: chatPath, body: `{"model":"test-model","user_id":8310059}`, otherUser: true},
+		{name: "request cannot replace authenticated identity", path: chatPath, body: `{"model":"test-model","user_id":1}`, blocked: true},
+		{name: "legacy Completions", path: "/v1/completions", body: nonStream, blocked: true},
+		{name: "Claude Messages", path: "/v1/messages", body: nonStream, blocked: true},
+		{name: "Playground", path: "/pg/chat/completions", body: nonStream, blocked: true},
+		{name: "Responses default non-stream", path: responsesPath, body: nonStream, blocked: true},
+		{name: "Playground Responses", path: "/pg/responses", body: nonStream, blocked: true},
+		{name: "Playground Responses SSE", path: "/pg/responses", body: stream},
+		{name: "Responses SSE with compaction trigger", path: responsesPath, body: `{"model":"test-model","stream":true,"input":[{"type":"compaction_trigger"}]}`},
+		{name: "Responses WebSocket", method: http.MethodGet, path: responsesPath},
+		{name: "dedicated compaction", path: "/v1/responses/compact", body: nonStream},
+		{name: "tool endpoint", path: "/v1/tools/search", body: nonStream},
+		{name: "embedding endpoint", path: "/v1/embeddings", body: nonStream},
+		{name: "image endpoint", path: "/v1/images/generations", body: nonStream},
+		{name: "Gemini v1 sync", path: "/v1/models/test:generateContent", body: stream, blocked: true},
+		{name: "Gemini v1beta sync", path: "/v1beta/models/test:generateContent", body: nonStream, blocked: true},
+		{name: "Gemini native SSE", path: "/v1beta/models/test:streamGenerateContent", body: nonStream},
+		{name: "Gemini alt SSE", path: "/v1beta/models/test:generateContent?alt=sse", body: nonStream},
+		{name: "Gemini model name is not an SSE action", path: "/v1beta/models/streamGenerateContent:generateContent", body: nonStream, blocked: true},
+		{name: "Gemini embedding", path: "/v1beta/models/test:embedContent", body: nonStream},
+		{name: "nested flag is not top level", path: chatPath, body: `{"model":"test-model","metadata":{"stream":true}}`, blocked: true},
+		{name: "JSON string flag is not boolean", path: chatPath, body: `{"model":"test-model","stream":"true"}`, blocked: true},
+		{name: "duplicate flag", path: chatPath, body: `{"model":"test-model","stream":true,"stream":false}`, blocked: true},
+		{name: "case folded duplicate flag", path: chatPath, body: `{"model":"test-model","stream":true,"Stream":false}`, blocked: true},
+		{name: "escaped case folded duplicate flag", path: chatPath, body: `{"model":"test-model","stream":true,"\u017ftream":false}`, blocked: true, disk: true},
+		{name: "noncanonical spelling is not a wire flag", path: chatPath, body: `{"model":"test-model","Stream":true}`, blocked: true},
+		{name: "escaped flag matches decoded spelling", path: chatPath, body: `{"model":"test-model","\u0073\u0074\u0072\u0065\u0061\u006d": true}`, disk: true},
+		{name: "URL encoded form is not a boolean", path: chatPath, contentType: gin.MIMEPOSTForm, body: `model=test-model&stream=+true+`, blocked: true},
+		{name: "multipart form is not a boolean", path: chatPath, contentType: "multipart/form-data; boundary=stream-test", body: "--stream-test\r\nContent-Disposition: form-data; name=\"stream\"\r\n\r\n true \r\n--stream-test--\r\n", blocked: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			common.SetDiskCacheConfig(common.DiskCacheConfig{Enabled: testCase.disk, ThresholdMB: 0, MaxSizeMB: 16, Path: diskPath})
+			userID := blockedUserID
+			if testCase.otherUser {
+				userID++
+			}
+			engine := gin.New()
+			engine.Use(BodyStorageCleanup(), func(c *gin.Context) {
+				common.SetContextKey(c, constant.ContextKeyUserId, userID)
+			}, EnforceNonStreamGenerationBlock)
+			engine.Any("/*path", func(c *gin.Context) {
+				if testCase.body != "" {
+					storage, err := common.GetBodyStorage(c)
+					require.NoError(t, err)
+					assert.Equal(t, testCase.disk, storage.IsDisk())
+					replayed, err := io.ReadAll(storage)
+					require.NoError(t, err)
+					assert.Equal(t, testCase.body, string(replayed))
+				}
+				c.Status(http.StatusNoContent)
+			})
+			request := httptest.NewRequest(cmp.Or(testCase.method, http.MethodPost), testCase.path, strings.NewReader(testCase.body))
+			request.Header.Set("Content-Type", cmp.Or(testCase.contentType, jsonType))
+			response := httptest.NewRecorder()
+			engine.ServeHTTP(response, request)
+			if !testCase.blocked {
+				assert.Equal(t, http.StatusNoContent, response.Code, response.Body.String())
+				assert.Empty(t, response.Header().Get("Retry-After"))
+				return
+			}
+			require.Equal(t, http.StatusTooManyRequests, response.Code, response.Body.String())
+			retryAfter, err := strconv.Atoi(response.Header().Get("Retry-After"))
+			require.NoError(t, err)
+			assert.Positive(t, retryAfter)
+			assert.LessOrEqual(t, retryAfter, policy.BlockMinutes*60)
+			var payload struct {
+				Error struct{ Code string } `json:"error"`
+			}
+			require.NoError(t, common.Unmarshal(response.Body.Bytes(), &payload))
+			assert.Equal(t, "non_stream_blocked", payload.Error.Code)
+		})
+	}
+	operation_setting.SetDistillationGuard(operation_setting.DistillationGuardPolicy{})
+	disabledRouter := gin.New()
+	disabledRouter.POST(chatPath, func(c *gin.Context) {
+		common.SetContextKey(c, constant.ContextKeyUserId, blockedUserID)
+	}, EnforceNonStreamGenerationBlock, func(c *gin.Context) {
+		c.Status(http.StatusNoContent)
+	})
+	request := httptest.NewRequest(http.MethodPost, chatPath, strings.NewReader(nonStream))
+	request.Header.Set("Content-Type", jsonType)
+	response := httptest.NewRecorder()
+	disabledRouter.ServeHTTP(response, request)
+	assert.Equal(t, http.StatusNoContent, response.Code)
+}
 
 func TestDistributeChannelConcurrencyRequestLifecycle(t *testing.T) {
 	require.NoError(t, i18n.Init())

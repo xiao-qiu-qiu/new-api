@@ -221,6 +221,45 @@ func (h *relayHarness) send(t *testing.T, path, contentType, body string) relayO
 	return outcome
 }
 
+func TestDistillationGuardBlocksNonStreamAfterReportedUsage(t *testing.T) {
+	harness := newRelayHarness(t)
+	harness.install(t, harness.newChannel(constant.ChannelTypeOpenAI, "local-test-key"))
+	previous := operation_setting.GetDistillationGuard()
+	t.Cleanup(func() { operation_setting.SetDistillationGuard(previous) })
+	policy := operation_setting.DefaultDistillationGuard()
+	policy.BlockMinutes = 13
+	operation_setting.SetDistillationGuard(policy)
+
+	harness.upstream.respond = func(w http.ResponseWriter, _ int, request capturedRequest) {
+		if gjson.Get(request.Body, "stream").Bool() {
+			writeChat(w, request)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"chatcmpl-guard","object":"chat.completion","created":1730000000,"model":"gpt-4o-mini","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000,"completion_tokens":3200,"total_tokens":4200,"prompt_tokens_details":{"cached_tokens":0}}}`)
+	}
+	const path = "/v1/chat/completions"
+	const nonStream = `{"model":"` + relayTestModel + `","messages":[{"role":"user","content":"hello there"}],"max_tokens":4096}`
+	for range policy.ConsecutiveRequests {
+		outcome := harness.post(t, path, nonStream)
+		require.Equal(t, http.StatusOK, outcome.status, outcome.body)
+		assert.Equal(t, int64(3200), gjson.Get(outcome.body, "usage.completion_tokens").Int())
+	}
+
+	blocked := harness.post(t, path, nonStream)
+	require.Equal(t, http.StatusTooManyRequests, blocked.status, blocked.body)
+	assert.Equal(t, "non_stream_blocked", gjson.Get(blocked.body, "error.code").String())
+	assert.NotEmpty(t, blocked.header.Get("Retry-After"))
+	assert.Len(t, harness.upstream.captured(), policy.ConsecutiveRequests)
+	assert.Zero(t, blocked.quota)
+
+	stream := harness.post(t, path, strings.TrimSuffix(nonStream, "}")+`,"stream":true}`)
+	require.Equal(t, http.StatusOK, stream.status, stream.body)
+	assert.Contains(t, stream.header.Get("Content-Type"), "text/event-stream")
+	assert.Contains(t, stream.body, "[DONE]")
+	assert.Len(t, harness.upstream.captured(), policy.ConsecutiveRequests+1)
+}
+
 func registerRelayPlugin(t *testing.T, source string) *jsplugin.LoadedPlugin {
 	t.Helper()
 	plugin, err := jsplugin.DefaultRegistry.Register(source, jsplugin.Options{})

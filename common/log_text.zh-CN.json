@@ -1,4 +1,6 @@
 {
+  "non-stream guard event=blocked user_id=%d block_seconds=%d window_seconds=%d consecutive_requests=%d min_output_tokens=%d max_cached_tokens=%d": "防蒸馏：限制非流式请求 user_id=%d block_seconds=%d window_seconds=%d consecutive_requests=%d min_output_tokens=%d max_cached_tokens=%d",
+  "non-stream guard Redis request failed: %v": "防蒸馏 Redis 请求失败：%v",
   "primary database is not ready; waiting up to %d seconds for startup": "主数据库尚未就绪，启动时最多等待 %d 秒",
   "primary database is ready; continuing startup": "主数据库已就绪，继续启动",
   "%d quota points": "%d 点额度",

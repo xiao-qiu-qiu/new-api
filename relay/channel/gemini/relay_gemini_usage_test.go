@@ -59,6 +59,38 @@ func TestStreamResponseGeminiChat2OpenAIAttachesUsageMetadata(t *testing.T) {
 	require.Nil(t, withoutUsage.Usage)
 }
 
+func TestGeminiNonStreamDistillationSkipsRejectedGenerationWithoutChangingResponse(t *testing.T) {
+	for _, route := range []struct {
+		name    string
+		format  types.RelayFormat
+		handler func(*gin.Context, *relaycommon.RelayInfo, *http.Response) (*dto.Usage, *types.NewAPIError)
+	}{
+		{"native", types.RelayFormatGemini, GeminiTextGenerationHandler},
+		{"chat", types.RelayFormatOpenAI, GeminiChatHandler},
+		{"responses", types.RelayFormatOpenAIResponses, GeminiResponsesHandler},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			for _, reason := range []string{"STOP", "SAFETY", "RECITATION", "BLOCKLIST"} {
+				recorder := httptest.NewRecorder()
+				c, _ := gin.CreateTestContext(recorder)
+				c.Request = httptest.NewRequest(http.MethodPost, "/v1beta/models/gemini-3-flash-preview:generateContent", nil)
+				info := &relaycommon.RelayInfo{
+					RelayFormat: route.format,
+					ChannelMeta: &relaycommon.ChannelMeta{UpstreamModelName: "gemini-3-flash-preview"},
+				}
+				body := `{"candidates":[{"content":{"role":"model","parts":[{"text":"summary"}]},"finishReason":"` + reason + `"}],"usageMetadata":{"promptTokenCount":4,"candidatesTokenCount":3,"totalTokenCount":7,"cachedContentTokenCount":0}}`
+				usage, apiErr := route.handler(c, info, &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))})
+				require.Nil(t, apiErr)
+				require.NotNil(t, usage)
+				assert.Equal(t, http.StatusOK, recorder.Code)
+				assert.Equal(t, 3, usage.CompletionTokens)
+				assert.Equal(t, reason != "STOP", info.DistillationUsage.NotCompletedText)
+				assert.True(t, info.DistillationUsage.NativeZeroCache)
+			}
+		})
+	}
+}
+
 func TestGeminiChatStreamHandlerClaudeFirstFrameUsesUpstreamUsage(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

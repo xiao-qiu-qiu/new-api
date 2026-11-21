@@ -69,6 +69,7 @@ func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *rel
 		return sendResponsesEvent(event.Type, event.Payload)
 	}
 	failResponsesStream := func(err error) bool {
+		info.DistillationUsage.NotCompletedText = true
 		failureResults, handled := state.FailResponsesStream("server_error", err.Error(), "")
 		if !handled {
 			return false
@@ -111,6 +112,9 @@ func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *rel
 			return
 		}
 
+		if claudeResponse.Type == "message_start" || claudeResponse.Type == "message_delta" {
+			recordClaudeStreamCachePresence(info, data)
+		}
 		if claudeResponse.StopReason != "" {
 			maybeMarkClaudeRefusal(c, info, claudeResponse.StopReason)
 		}
@@ -163,6 +167,9 @@ func ClaudeResponsesStreamHandler(c *gin.Context, resp *http.Response, info *rel
 			}
 		}
 	})
+	if info.StreamStatus.OutcomeSnapshot().Response != relaycommon.ResponseOutcomeCompleted {
+		info.DistillationUsage.NotCompletedText = true
+	}
 	if streamErr != nil {
 		return nil, streamErr
 	}

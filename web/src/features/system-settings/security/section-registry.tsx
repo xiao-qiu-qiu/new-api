@@ -16,6 +16,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { DistillationGuardSection } from '../request-limits/distillation-guard-section'
 import { RateLimitSection } from '../request-limits/rate-limit-section'
 import { SSRFSection } from '../request-limits/ssrf-section'
 import { TokenLimitSection } from '../request-limits/token-limit-section'
@@ -41,6 +42,16 @@ const SECURITY_SECTIONS = [
     ),
   },
 
+  {
+    id: 'distillation-protection',
+    titleKey: 'Distillation protection',
+    build: (settings: SecuritySettings) => (
+      <DistillationGuardSection
+        key={settings.DistillationGuardPolicy}
+        policy={settings.DistillationGuardPolicy}
+      />
+    ),
+  },
   {
     id: 'ssrf',
     titleKey: 'SSRF Protection',

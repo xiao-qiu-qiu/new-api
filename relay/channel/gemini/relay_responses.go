@@ -56,6 +56,7 @@ func GeminiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *h
 		)
 	}
 
+	recordGeminiGenerationResponse(info, &geminiResponse, responseBody)
 	usage := buildUsageFromGeminiResponse(c, info, &geminiResponse)
 
 	convertResult, err := service.ConvertResponse(c, info, types.RelayFormatOpenAIResponses, &geminiResponse)
@@ -110,6 +111,7 @@ func GeminiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, r
 		return true
 	}
 	failResponsesStream := func(err error) bool {
+		info.DistillationUsage.NotCompletedText = true
 		failureResults, handled := state.FailResponsesStream("server_error", err.Error(), "")
 		if !handled {
 			return false

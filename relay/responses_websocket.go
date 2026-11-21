@@ -30,6 +30,7 @@ import (
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
 	"github.com/QuantumNous/new-api/service"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 
 	"github.com/MoeForge/moego/ojson"
 	"github.com/gin-gonic/gin"
@@ -84,11 +85,12 @@ type responsesWSControl struct {
 // Only the request worker reads or changes billing state. Socket readers pass
 // bounded messages to it; cancellation never performs an independent refund.
 type responsesWSCallState struct {
-	inbox       chan responsesWSMessage
-	controls    chan responsesWSControl
-	done        chan struct{}
-	terminal    *responsesWSMessage
-	publicError *types.NewAPIError
+	inbox               chan responsesWSMessage
+	controls            chan responsesWSControl
+	done                chan struct{}
+	terminal            *responsesWSMessage
+	publicError         *types.NewAPIError
+	completedTextUserID int
 	// A nonzero closeCode ends the connection after this request.
 	closeCode   int
 	closeReason string
@@ -220,6 +222,8 @@ func (s *responsesWSSession) runRequest(state *responsesWSCallState, message []b
 				state.closeCode = websocket.CloseInternalServerErr
 			} else if err := s.client.WriteMessage(outgoing.kind, outgoing.body); err != nil {
 				state.closeCode = websocket.CloseInternalServerErr
+			} else if state.completedTextUserID > 0 && outgoing == state.terminal {
+				service.ObserveNonStreamGeneration(context.WithoutCancel(s.ctx), state.completedTextUserID, false, operation_setting.GetDistillationGuard())
 			}
 		}
 		if state.closeCode != 0 {
@@ -380,6 +384,7 @@ routeAttempt:
 		info = relaycommon.GenRelayInfoResponses(c, &create.Request)
 		service.MarkMediaGenerationRequest(c, info)
 		info.IsStream = true
+		info.ClientIsStream = true
 		info.CaptureNativeCompactionV2(create.Request.Input)
 		info.SetRequestPluginIngress(ingressSteps, ingressRecord)
 		common.SetContextKey(c, appconstant.ContextKeyIsStream, true)
@@ -418,6 +423,7 @@ routeAttempt:
 				info = relaycommon.GenRelayInfoResponses(c, &create.Request)
 				service.MarkMediaGenerationRequest(c, info)
 				info.IsStream = true
+				info.ClientIsStream = true
 				info.CaptureNativeCompactionV2(create.Request.Input)
 				info.SetRequestPluginIngress(ingressSteps, ingressRecord)
 				common.SetContextKey(c, appconstant.ContextKeyIsStream, true)
@@ -730,6 +736,12 @@ routeAttempt:
 				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonDone, nil)
 				state.terminal = terminalOf(incoming, terminalError)
 				ConsumeResponsesQuota(c, info, accumulator.Finish())
+				if stopErr == nil && terminalError == nil && event.Response != nil &&
+					info.StreamStatus.ResponseOutcome() == string(relaycommon.ResponseOutcomeCompleted) && !info.StreamStatus.HasErrors() &&
+					(info.BillingImageCount == nil || *info.BillingImageCount == 0) &&
+					strings.TrimSpace(string(create.Generate)) != "false" && !info.NativeCompactionV2 && !service.IsMediaGenerationRequest(c) {
+					state.completedTextUserID = info.UserId
+				}
 				return nil
 			}
 			if stopErr == nil {

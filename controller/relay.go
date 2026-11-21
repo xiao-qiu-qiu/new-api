@@ -206,8 +206,10 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		relayInfo.StreamStatus = nil
 		common.SetContextKey(c, constant.ContextKeyResponseStreamErrorForwarded, false)
 		common.SetContextKey(c, constant.ContextKeyResponseStreamNoRetry, false)
+		common.SetContextKey(c, constant.ContextKeyLocalCountTokens, false)
 		relayInfo.PerformanceBusinessRejection = false
 		relayInfo.PerformanceOutputTokens = 0
+		relayInfo.DistillationUsage = relaycommon.DistillationUsage{}
 		relayInfo.RetryIndex = retryParam.GetRetry()
 		channel, channelErr := getChannel(c, relayInfo, retryParam)
 		if channelErr != nil {
@@ -252,6 +254,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 
 		if newAPIError == nil {
 			service.MarkRequestPolicySuccess(c, relayInfo.StreamStatus)
+			service.ObserveCompletedTextGeneration(c, relayInfo)
 			relayInfo.LastError = nil
 			return
 		}

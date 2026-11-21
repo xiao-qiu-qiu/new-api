@@ -42,6 +42,7 @@ func OaiResponsesToChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 	if apiErr := openaiEmbeddedError(c, responsesResp.GetOpenAIError(), resp.StatusCode); apiErr != nil {
 		return nil, apiErr
 	}
+	service.MarkResponsesGenerationStatus(info, responsesResp.Status)
 
 	info.ObserveResponseModel(responsesResp.Model)
 	info.ObserveResponseServiceTier(body)
@@ -288,6 +289,15 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			info.ObserveResponseModel(streamResp.Response.Model)
 		}
 		info.ObserveResponseServiceTier(common.StringToByteSlice(data))
+		switch streamResp.Type {
+		case "response.completed", "response.done":
+			info.DistillationUsage.CompletedProtocol = true
+			if streamResp.Response != nil {
+				service.MarkResponsesGenerationStatus(info, streamResp.Response.Status)
+			}
+		case "response.incomplete", "response.failed", "response.cancelled", "response.canceled", "response.error", "error":
+			info.DistillationUsage.NotCompletedText = true
+		}
 		if apiErr := service.CyberPolicyErrorFromPayload(common.StringToByteSlice(data), resp.StatusCode); apiErr != nil {
 			service.ObserveCyberPolicyError(c, apiErr)
 			upstreamFailed = true
@@ -326,6 +336,9 @@ func OaiResponsesToChatStreamHandler(c *gin.Context, info *relaycommon.RelayInfo
 			}
 		}
 	})
+	if !info.DistillationUsage.CompletedProtocol {
+		info.DistillationUsage.NotCompletedText = true
+	}
 
 	if streamErr != nil {
 		if !upstreamFailed || state.UsageText() == "" {

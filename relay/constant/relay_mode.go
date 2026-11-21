@@ -1,6 +1,7 @@
 package constant
 
 import (
+	"net/http"
 	"strings"
 )
 
@@ -53,6 +54,18 @@ const (
 	RelayModeToolsSearch
 	RelayModeToolsFetch
 )
+
+func IsTextGenerationRequest(method, path string) bool {
+	if method != http.MethodPost {
+		return false
+	}
+	switch path {
+	case "/v1/chat/completions", "/v1/completions", "/v1/messages", "/v1/responses", "/pg/chat/completions", "/pg/responses":
+		return true
+	}
+	return (strings.HasPrefix(path, "/v1/models/") || strings.HasPrefix(path, "/v1beta/models/")) &&
+		(strings.HasSuffix(path, ":generateContent") || strings.HasSuffix(path, ":streamGenerateContent"))
+}
 
 func Path2RelayMode(path string) int {
 	relayMode := RelayModeUnknown

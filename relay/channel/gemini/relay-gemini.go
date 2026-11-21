@@ -157,6 +157,23 @@ func buildUsageFromGeminiResponse(c *gin.Context, info *relaycommon.RelayInfo, r
 	return *usage
 }
 
+func geminiCandidateRejected(candidate dto.GeminiChatCandidate) bool {
+	if candidate.FinishReason == nil {
+		return false
+	}
+	switch *candidate.FinishReason {
+	case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION":
+		return true
+	default:
+		return false
+	}
+}
+
+func recordGeminiGenerationResponse(info *relaycommon.RelayInfo, response *dto.GeminiChatResponse, body []byte) {
+	info.DistillationUsage.NotCompletedText = len(response.Candidates) == 0 || slices.ContainsFunc(response.Candidates, geminiCandidateRejected)
+	info.DistillationUsage.NativeZeroCache = ojson.GetBytes(body, "usageMetadata.cachedContentTokenCount").Raw == "0"
+}
+
 func geminiResponseInlineImageCount(response *dto.GeminiChatResponse) int {
 	if response == nil {
 		return 0
@@ -217,6 +234,9 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 			sr.Stop(streamErr)
 			return
 		}
+		if !info.ClientIsStream && !info.DistillationUsage.NativeZeroCache && geminiResponse.HasUsageMetadata {
+			info.DistillationUsage.NativeZeroCache = ojson.Get(data, "usageMetadata.cachedContentTokenCount").Raw == "0"
+		}
 
 		if len(geminiResponse.Candidates) == 0 && geminiResponse.PromptFeedback != nil && geminiResponse.PromptFeedback.BlockReason != nil {
 			info.PerformanceBusinessRejection = true
@@ -227,8 +247,7 @@ func geminiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 			if candidate.FinishReason == nil || *candidate.FinishReason == "" || *candidate.FinishReason == "FINISH_REASON_UNSPECIFIED" {
 				continue
 			}
-			switch *candidate.FinishReason {
-			case "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII", "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION":
+			if geminiCandidateRejected(candidate) {
 				info.PerformanceBusinessRejection = true
 			}
 			info.StreamStatus.MarkCompleted()
@@ -464,6 +483,7 @@ func GeminiChatHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.R
 	}
 	fullTextResponse := responseGeminiChat2OpenAI(c, &geminiResponse)
 	fullTextResponse.Model = info.UpstreamModelName
+	recordGeminiGenerationResponse(info, &geminiResponse, responseBody)
 	usage := buildUsageFromGeminiResponse(c, info, &geminiResponse)
 
 	fullTextResponse.Usage = usage

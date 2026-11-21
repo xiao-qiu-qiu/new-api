@@ -407,6 +407,7 @@ export type OperationsSettings = {
 }
 
 export type SecuritySettings = {
+  DistillationGuardPolicy: string
   ModelRequestRateLimitEnabled: boolean
   ModelRequestRateLimitCount: number
   ModelRequestRateLimitSuccessCount: number

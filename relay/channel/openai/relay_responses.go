@@ -40,6 +40,7 @@ func OaiResponsesHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http
 	if apiErr := openaiEmbeddedError(c, responsesResponse.GetOpenAIError(), resp.StatusCode); apiErr != nil {
 		return nil, apiErr
 	}
+	service.MarkResponsesGenerationStatus(info, responsesResponse.Status)
 
 	info.ObserveResponseModel(responsesResponse.Model)
 	info.ObserveResponseServiceTier(responseBody)
