@@ -35,6 +35,8 @@ const (
 	channelFailoverBusyWaitTimeout = 30 * time.Second
 )
 
+var errChannelFailoverExhausted = errors.New("channel_failover_exhausted")
+
 // ApplyChannelFailoverProbeHeaders is wired to the relay's shared header
 // resolver at startup. Background checks have no client headers to forward.
 var ApplyChannelFailoverProbeHeaders func(*relaycommon.RelayInfo, *http.Request) error
@@ -432,6 +434,7 @@ type channelFailoverRequest struct {
 	group                string
 	backups              []int
 	stickyBackups        bool
+	hasNextGroup         bool
 	order                []int
 	visited              map[int]bool
 	current              int
@@ -697,7 +700,7 @@ func selectChannelFailover(c *gin.Context, state *channelFailoverRequest) (*mode
 		case "unavailable":
 			state.order = state.backups
 		case "empty", "recovering":
-			if state.stickyBackups || eligibleFailoverChannel(c, state.backups[0], state.group, state.modelName) != nil {
+			if state.stickyBackups || state.hasNextGroup || eligibleFailoverChannel(c, state.backups[0], state.group, state.modelName) != nil {
 				state.order = state.backups
 			}
 		case "busy":
@@ -756,7 +759,7 @@ func selectChannelFailover(c *gin.Context, state *channelFailoverRequest) (*mode
 		return channel, state.group, nil
 	}
 	if selectionErr == nil {
-		selectionErr = errors.New("channel_failover_exhausted")
+		selectionErr = errChannelFailoverExhausted
 	}
 	return nil, state.group, selectionErr
 }
@@ -800,6 +803,9 @@ func channelAuthRecoveryFinished(err *types.NewAPIError) bool {
 // the primary enabled lets availability checks observe its recovery even when
 // a broad global automatic-disable rule includes 429 or 503.
 func channelFailoverTransientCapacity(c *gin.Context, channelID int, err *types.NewAPIError) bool {
+	if route := requestOrderedGroupRoute(c); route != nil && route.current == channelID && (channelCapacityExhausted(err) || err.GetErrorCode() == Sub2APIWSAccountUnavailable) {
+		return true
+	}
 	state := requestChannelFailover(c)
 	if state == nil || state.setting.PrimaryChannelID != channelID || err == nil {
 		return false
@@ -842,7 +848,8 @@ func channelFailoverRetry(c *gin.Context, err *types.NewAPIError, retryTimes int
 		return PolicyDecision{}, false
 	}
 	decision := PolicyDecision{Action: "stop", Source: "channel_failover"}
-	capacity := channelCapacityExhausted(err)
+	confirmedEmpty := channelCapacityExhausted(err)
+	capacity := confirmedEmpty || err.GetErrorCode() == Sub2APIWSAccountUnavailable && requestOrderedGroupRoute(c) != nil
 	rotation := channelRotationWaiting(err)
 	recoveryFinished := channelAuthRecoveryFinished(err)
 	if state.current == state.setting.PrimaryChannelID {
@@ -873,7 +880,7 @@ func channelFailoverRetry(c *gin.Context, err *types.NewAPIError, retryTimes int
 				entry.nextCheck = now
 			}
 		}
-		observedEmpty := capacity && state.state != "rotation_wait" && state.state != "auth_recovery_wait" && entry != nil && !entry.channel.ChannelInfo.IsMultiKey
+		observedEmpty := confirmedEmpty && state.state != "rotation_wait" && state.state != "auth_recovery_wait" && entry != nil && !entry.channel.ChannelInfo.IsMultiKey
 		if observedEmpty {
 			entry.revision++
 			entry.state, entry.readyCount, entry.recovering = "empty", 0, true

@@ -332,17 +332,25 @@ func (s *responsesWSSession) runCall(c *gin.Context, state *responsesWSCallState
 	service.GetChannelConstraints(c).AddFilter(appdto.ChannelFilter{Kind: appdto.FilterRequestPath, RequestPath: c.Request.URL.Path})
 	service.SetRequestServiceTierFilter(c, modelName, create.Request.ServiceTier)
 	service.GetChannelConstraints(c).AddFilter(appdto.ChannelFilter{Kind: appdto.FilterResponsesWebSocket})
-	retry := &service.RetryParam{Ctx: c, TokenGroup: common.GetContextKeyString(c, appconstant.ContextKeyUsingGroup), ModelName: modelName, RequestPath: c.Request.URL.Path, Retry: common.GetPointer(0)}
+	retry := &service.RetryParam{
+		Ctx: c, TokenGroup: common.GetContextKeyString(c, appconstant.ContextKeyUsingGroup), ModelName: modelName,
+		RequestPath: c.Request.URL.Path, Retry: common.GetPointer(0), PreserveConnection: create.Request.PreviousResponseID != "",
+	}
 	var firstChannel *appmodel.Channel
-	if s.lockedChannelID != 0 && service.ChannelFailoverMayReroute(c, modelName, retry.TokenGroup, s.lockedChannelID) {
-		firstChannel, apiErr = selectResponsesWSChannel(c, modelName, retry)
+	if s.lockedChannelID != 0 && retry.MayRerouteConnection(s.lockedChannelID) {
+		firstChannel, apiErr = chooseResponsesWSChannel(c, modelName, retry)
 		if apiErr != nil {
 			groupSelectionFailed = true
 			return apiErr
 		}
 		if firstChannel.Id == s.lockedChannelID && !service.ChannelMaintenanceWaited(c) {
+			s.lockedGroup = cmp.Or(common.GetContextKeyString(c, appconstant.ContextKeyAutoGroup), retry.TokenGroup)
 			firstChannel = nil
 		} else {
+			if apiErr = middleware.SetupContextForSelectedChannel(c, firstChannel, modelName); apiErr != nil {
+				groupSelectionFailed = true
+				return apiErr
+			}
 			s.detachTarget()
 		}
 	}
@@ -446,7 +454,7 @@ routeAttempt:
 				}
 				service.ResetStatusCode(apiErr, c.GetString("status_code_mapping"))
 				info.LastError = apiErr
-				decision := service.DecideRelayRetry(c, apiErr, service.ChannelFailoverRetryBudget(c)-retry.GetRetry())
+				decision := retry.DecideRelayRetry(apiErr)
 				service.RecordPolicyFailure(c, channel.Id, apiErr, decision)
 				service.ProcessChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, info.ApiKey, channel.GetAutoBan()), apiErr, info)
 				if decision.Action == "retry" {
@@ -543,11 +551,51 @@ routeAttempt:
 	var sentControl []byte
 	// cancelled is set once the response.cancel of a stop went upstream.
 	cancelled := false
+	replayStopReason := func() string {
+		switch {
+		case accepted || forwarded:
+			return "response_started"
+		case stopErr != nil:
+			return "local_rejection"
+		case cancelled || pendingControl != nil || sentControl != nil || len(state.controls) > 0:
+			return "request_cancelled"
+		default:
+			return ""
+		}
+	}
+	retryBeforeAcceptance := func(rejected *types.NewAPIError) bool {
+		decision := service.PolicyDecision{Action: "stop", Reason: replayStopReason(), Source: "system"}
+		if decision.Reason == "" {
+			decision = retry.DecideRelayRetry(rejected)
+		}
+		service.RecordPolicyFailure(c, s.lockedChannelID, rejected, decision)
+		if decision.Action != "retry" {
+			return false
+		}
+		if probeObserver != nil {
+			service.RecordPassiveChannelProbeResult(probes, probeObserver.Result(c.Request.Context(), info, rejected))
+			probeObserver = nil
+		}
+		idle.Stop()
+		s.detachTarget()
+		retry.IncreaseRetry()
+		return true
+	}
 	for {
 		select {
 		case incoming := <-state.inbox:
 			idle.Reset(timeout)
 			if incoming.err != nil {
+				if info.ChannelType == appconstant.ChannelTypeSub2API && retry.HasOrderedGroupRoute() && replayStopReason() == "" {
+					if closed, ok := errors.AsType[*websocket.CloseError](incoming.err); ok && closed.Code == websocket.CloseTryAgainLater && closed.Text == "no available account" {
+						rejected := types.WithOpenAIError(types.OpenAIError{Code: service.Sub2APIWSAccountUnavailable, Type: "api_error", Message: closed.Text}, http.StatusServiceUnavailable, types.ErrOptionWithSkipRetry())
+						if retryBeforeAcceptance(rejected) {
+							goto routeAttempt
+						}
+						s.detachTarget()
+						return rejected
+					}
+				}
 				finishSocket()
 				info.StreamStatus.SetEndReason(relaycommon.StreamEndReasonScannerErr, incoming.err)
 				state.closeCode, state.closeReason = websocket.CloseInternalServerErr, "upstream connection closed"
@@ -635,21 +683,10 @@ routeAttempt:
 						ConsumeResponsesQuota(c, info, accumulator.Finish())
 						return nil
 					}
-					if !service.HasChannelFailover(c) {
+					if !service.HasChannelFailover(c) && !retry.HasOrderedGroupRoute() {
 						return rejected
 					}
-					decision := service.DecideRelayRetry(c, rejected, service.ChannelFailoverRetryBudget(c)-retry.GetRetry())
-					if forwarded {
-						decision = service.PolicyDecision{Action: "stop", Reason: "response_started", Source: "channel_failover"}
-					}
-					service.RecordPolicyFailure(c, s.lockedChannelID, rejected, decision)
-					if decision.Action == "retry" {
-						if probeObserver != nil {
-							service.RecordPassiveChannelProbeResult(probes, probeObserver.Result(c.Request.Context(), info, rejected))
-							probeObserver = nil
-						}
-						s.detachTarget()
-						retry.IncreaseRetry()
+					if retryBeforeAcceptance(rejected) {
 						goto routeAttempt
 					}
 					return rejected
@@ -1293,10 +1330,20 @@ func checkResponsesWSModelAccess(c *gin.Context, modelName string) *types.NewAPI
 	return nil
 }
 
-// selectResponsesWSChannel narrows the shared HTTP selection to channels that
-// speak the Responses WebSocket protocol and renders its outcome as a
-// non-retryable NewAPIError.
 func selectResponsesWSChannel(c *gin.Context, modelName string, retryParam *service.RetryParam) (*appmodel.Channel, *types.NewAPIError) {
+	channel, apiErr := chooseResponsesWSChannel(c, modelName, retryParam)
+	if apiErr != nil {
+		return nil, apiErr
+	}
+	if err := middleware.SetupContextForSelectedChannel(c, channel, modelName); err != nil {
+		return nil, err
+	}
+	return channel, nil
+}
+
+// chooseResponsesWSChannel selects a Responses WebSocket-capable channel
+// without rotating the upstream credential of a connection that can be reused.
+func chooseResponsesWSChannel(c *gin.Context, modelName string, retryParam *service.RetryParam) (*appmodel.Channel, *types.NewAPIError) {
 	constraints := service.GetChannelConstraints(c)
 	if !slices.ContainsFunc(constraints.Filters, func(filter appdto.ChannelFilter) bool {
 		return filter.Kind == appdto.FilterResponsesWebSocket
@@ -1305,6 +1352,9 @@ func selectResponsesWSChannel(c *gin.Context, modelName string, retryParam *serv
 	}
 	channel, _, selectErr := service.SelectChannelForRequest(c, modelName, retryParam)
 	if selectErr != nil {
+		if selectErr.Upstream != nil {
+			return nil, selectErr.Upstream
+		}
 		message := selectErr.Message
 		if selectErr.MessageID != "" {
 			message = i18n.T(c, selectErr.MessageID, selectErr.Params)
@@ -1314,9 +1364,6 @@ func selectResponsesWSChannel(c *gin.Context, modelName string, retryParam *serv
 			code = types.ErrorCodeGetChannelFailed
 		}
 		return nil, types.NewErrorWithStatusCode(errors.New(message), code, selectErr.StatusCode, types.ErrOptionWithSkipRetry())
-	}
-	if err := middleware.SetupContextForSelectedChannel(c, channel, modelName); err != nil {
-		return nil, err
 	}
 	return channel, nil
 }

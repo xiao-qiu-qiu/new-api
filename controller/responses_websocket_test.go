@@ -1052,6 +1052,159 @@ func TestResponsesPrimaryBackupFailover(t *testing.T) {
 	}
 }
 
+func TestResponsesWebSocketOrderedGroupRetry(t *testing.T) {
+	for _, scenario := range []struct {
+		name, code, beforeRejection, closeReason   string
+		crossGroup, wantFallback, unavailableGroup bool
+		sub2api, firstContinuation                 bool
+	}{
+		{name: "capacity before acceptance", code: "no_available_accounts", crossGroup: true, wantFallback: true},
+		{name: "no eligible later group", code: "no_available_accounts", crossGroup: true, unavailableGroup: true},
+		{name: "ordinary rejection", code: "upstream_unavailable", crossGroup: true},
+		{name: "cross-group disabled", code: "no_available_accounts"},
+		{name: "accepted", code: "no_available_accounts", crossGroup: true, beforeRejection: `{"type":"response.created","response":{"id":"accepted","status":"in_progress"}}`},
+		{name: "output already forwarded", code: "no_available_accounts", crossGroup: true, beforeRejection: `{"type":"upstream.notice"}`},
+		{name: "Sub2API account admission close", closeReason: "no available account", sub2api: true, crossGroup: true, wantFallback: true},
+		{name: "Sub2API account admission close without fallback", code: service.Sub2APIWSAccountUnavailable, closeReason: "no available account", sub2api: true, crossGroup: true, unavailableGroup: true},
+		{name: "ordinary Sub2API close", closeReason: "temporarily unavailable", sub2api: true, crossGroup: true},
+		{name: "Sub2API account admission close after output", closeReason: "no available account", sub2api: true, crossGroup: true, beforeRejection: `{"type":"upstream.notice"}`},
+		{name: "same close from a different provider", closeReason: "no available account", crossGroup: true},
+		{name: "Sub2API account admission close during initial continuation", closeReason: "no available account", sub2api: true, crossGroup: true, firstContinuation: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			var primaryCalls, fallbackCalls, fallbackConnections atomic.Int32
+			previousRetries := common.RetryTimes
+			common.RetryTimes = 0
+			t.Cleanup(func() { common.RetryTimes = previousRetries })
+			expression := `tier("request", fixed(0))`
+			if scenario.wantFallback {
+				expression = `tier("request", fixed(0.000002))`
+			}
+			fixture := newResponsesWSBillingTest(t, expression, func(ws *websocket.Conn, _ *http.Request) {
+				for {
+					if _, _, err := ws.ReadMessage(); err != nil {
+						return
+					}
+					call := primaryCalls.Add(1)
+					if call == 1 {
+						if scenario.beforeRejection != "" {
+							_ = ws.WriteMessage(websocket.TextMessage, []byte(scenario.beforeRejection))
+						}
+						if scenario.closeReason != "" {
+							_ = ws.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseTryAgainLater, scenario.closeReason), time.Now().Add(time.Second))
+							return
+						}
+						_ = ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"error","status":503,"error":{"code":%q,"type":"api_error","message":"upstream rejected"}}`, scenario.code)))
+						continue
+					}
+					_ = ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"primary-%d","status":"completed","usage":{"input_tokens":1,"total_tokens":1}}}`, call)))
+				}
+			})
+			if scenario.sub2api {
+				require.NoError(t, model.DB.Model(fixture.channel).Update("type", constant.ChannelTypeSub2API).Error)
+			}
+			previousUsableGroups := setting.UserUsableGroups2JSONString()
+			require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{"default":"Default","vip":"VIP"}`))
+			t.Cleanup(func() { require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(previousUsableGroups)) })
+			require.NoError(t, config.GlobalConfig.LoadFromDB(map[string]string{"group_ratio_setting.group_ratio": `{"default":1,"vip":3}`}))
+			require.NoError(t, model.DB.First(fixture.token, fixture.token.Id).Error)
+			fixture.token.Group, fixture.token.CrossGroupRetry = "auto", scenario.crossGroup
+			require.NoError(t, fixture.token.SetAutoGroups([]string{"default", "vip"}))
+			require.NoError(t, fixture.token.Update())
+
+			fallback := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				ws, err := (&websocket.Upgrader{}).Upgrade(w, req, nil)
+				if err != nil {
+					return
+				}
+				fallbackConnections.Add(1)
+				defer ws.Close()
+				for {
+					_, body, err := ws.ReadMessage()
+					if err != nil {
+						return
+					}
+					call := fallbackCalls.Add(1)
+					if call == 2 {
+						var event struct {
+							PreviousResponseID string `json:"previous_response_id"`
+						}
+						assert.NoError(t, common.Unmarshal(body, &event))
+						assert.Equal(t, "fallback-1", event.PreviousResponseID)
+					}
+					_ = ws.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"fallback-%d","status":"completed","usage":{"input_tokens":1,"total_tokens":1}}}`, call)))
+				}
+			}))
+			t.Cleanup(fallback.Close)
+			channel := &model.Channel{Name: "ordered-fallback", Key: "fallback-key", BaseURL: &fallback.URL, Group: "vip", Models: "ws-billing", Type: constant.ChannelTypeOpenAI, Status: common.ChannelStatusEnabled}
+			channel.SetSetting(dto.ChannelSettings{ResponsesWebSocketEnabled: true})
+			require.NoError(t, model.DB.Create(channel).Error)
+			if !scenario.unavailableGroup {
+				require.NoError(t, model.DB.Create(&model.Ability{ChannelId: channel.Id, Model: "ws-billing", Group: "vip", Enabled: true}).Error)
+			}
+			t.Cleanup(func() {
+				require.NoError(t, model.DB.Where("channel_id = ?", channel.Id).Delete(&model.Ability{}).Error)
+				require.NoError(t, model.DB.Delete(channel).Error)
+			})
+
+			const create = `{"type":"response.create","model":"ws-billing","input":"hello"}`
+			const continueResponse = `{"type":"response.create","model":"ws-billing","input":"hello","previous_response_id":"fallback-1"}`
+			firstCreate := create
+			if scenario.firstContinuation {
+				firstCreate = continueResponse
+			}
+			require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(firstCreate)))
+			if scenario.beforeRejection != "" {
+				var output map[string]any
+				require.NoError(t, common.UnmarshalJsonStr(scenario.beforeRejection, &output))
+				assert.Equal(t, output["type"], readResponsesWSTestEvent(t, fixture.client)["type"])
+			}
+			if !scenario.wantFallback {
+				if scenario.closeReason != "" && scenario.code == "" {
+					require.NoError(t, fixture.client.SetReadDeadline(time.Now().Add(3*time.Second)))
+					_, _, err := fixture.client.ReadMessage()
+					assert.True(t, websocket.IsCloseError(err, websocket.CloseInternalServerErr), "expected connection close, got %v", err)
+				} else {
+					first := readResponsesWSTestEvent(t, fixture.client)
+					require.Equal(t, "error", first["type"], "%v", first)
+					assert.Equal(t, scenario.code, first["error"].(map[string]any)["code"])
+				}
+				assert.Zero(t, fallbackCalls.Load())
+				assert.EqualValues(t, 1, primaryCalls.Load())
+				fixture.closeAndWait(t)
+				return
+			}
+			first := readResponsesWSTestEvent(t, fixture.client)
+			require.Equal(t, "response.completed", first["type"], "%v", first)
+			assert.Equal(t, "fallback-1", first["response"].(map[string]any)["id"])
+			require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(continueResponse)))
+			continued := readResponsesWSTestEvent(t, fixture.client)
+			require.Equal(t, "response.completed", continued["type"], "%v", continued)
+			assert.Equal(t, "fallback-2", continued["response"].(map[string]any)["id"])
+			assert.EqualValues(t, 1, fallbackConnections.Load(), "the continuation uses the original upstream socket")
+			require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(create)))
+			second := readResponsesWSTestEvent(t, fixture.client)
+			require.Equal(t, "response.completed", second["type"], "%v", second)
+			assert.Equal(t, "primary-2", second["response"].(map[string]any)["id"])
+
+			require.NoError(t, model.DB.Where("channel_id = ?", channel.Id).Delete(&model.Ability{}).Error)
+			require.NoError(t, model.DB.Model(fixture.channel).Update("group", "default,vip").Error)
+			require.NoError(t, model.DB.Create(&model.Ability{ChannelId: fixture.channel.Id, Model: "ws-billing", Group: "vip", Enabled: true}).Error)
+			require.NoError(t, model.DB.First(fixture.token, fixture.token.Id).Error)
+			require.NoError(t, fixture.token.SetAutoGroups([]string{"vip", "default"}))
+			require.NoError(t, fixture.token.Update())
+			require.NoError(t, fixture.client.WriteMessage(websocket.TextMessage, []byte(create)))
+			third := readResponsesWSTestEvent(t, fixture.client)
+			require.Equal(t, "response.completed", third["type"], "%v", third)
+			assert.Equal(t, "primary-3", third["response"].(map[string]any)["id"])
+			assert.EqualValues(t, 2, fixture.connections.Load(), "the selected group changed, not the upstream socket")
+			assert.EqualValues(t, 2, fallbackCalls.Load())
+			fixture.closeAndWait(t)
+			assertResponsesWSAccounting(t, fixture, []int{3, 3, 1, 3})
+		})
+	}
+}
+
 func TestResponsesWebSocketInitialUpstreamRejectionRefundsReservation(t *testing.T) {
 	for _, tc := range []struct {
 		name, upstream, wantType, wantMessage string

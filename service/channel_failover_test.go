@@ -25,6 +25,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	kitdto "github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/model_setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/gin-gonic/gin"
@@ -116,6 +117,21 @@ func newChannelFailoverContext(t *testing.T) *gin.Context {
 	c := concurrencySelectionContext(t)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"alias","input":[{"type":"reasoning","encrypted_content":"unchanged"},{"type":"compaction","encrypted_content":"also-unchanged"}]}`))
 	return c
+}
+
+func newChannelFailoverAutoGroupContext(t *testing.T, groups []string, crossGroupRetry bool) *gin.Context {
+	t.Helper()
+	request := newChannelFailoverContext(t)
+	groupSettings := setting.PinGroupSettings(request)
+	groupSettings.UsableGroups = map[string]string{"default": "Default", "vip": "VIP"}
+	groupSettings.Ratios = map[string]float64{"default": 1, "vip": 2}
+	groupSettings.SpecialUsableGroups = nil
+	groupSettings.MaxTokenAutoGroups = 2
+	common.SetContextKey(request, constant.ContextKeyTokenGroup, "auto")
+	common.SetContextKey(request, constant.ContextKeyUsingGroup, "auto")
+	common.SetContextKey(request, constant.ContextKeyTokenAutoGroups, groups)
+	common.SetContextKey(request, constant.ContextKeyTokenCrossGroupRetry, crossGroupRetry)
+	return request
 }
 
 func selectChannelFailoverForTest(t *testing.T, c *gin.Context, models ...string) *model.Channel {
@@ -657,6 +673,192 @@ func TestChannelFailoverZeroGlobalRetryAndStructuredCapacity(t *testing.T) {
 	assert.Equal(t, "response_started", DecideRelayRetry(c, capacity, 1).Reason)
 	key := makeChannelFailoverKey(c, primary, "alias", setting)
 	assert.Equal(t, "empty", channelFailover.entries[key].state, "a real rejection is still observed without replaying output")
+}
+
+func TestChannelFailoverAcrossTokenAutoGroups(t *testing.T) {
+	const (
+		primaryID, firstBackupID, secondBackupID, nextGroupID = 7141, 15, 7143, 7144
+		modelName                                             = "alias"
+	)
+	for _, test := range []struct {
+		name           string
+		want           []int
+		cachedEmpty    bool
+		disableBackups bool
+		reverseGroups  bool
+		disableCross   bool
+		pin            bool
+		streamStarted  bool
+		errorCode      string
+		status         int
+		wantStop       bool
+	}{
+		{name: "known empty uses its own eligible backup first", cachedEmpty: true, want: []int{firstBackupID}},
+		{name: "known empty without a group backup starts in the next group", cachedEmpty: true, disableBackups: true, want: []int{nextGroupID}},
+		{name: "live exhaustion tries each group backup before the next group", want: []int{primaryID, firstBackupID, secondBackupID, nextGroupID}},
+		{name: "higher priority group without a capacity rule comes first", reverseGroups: true, want: []int{nextGroupID}},
+		{name: "disabled cross group retry preserves the same group chain", disableCross: true, want: []int{primaryID, firstBackupID, secondBackupID}, wantStop: true},
+		{name: "rotation waits on the primary", errorCode: "account_rotation", want: []int{primaryID}, wantStop: true},
+		{name: "client input rejection does not cross groups", errorCode: "invalid_request_error", status: http.StatusBadRequest, want: []int{primaryID}, wantStop: true},
+		{name: "a pinned primary cannot fail over", pin: true, want: []int{primaryID}, wantStop: true},
+		{name: "response already delivered cannot be replayed", streamStarted: true, want: []int{primaryID}, wantStop: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db := channelFailoverDatabase(t, sqlite.Open(":memory:"))
+			primary, _ := channelFailoverFixture(t, db, true)
+			createChannelSelectAutoGroupsChannel(t, db, nextGroupID, "vip", modelName)
+			require.NoError(t, model.UpdateRequestPolicyOptions(map[string]string{
+				operation_setting.ChannelFailoverFallbackChainsOption: `[{"groups":["default"],"model_regex":["^alias$"],"channel_ids":[15,7143]}]`,
+			}))
+			if test.disableBackups {
+				require.NoError(t, db.Model(&model.Channel{}).Where("id IN ?", []int{firstBackupID, secondBackupID}).Update("status", common.ChannelStatusManuallyDisabled).Error)
+			}
+			model.InitChannelCache()
+			availability := "ready"
+			if test.cachedEmpty {
+				availability = "empty"
+			}
+			recordChannelFailoverAvailability(t, primary, model.CurrentRequestPolicy().Failover, availability)
+
+			groups := []string{"default", "vip"}
+			if test.reverseGroups {
+				groups = []string{"vip", "default"}
+			}
+			request := newChannelFailoverAutoGroupContext(t, groups, !test.disableCross)
+			if test.pin {
+				GetChannelConstraints(request).AddPin(dto.ChannelPin{ChannelId: primaryID, Source: dto.PinSourceToken, RetryMode: dto.PinRetrySingleAttempt})
+			}
+
+			retry := &RetryParam{Ctx: request, TokenGroup: "auto", ModelName: modelName}
+			channel, group, selectErr := SelectChannelForRequest(request, modelName, retry)
+			require.Nil(t, selectErr)
+			if test.streamStarted {
+				_, err := request.Writer.WriteString("event: response.created\n\n")
+				require.NoError(t, err)
+			}
+			code, status := test.errorCode, test.status
+			if code == "" {
+				code = "no_available_accounts"
+			}
+			if status == 0 {
+				status = http.StatusServiceUnavailable
+			}
+			upstream := types.WithOpenAIError(types.OpenAIError{Code: code, Type: "api_error"}, status)
+			for attempt, wantID := range test.want {
+				require.NotNil(t, channel)
+				assert.Equal(t, wantID, channel.Id)
+				wantGroup := "default"
+				if wantID == nextGroupID {
+					wantGroup = "vip"
+				}
+				if !test.pin {
+					assert.Equal(t, wantGroup, group)
+					assert.Equal(t, wantGroup, common.GetContextKeyString(request, constant.ContextKeyAutoGroup))
+				}
+				if attempt+1 == len(test.want) {
+					if test.wantStop {
+						assert.Equal(t, "stop", retry.DecideRelayRetry(upstream).Action)
+					}
+					break
+				}
+				require.Equal(t, "retry", retry.DecideRelayRetry(upstream).Action)
+				retry.IncreaseRetry()
+				var err error
+				channel, group, err = CacheGetRandomSatisfiedChannel(retry)
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestChannelFailoverStrictAutoGroupWithoutProbe(t *testing.T) {
+	const (
+		firstGroupID, secondGroupID = 7141, 7144
+		modelName                   = "alias"
+	)
+	db := channelFailoverDatabase(t, sqlite.Open(":memory:"))
+	channelFailoverFixture(t, db, true)
+	require.NoError(t, db.Model(&model.Channel{}).Where("id IN ?", []int{15, 7143}).Update("status", common.ChannelStatusManuallyDisabled).Error)
+	require.NoError(t, db.Model(&model.Channel{}).Where("id = ?", firstGroupID).Update("type", constant.ChannelTypeSub2API).Error)
+	createChannelSelectAutoGroupsChannel(t, db, secondGroupID, "vip", modelName)
+	require.NoError(t, model.UpdateRequestPolicyOptions(map[string]string{
+		"channel_failover_setting.enabled":           "false",
+		"channel_affinity_setting.enabled":           "true",
+		"channel_affinity_setting.switch_on_success": "true",
+		"channel_affinity_setting.rules":             `[{"name":"legacy-codex-test","model_regex":["^alias$"],"path_regex":["^/v1/responses$"],"key_sources":[{"type":"gjson","path":"prompt_cache_key"}],"skip_retry_on_failure":true,"include_using_group":true,"include_rule_name":true}]`,
+	}))
+	model.InitChannelCache()
+
+	for _, test := range []struct {
+		name          string
+		code          string
+		disableCross  bool
+		streamStarted bool
+		stopReason    string
+	}{
+		{name: "structured exhaustion overrides legacy strict"},
+		{name: "ordinary 503 preserves strict even with a no accounts message", code: "upstream_error", stopReason: "strict_session"},
+		{name: "stream start forbids replay", streamStarted: true, stopReason: "response_started"},
+		{name: "cross group opt in is required", disableCross: true, stopReason: "strict_session"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			newRequest := func() (*gin.Context, *RetryParam) {
+				request := newChannelFailoverAutoGroupContext(t, []string{"default", "vip"}, !test.disableCross)
+				body := fmt.Sprintf(`{"model":"alias","input":"ping","prompt_cache_key":%q}`, t.Name())
+				request.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(body))
+				t.Cleanup(func() { common.CleanupBodyStorage(request) })
+				return request, &RetryParam{Ctx: request, TokenGroup: "auto", ModelName: modelName}
+			}
+			request, retry := newRequest()
+			channel, group, selectErr := SelectChannelForRequest(request, modelName, retry)
+			require.Nil(t, selectErr)
+			require.NotNil(t, channel)
+			assert.Equal(t, firstGroupID, channel.Id)
+			assert.Equal(t, "default", group)
+			assert.Equal(t, "strict", RequestPolicy(request).SessionMode)
+			assert.False(t, HasChannelFailover(request))
+			if test.streamStarted {
+				_, err := request.Writer.WriteString("event: response.created\n\n")
+				require.NoError(t, err)
+			}
+			code := test.code
+			if code == "" {
+				code = "no_available_accounts"
+			}
+			upstream := types.WithOpenAIError(types.OpenAIError{Code: code, Type: "api_error", Message: "No available accounts"}, http.StatusServiceUnavailable)
+			decision := retry.DecideRelayRetry(upstream)
+			if test.stopReason != "" {
+				assert.Equal(t, "stop", decision.Action)
+				assert.Equal(t, test.stopReason, decision.Reason)
+				return
+			}
+			require.Equal(t, "retry", decision.Action)
+			retry.IncreaseRetry()
+			backup, backupGroup, err := CacheGetRandomSatisfiedChannel(retry)
+			require.NoError(t, err)
+			require.NotNil(t, backup)
+			assert.Equal(t, secondGroupID, backup.Id)
+			assert.Equal(t, "vip", backupGroup)
+
+			binding, _ := newRequest()
+			GetPreferredChannelByAffinity(binding, modelName, "auto")
+			t.Cleanup(func() { ClearCurrentChannelAffinityCache(binding) })
+			RecordChannelAffinity(binding, secondGroupID)
+			boundID, found := GetPreferredChannelByAffinity(binding, modelName, "auto")
+			require.True(t, found)
+			require.Equal(t, secondGroupID, boundID)
+			t.Cleanup(model.InitChannelCache)
+			for _, status := range []int{common.ChannelStatusEnabled, common.ChannelStatusManuallyDisabled} {
+				model.CacheUpdateChannelStatus(secondGroupID, status)
+				fresh, freshRetry := newRequest()
+				selected, selectedGroup, selectionErr := SelectChannelForRequest(fresh, modelName, freshRetry)
+				require.Nil(t, selectionErr)
+				require.NotNil(t, selected)
+				assert.Equal(t, firstGroupID, selected.Id)
+				assert.Equal(t, "default", selectedGroup)
+			}
+		})
+	}
 }
 
 func TestChannelFailoverHonorsPinsFiltersGroupsAndUnrelatedSessions(t *testing.T) {

@@ -261,7 +261,7 @@ func Relay(c *gin.Context, relayFormat types.RelayFormat) {
 		// Model mapping can reveal a generation model behind a client alias.
 		service.MarkMediaGenerationRequest(c, relayInfo)
 
-		decision := service.DecideRelayRetry(c, newAPIError, service.ChannelFailoverRetryBudget(c)-retryParam.GetRetry())
+		decision := retryParam.DecideRelayRetry(newAPIError)
 		service.RecordPolicyFailure(c, channel.Id, newAPIError, decision)
 		processChannelError(c, *types.NewChannelError(channel.Id, channel.Type, channel.Name, channel.ChannelInfo.IsMultiKey, common.GetContextKeyString(c, constant.ContextKeyChannelKey), channel.GetAutoBan()), newAPIError, relayInfo)
 
@@ -382,6 +382,9 @@ func getChannel(c *gin.Context, info *relaycommon.RelayInfo, retryParam *service
 	}
 	channel, selectGroup, err := service.CacheGetRandomSatisfiedChannel(retryParam)
 	if err != nil {
+		if upstream, ok := errors.AsType[*types.NewAPIError](err); ok {
+			return nil, upstream
+		}
 		if capacityErr := service.ChannelConcurrencyError(c, err); capacityErr != nil {
 			return nil, capacityErr
 		}

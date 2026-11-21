@@ -575,6 +575,146 @@ func (transport relayRecoveryTransport) RoundTrip(request *http.Request) (*http.
 	return transport(request)
 }
 
+func TestRelayAutoGroupsRetryCapacityFailureWithZeroRetryBudget(t *testing.T) {
+	db := modelManagementDB(t, "sqlite", "")
+	require.NoError(t, i18n.Init())
+	require.NoError(t, db.AutoMigrate(&model.Token{}, &model.Log{}, &model.SystemTask{}))
+	t.Setenv("CYBER_SESSION_BLOCK_ENABLED", "false")
+	previousPolicy := maps.Clone(model.CurrentRequestPolicy().Options)
+	previousRetries, previousCount := common.RetryTimes, constant.CountToken
+	previousLogs, previousErrors := common.LogConsumeEnabled, constant.ErrorLogEnabled
+	previousBatch, previousExport := common.BatchUpdateEnabled, common.DataExportEnabled
+	previousDisable := common.AutomaticDisableChannelEnabled
+	previousRatios, previousGroups := ratio_setting.GroupRatio2JSONString(), setting.UserUsableGroups2JSONString()
+	previousAutoGroups, previousMaxGroups := setting.AutoGroups2JsonString(), setting.GetMaxTokenAutoGroups()
+	t.Cleanup(func() {
+		require.NoError(t, model.UpdateRequestPolicyOptions(previousPolicy))
+		common.RetryTimes, constant.CountToken = previousRetries, previousCount
+		common.LogConsumeEnabled, constant.ErrorLogEnabled = previousLogs, previousErrors
+		common.BatchUpdateEnabled, common.DataExportEnabled = previousBatch, previousExport
+		common.AutomaticDisableChannelEnabled = previousDisable
+		require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(previousRatios))
+		require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(previousGroups))
+		require.NoError(t, setting.UpdateAutoGroupsByJsonString(previousAutoGroups))
+		require.NoError(t, setting.UpdateMaxTokenAutoGroups(strconv.Itoa(previousMaxGroups)))
+	})
+	require.NoError(t, model.UpdateRequestPolicyOptions(map[string]string{
+		"RetryTimes": "0", "AutomaticDisableChannelEnabled": "false",
+		"channel_affinity_setting.enabled": "false", "channel_failover_setting.enabled": "false",
+	}))
+	constant.CountToken = false
+	common.LogConsumeEnabled, constant.ErrorLogEnabled = true, false
+	common.BatchUpdateEnabled, common.DataExportEnabled = false, false
+
+	const modelName, primaryGroup, backupGroup = "auto-routing-fixture", "fixture-first", "fixture-backup"
+	const path = "/v1/chat/completions"
+	const primaryPath, backupPath = "/" + primaryGroup + path, "/" + backupGroup + path
+	require.NoError(t, ratio_setting.UpdateGroupRatioByJSONString(`{"fixture-first":1,"fixture-backup":2}`))
+	require.NoError(t, setting.UpdateUserUsableGroupsByJSONString(`{"fixture-first":"First","fixture-backup":"Backup"}`))
+	require.NoError(t, setting.UpdateAutoGroupsByJsonString(`["fixture-backup","fixture-first"]`))
+	require.NoError(t, setting.UpdateMaxTokenAutoGroups("2"))
+	require.NoError(t, ratio_setting.UpdateModelRatioByJSONString(`{"auto-routing-fixture":1}`))
+	require.NoError(t, ratio_setting.UpdateCompletionRatioByJSONString(`{"auto-routing-fixture":1}`))
+	user := model.User{Username: "auto-route-fixture", Group: "fixture-user", Quota: 100000, Status: common.UserStatusEnabled, Setting: `{"billing_preference":"wallet_only"}`}
+	require.NoError(t, db.Create(&user).Error)
+	token := model.Token{UserId: user.Id, Name: "auto-route-token", Key: common.GetRandomString(48), Status: common.TokenStatusEnabled,
+		RemainQuota: 100000, ExpiredTime: -1, Group: "auto", AutoGroups: `["fixture-first","fixture-backup"]`, CrossGroupRetry: true}
+	require.NoError(t, db.Create(&token).Error)
+
+	var primaryAvailable atomic.Bool
+	var attemptsMu sync.Mutex
+	var attempts []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attemptsMu.Lock()
+		attempts = append(attempts, r.URL.Path)
+		attemptsMu.Unlock()
+		var group string
+		switch r.URL.Path {
+		case primaryPath:
+			group = primaryGroup
+		case backupPath:
+			group = backupGroup
+		default:
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if group == primaryGroup && !primaryAvailable.Load() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":{"type":"server_error","code":"no_available_accounts","message":"Pool is empty"}}`)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `{"id":"chatcmpl-%s","object":"chat.completion","model":"%s","choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`, group, modelName)
+	}))
+	t.Cleanup(upstream.Close)
+	channels := make(map[string]int, 2)
+	for _, group := range []string{primaryGroup, backupGroup} {
+		baseURL := upstream.URL + "/" + group
+		channel := model.Channel{Name: group, Type: constant.ChannelTypeOpenAI, Key: "test-upstream-key", Status: common.ChannelStatusEnabled, Group: group, Models: modelName, BaseURL: &baseURL}
+		require.NoError(t, db.Create(&channel).Error)
+		require.NoError(t, channel.AddAbilities(db))
+		channels[group] = channel.Id
+	}
+	service.InitHttpClient()
+	engine := gin.New()
+	settled := make(chan string, 1)
+	engine.POST(path, middleware.RequestId(), middleware.BodyStorageCleanup(), middleware.TokenAuth(), middleware.Distribute(), func(c *gin.Context) {
+		Relay(c, types.RelayFormatOpenAI)
+		settled <- c.GetString(common.RequestIdKey)
+	})
+	gateway := httptest.NewServer(engine)
+	t.Cleanup(gateway.Close)
+	client := gateway.Client()
+	client.Timeout = 5 * time.Second
+
+	for _, testCase := range []struct {
+		name, group  string
+		primaryReady bool
+		wantAttempts []string
+		wantQuota    int
+	}{
+		{name: "primary exhausted", group: backupGroup, wantAttempts: []string{primaryPath, backupPath}, wantQuota: 4},
+		{name: "next request starts at recovered primary", group: primaryGroup, primaryReady: true, wantAttempts: []string{primaryPath}, wantQuota: 2},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			primaryAvailable.Store(testCase.primaryReady)
+			attemptsMu.Lock()
+			attempts = nil
+			attemptsMu.Unlock()
+			request, err := http.NewRequestWithContext(t.Context(), http.MethodPost, gateway.URL+path, strings.NewReader(`{"model":"auto-routing-fixture","messages":[{"role":"user","content":"hello"}]}`))
+			require.NoError(t, err)
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("Authorization", "Bearer "+token.Key)
+			response, err := client.Do(request)
+			require.NoError(t, err)
+			defer response.Body.Close()
+			body, err := io.ReadAll(response.Body)
+			require.NoError(t, err)
+			attemptsMu.Lock()
+			assert.Equal(t, testCase.wantAttempts, attempts, "actual upstream HTTP attempts in order")
+			attemptsMu.Unlock()
+			require.Equal(t, http.StatusOK, response.StatusCode, string(body))
+			assert.Contains(t, string(body), "chatcmpl-"+testCase.group)
+			assert.NotContains(t, string(body), "no_available_accounts")
+
+			requestID := response.Header.Get(common.RequestIdKey)
+			require.NotEmpty(t, requestID)
+			select {
+			case finished := <-settled:
+				require.Equal(t, requestID, finished)
+			case <-time.After(5 * time.Second):
+				t.Fatal("relay did not finish settlement")
+			}
+			var logs []model.Log
+			require.NoError(t, db.Where("request_id = ? AND type = ?", requestID, model.LogTypeConsume).Find(&logs).Error)
+			require.Len(t, logs, 1)
+			assert.Equal(t, testCase.group, logs[0].Group)
+			assert.Equal(t, channels[testCase.group], logs[0].ChannelId)
+			assert.Equal(t, testCase.wantQuota, logs[0].Quota, "charge uses the successful group's ratio")
+		})
+	}
+}
+
 func TestRelayAuthRecoveryPreservesFailoverBeforeOutput(t *testing.T) {
 	db := modelManagementDB(t, "sqlite", "")
 	t.Setenv("CYBER_SESSION_BLOCK_ENABLED", "false")

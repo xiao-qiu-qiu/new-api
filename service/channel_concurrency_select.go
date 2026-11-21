@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"net/http"
+	"slices"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
@@ -84,22 +85,23 @@ func ChannelConcurrencyError(c *gin.Context, err error) *types.NewAPIError {
 	return types.NewErrorWithStatusCode(errors.New(message), selectionErr.Code, selectionErr.StatusCode, types.ErrOptionWithSkipRetry())
 }
 
-func selectChannelWithConcurrency(c *gin.Context, group, modelName string, retry int, filters []dto.ChannelFilter) (*model.Channel, error) {
-	var fullChannels []int
+func selectChannelWithConcurrency(c *gin.Context, group, modelName string, retry int, filters []dto.ChannelFilter, excluded ...int) (*model.Channel, error) {
+	excluded = slices.Clip(excluded)
+	initial := len(excluded)
 	for {
-		channel, err := model.GetRandomSatisfiedChannel(group, modelName, retry, filters, fullChannels...)
+		channel, err := model.GetRandomSatisfiedChannel(group, modelName, retry, filters, excluded...)
 		if err != nil {
 			return nil, err
 		}
 		if channel == nil {
-			if len(fullChannels) > 0 {
+			if len(excluded) > initial {
 				return nil, errChannelConcurrencyLimited
 			}
 			return nil, nil
 		}
 		if err := acquireChannelConcurrency(c, channel); err != nil {
 			if errors.Is(err, errChannelConcurrencyLimited) {
-				fullChannels = append(fullChannels, channel.Id)
+				excluded = append(excluded, channel.Id)
 				continue
 			}
 			return nil, err

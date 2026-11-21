@@ -68,12 +68,13 @@ func AppendTaskPluginIdentityFilter(c *gin.Context, pluginKey string) {
 }
 
 type RetryParam struct {
-	Ctx          *gin.Context
-	TokenGroup   string
-	ModelName    string
-	RequestPath  string
-	Retry        *int
-	resetNextTry bool
+	Ctx                *gin.Context
+	TokenGroup         string
+	ModelName          string
+	RequestPath        string
+	PreserveConnection bool
+	Retry              *int
+	resetNextTry       bool
 }
 
 func (p *RetryParam) GetRetry() int {
@@ -139,6 +140,9 @@ func (p *RetryParam) ResetRetryNextTry() {
 //	         分组B, 优先级1
 func CacheGetRandomSatisfiedChannel(param *RetryParam) (*model.Channel, string, error) {
 	ReleaseChannelConcurrency(param.Ctx)
+	if route := requestOrderedGroupRoute(param.Ctx); route != nil {
+		return route.selectChannel(param)
+	}
 	prepareChannelMaintenanceScope(param.Ctx, param.ModelName, param.TokenGroup)
 	if state := requestChannelFailover(param.Ctx); state != nil {
 		return selectChannelFailover(param.Ctx, state)
@@ -379,6 +383,7 @@ func pinnedTaskPluginIdentities(c *gin.Context, expected string) ([]int, []strin
 // error code that clients match on.
 type ChannelSelectError struct {
 	StatusCode int
+	Upstream   *types.NewAPIError
 	Code       types.ErrorCode
 	MessageID  string
 	Params     map[string]any
@@ -432,14 +437,16 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 
 	usingGroup := retry.TokenGroup
 	preferredChannelID, preferredFound := 0, false
-	if retry.GetRetry() == 0 && requestChannelFailover(c) == nil {
-		preferredChannelID, preferredFound = GetPreferredChannelByAffinity(c, modelName, usingGroup)
-	}
+	ordered := retry.HasOrderedGroupRoute()
 	failover := requestChannelFailover(c)
-	if failover == nil && retry.GetRetry() == 0 {
-		failover = prepareChannelFailover(c, modelName, usingGroup, preferredChannelID, 0)
+	if retry.GetRetry() == 0 && failover == nil && !ordered {
+		preferredChannelID, preferredFound = GetPreferredChannelByAffinity(c, modelName, usingGroup)
+		ordered = retry.prepareOrderedGroupRoute(retry.orderedGroupCandidates(), preferredChannelID)
+		if !ordered {
+			failover = prepareChannelFailover(c, modelName, usingGroup, preferredChannelID, 0)
+		}
 	}
-	if state := failover; state != nil {
+	if state := failover; state != nil && !ordered {
 		channel, group, err := selectChannelFailover(c, state)
 		if err != nil {
 			if capacityErr := channelConcurrencySelectionError(err); capacityErr != nil {
@@ -452,7 +459,7 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 	var channel *model.Channel
 	var selectGroup string
 	affinityBusy := false
-	if retry.GetRetry() == 0 {
+	if retry.GetRetry() == 0 && !ordered {
 		if preferredFound {
 			affinityUsable := false
 			preferred, err := model.CacheGetChannel(preferredChannelID)
@@ -511,6 +518,9 @@ func SelectChannelForRequest(c *gin.Context, modelName string, retry *RetryParam
 			err = errChannelConcurrencyLimited
 		}
 		if err != nil {
+			if upstream, ok := errors.AsType[*types.NewAPIError](err); ok {
+				return nil, selectGroup, &ChannelSelectError{StatusCode: upstream.StatusCode, Code: upstream.GetErrorCode(), Message: upstream.Error(), Upstream: upstream}
+			}
 			if capacityErr := channelConcurrencySelectionError(err); capacityErr != nil {
 				return nil, selectGroup, capacityErr
 			}
