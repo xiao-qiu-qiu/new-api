@@ -16,13 +16,14 @@ const orderedGroupRouteKey = "ordered_token_group_route"
 const Sub2APIWSAccountUnavailable = "sub2api_ws_account_unavailable"
 
 type orderedGroupRoute struct {
-	groups    []string
-	index     int
-	advance   bool
-	preferred int
-	current   int
-	empty     []int
-	lastError *types.NewAPIError
+	groups         []string
+	index          int
+	advance        bool
+	preferred      int
+	priorityOffset int
+	current        int
+	empty          []int
+	lastError      *types.NewAPIError
 }
 
 func requestOrderedGroupRoute(c *gin.Context) *orderedGroupRoute {
@@ -100,6 +101,7 @@ func (route *orderedGroupRoute) selectChannel(p *RetryParam) (*model.Channel, st
 			route.advance = false
 			route.index++
 			route.current = 0
+			route.priorityOffset = 0
 			c.Set(channelFailoverContextKey, nil)
 			p.SetRetry(0)
 			continue
@@ -140,12 +142,14 @@ func (route *orderedGroupRoute) selectChannel(p *RetryParam) (*model.Channel, st
 				if err == nil {
 					channel = preferred
 					MarkChannelAffinityUsed(c, group, preferred.Id)
+					route.priorityOffset = 1
 				} else if ShouldSkipRetryAfterChannelAffinityFailure(c) {
 					return nil, group, err
 				}
 			}
 			if channel == nil && (err == nil || errors.Is(err, errChannelConcurrencyLimited)) {
-				channel, err = selectChannelWithConcurrency(c, group, p.ModelName, p.GetRetry(), filters, route.empty...)
+				priority := max(p.GetRetry()-route.priorityOffset, 0)
+				channel, err = selectChannelWithConcurrency(c, group, p.ModelName, priority, filters, route.empty...)
 			}
 		}
 		if channel != nil {
@@ -224,6 +228,7 @@ func (p *RetryParam) DecideRelayRetry(err *types.NewAPIError) PolicyDecision {
 			return PolicyDecision{Action: "stop", Reason: "channel_lookup_failed", Source: "token_groups"}
 		}
 		if next != nil {
+			route.priorityOffset = 0
 			p.SetRetry(0)
 			p.ResetRetryNextTry()
 			return PolicyDecision{Action: "retry", Reason: "channel_capacity_exhausted", Source: "token_groups"}

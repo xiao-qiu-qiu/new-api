@@ -578,12 +578,12 @@ func TestChannelAffinityRetryPriorities(t *testing.T) {
 				common.MemoryCacheEnabled = cached
 				model.InitChannelCache()
 				for _, tc := range []struct {
-					name, mode string
-					binding    int
-					retries    int
-					autoGroups []string
-					crossGroup bool
-					want       []int
+					name, mode                string
+					binding                   int
+					retries                   int
+					autoGroups                []string
+					crossGroup, capacityFirst bool
+					want                      []int
 				}{
 					{name: "ordinary routing", mode: "off", retries: 2, want: []int{24, 27, 30}},
 					{name: "affinity miss", mode: "prefer", retries: 2, want: []int{24, 27, 30}},
@@ -592,7 +592,10 @@ func TestChannelAffinityRetryPriorities(t *testing.T) {
 					{name: "one retry", mode: "prefer", binding: 27, retries: 1, want: []int{27, 24}},
 					{name: "strict session", mode: "strict", binding: 27, retries: 2, want: []int{27}},
 					{name: "auto group", mode: "prefer", binding: 27, retries: 1, autoGroups: []string{"default", "vip"}, want: []int{27, 24}},
+					{name: "cross group without affinity", mode: "prefer", retries: 1, autoGroups: []string{"default", "vip"}, crossGroup: true, want: []int{24, 27, 34, 37}},
 					{name: "cross group", mode: "prefer", binding: 27, retries: 1, autoGroups: []string{"default", "vip"}, crossGroup: true, want: []int{27, 24, 34, 37}},
+					{name: "cross group strict session", mode: "strict", binding: 27, retries: 1, autoGroups: []string{"default", "vip"}, crossGroup: true, want: []int{27}},
+					{name: "cross group after bound channel capacity failure", mode: "prefer", binding: 27, retries: 1, autoGroups: []string{"default", "vip"}, crossGroup: true, capacityFirst: true, want: []int{27, 24, 30, 34, 37}},
 					{name: "skip empty group", mode: "prefer", binding: 27, retries: 1, autoGroups: []string{"empty", "default"}, want: []int{27, 24, 27}},
 				} {
 					t.Run(fmt.Sprintf("cache=%t/%s", cached, tc.name), func(t *testing.T) {
@@ -624,9 +627,8 @@ func TestChannelAffinityRetryPriorities(t *testing.T) {
 						require.Nil(t, selectionErr)
 						require.NotNil(t, channel)
 						retry := &service.RetryParam{Ctx: ctx, TokenGroup: group, ModelName: modelName}
-						upstreamErr := types.NewOpenAIError(errors.New("upstream failure"), types.ErrorCodeBadResponseStatusCode, http.StatusInternalServerError)
 						var attempts []int
-						for ; retry.GetRetry() <= common.RetryTimes; retry.IncreaseRetry() {
+						for ; retry.GetRetry() <= service.ChannelFailoverRetryBudget(ctx); retry.IncreaseRetry() {
 							if len(attempts) > 0 {
 								var err error
 								channel, _, err = service.CacheGetRandomSatisfiedChannel(retry)
@@ -638,7 +640,11 @@ func TestChannelAffinityRetryPriorities(t *testing.T) {
 							service.AppendUsedChannel(ctx, channel.Id)
 							attempts = append(attempts, channel.Id)
 							require.LessOrEqual(t, len(attempts), len(tc.want), "retry budget must not increase")
-							if service.DecideRelayRetry(ctx, upstreamErr, common.RetryTimes-retry.GetRetry()).Action != "retry" {
+							upstreamErr := types.NewOpenAIError(errors.New("upstream failure"), types.ErrorCodeBadResponseStatusCode, http.StatusInternalServerError)
+							if tc.capacityFirst && len(attempts) == 1 {
+								upstreamErr = types.WithOpenAIError(types.OpenAIError{Code: "no_available_accounts"}, http.StatusServiceUnavailable)
+							}
+							if retry.DecideRelayRetry(upstreamErr).Action != "retry" {
 								break
 							}
 						}
